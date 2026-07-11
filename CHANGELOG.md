@@ -2,6 +2,18 @@
 
 Mọi thay đổi đáng chú ý được ghi ở đây. Định dạng theo [Keep a Changelog], phiên bản theo [SemVer].
 
+## [0.4.1] - 2026-07-12
+
+### Thêm
+
+- **Sniff manifest HLS/DASH bị nguỵ trang**: hook `fetch`/`XMLHttpRequest` ở main world đọc
+  ~256 byte đầu của response để nhận diện playlist thật (`#EXTM3U` → HLS, `<?xml`/`<MPD` → DASH)
+  ngay cả khi URL/đuôi/`Content-Type` bị giả (vd segment `.ts` đặt tên `.jpg`). Nhờ đó tải được
+  video ở các trang giấu URL bằng MSE. Dedupe theo URL tuyệt đối; đọc chunk đầu rồi `cancel`
+  nên không tiêu thụ body của player; toàn bộ non-blocking, bọc `try/catch`.
+- Message runtime `media/manifest`: background ghi thẳng `MediaItem` type `hls`/`dash` (bỏ qua
+  đoán loại theo đuôi URL), sau đó dùng lại pipeline tải & ghép HLS sẵn có.
+
 ## [0.4.0] - 2026-07-12
 
 Bản phát hành đầu tiên đầy đủ tính năng.

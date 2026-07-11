@@ -103,6 +103,36 @@ export default defineBackground(() => {
     }
   }
 
+  // Ghi manifest HLS/DASH bị nguỵ trang (content script sniff từ body). URL có thể mang đuôi giả
+  // (.jpg) nên KHÔNG qua classifyMedia -> tạo item type 'hls'/'dash' TRỰC TIẾP theo mediaType đã nhận.
+  async function recordManifestMedia(input: {
+    url: string;
+    mediaType: ManifestKind;
+    tabId: number;
+    pageUrl?: string;
+    title?: string;
+  }): Promise<void> {
+    if (input.tabId < 0) return;
+    const item: MediaItem = {
+      id: mediaId(input.url),
+      type: input.mediaType,
+      url: input.url,
+      tabId: input.tabId,
+      pageUrl: input.pageUrl,
+      title: input.title,
+      detectedAt: Date.now(),
+      detectSource: 'network',
+    };
+    try {
+      await serialize(async () => {
+        const count = await addTabMedia(input.tabId, item);
+        if (count !== null) await updateBadge(input.tabId, count);
+      });
+    } catch {
+      // best-effort.
+    }
+  }
+
   const filter = { urls: ['<all_urls>'] };
 
   browser.webRequest.onBeforeRequest.addListener((details): undefined => {
@@ -248,6 +278,15 @@ export default defineBackground(() => {
       if (message.kind === 'media/mse') {
         void recordBlobMedia({
           url: message.url,
+          tabId,
+          pageUrl: sender.tab?.url,
+          title: sender.tab?.title,
+        });
+      }
+      if (message.kind === 'media/manifest') {
+        void recordManifestMedia({
+          url: message.url,
+          mediaType: message.mediaType,
           tabId,
           pageUrl: sender.tab?.url,
           title: sender.tab?.title,

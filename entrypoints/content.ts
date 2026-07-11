@@ -74,10 +74,23 @@ export default defineContentScript({
         __yvim?: string;
         kind?: string;
         url?: string;
+        mediaType?: string;
       } | null;
       if (!data || data.__yvim !== 'yvim-mse') return;
       if (data.kind === 'mse-detected' && typeof data.url === 'string') {
         void sendRuntimeMessage({ kind: 'media/mse', url: data.url });
+      }
+      // Manifest HLS/DASH bị nguỵ trang (mse-hook đã sniff từ body) -> forward tới background.
+      if (
+        data.kind === 'manifest' &&
+        typeof data.url === 'string' &&
+        (data.mediaType === 'hls' || data.mediaType === 'dash')
+      ) {
+        void sendRuntimeMessage({
+          kind: 'media/manifest',
+          url: data.url,
+          mediaType: data.mediaType,
+        });
       }
     });
   },

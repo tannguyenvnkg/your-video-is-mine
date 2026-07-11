@@ -39,6 +39,8 @@ export type HlsDownloadResponse =
 export type RuntimeMessage =
   | { kind: 'media/dom'; candidates: DomMediaCandidate[] }
   | { kind: 'media/mse'; url: string }
+  // content script sniff được manifest HLS/DASH bị nguỵ trang (đọc #EXTM3U/<MPD từ body).
+  | { kind: 'media/manifest'; url: string; mediaType: ManifestKind }
   | { kind: 'manifest/variants'; url: string; mediaType: ManifestKind }
   | { kind: 'download/progressive'; url: string; tabId: number }
   | { kind: 'ffmpeg/demo' }
