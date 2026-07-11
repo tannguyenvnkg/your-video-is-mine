@@ -35,10 +35,8 @@ jobs:
           pnpm lint
           pnpm test
 
-      - name: Đóng gói (Chrome/Edge MV3 + Firefox)
-        run: |
-          pnpm zip
-          pnpm zip:firefox
+      - name: Đóng gói (Chrome/Edge MV3)
+        run: pnpm zip
 
       - name: Tạo GitHub Release + đính kèm .zip
         uses: softprops/action-gh-release@v2
