@@ -1,0 +1,5 @@
+# pnpm v11 quản lý build-script của dependency ở đây (map allowBuilds).
+# esbuild cần chạy build để vite/wxt build được; spawn-sync không cần.
+allowBuilds:
+  esbuild: true
+  spawn-sync: false

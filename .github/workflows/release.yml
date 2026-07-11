@@ -1,0 +1,48 @@
+name: Release
+
+# Kích hoạt khi push tag dạng v* (vd v0.4.0) -> build + đóng gói .zip + tạo GitHub Release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Kiểm tra (compile + lint + test)
+        run: |
+          pnpm compile
+          pnpm lint
+          pnpm test
+
+      - name: Đóng gói (Chrome/Edge MV3 + Firefox)
+        run: |
+          pnpm zip
+          pnpm zip:firefox
+
+      - name: Tạo GitHub Release + đính kèm .zip
+        uses: softprops/action-gh-release@v2
+        with:
+          files: .output/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -1,0 +1,41 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+.output
+
+# ffmpeg core đóng gói local (32MB, sinh lại từ node_modules qua scripts/copy-ffmpeg-core.mjs)
+public/ffmpeg
+stats.html
+stats-*.json
+.wxt
+web-ext.config.ts
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# AI / local-only — KHÔNG commit (bộ nhớ trợ lý, lộ trình, skills...)
+.claude/
+CLAUDE.md
+AGENTS.md
+skills-lock.json
+.agents/
+.codegraph/
+.gitnexus/
+LO-TRI~1.MD
+PROMPT-SESSION-MOI.md
+
