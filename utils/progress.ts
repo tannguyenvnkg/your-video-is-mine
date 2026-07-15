@@ -20,7 +20,8 @@ export interface FetchStats {
 }
 
 export function computeFetchStats(input: FetchStatsInput): FetchStats {
-  const { segmentsDone, segmentsTotal, bytesDownloaded, startedAt, now } = input;
+  const { segmentsDone, segmentsTotal, bytesDownloaded, startedAt, now } =
+    input;
   const pct =
     segmentsTotal > 0
       ? Math.min(100, Math.round((segmentsDone / segmentsTotal) * 100))

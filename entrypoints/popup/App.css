@@ -267,3 +267,31 @@
     left: 100%;
   }
 }
+
+/* Banner báo bản mới trên GitHub Releases (v0.6.0).
+   Dùng màu nhấn + color inherit để chạy được cả nền sáng lẫn tối (xem :root color-scheme). */
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 6px 8px;
+  border: 1px solid rgba(47, 111, 235, 0.5);
+  border-radius: 8px;
+}
+
+.update-text {
+  flex: 1 1 auto;
+  font-size: 0.78rem;
+}
+
+/* Giữ color: inherit của .ghost-btn: chữ #2f6feb chỉ đạt 4.10:1 trên nền tối (WCAG AA cần 4.5).
+   Nhấn bằng viền + nền hover thay vì đổi màu chữ -> đủ tương phản ở cả nền sáng lẫn tối. */
+.update-btn {
+  flex: 0 0 auto;
+  border-color: rgba(47, 111, 235, 0.6);
+}
+
+.update-btn:hover {
+  background: rgba(47, 111, 235, 0.12);
+}

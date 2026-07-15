@@ -3,6 +3,7 @@
 // - Trạng thái tải progressive (session): map theo downloadId.
 // - Tiến trình job HLS (session): map theo jobId.
 // - Cài đặt (local): chất lượng ưa thích, thư mục tải, ngưỡng cảnh báo dung lượng.
+// - Cache kiểm tra bản mới trên GitHub Releases (local): tag + link + lúc kiểm tra.
 
 import type { MediaItem, MediaType } from './types';
 import { upsertMedia } from './detect';
@@ -15,6 +16,7 @@ const DOWNLOAD_FOLDER_KEY = 'settings:downloadFolder';
 const SIZE_WARN_KEY = 'settings:sizeWarnBytes';
 const CONCURRENCY_KEY = 'settings:concurrency';
 const ENABLED_TYPES_KEY = 'settings:enabledTypes';
+const UPDATE_CHECK_KEY = 'settings:updateCheck';
 
 // Tuần tự hoá ghi storage (downloads/hlsjobs) trong 1 context để tránh race read-modify-write.
 let writeChain: Promise<unknown> = Promise.resolve();
@@ -143,13 +145,7 @@ export async function getDownloadById(
 // --- Tiến trình job HLS (session), keyed theo jobId ---
 
 export type HlsPhase =
-  | 'loading'
-  | 'fetching'
-  | 'muxing'
-  | 'saving'
-  | 'done'
-  | 'error'
-  | 'cancelled';
+  'loading' | 'fetching' | 'muxing' | 'saving' | 'done' | 'error' | 'cancelled';
 
 export interface HlsJob {
   id: string;
@@ -266,4 +262,44 @@ export async function getEnabledTypes(): Promise<EnabledTypes> {
 
 export async function setEnabledTypes(types: EnabledTypes): Promise<void> {
   await browser.storage.local.set({ [ENABLED_TYPES_KEY]: types });
+}
+
+/** TTL cache kiểm tra bản mới: 6 giờ (GitHub giới hạn 60 request/giờ/IP). */
+export const UPDATE_CHECK_TTL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Kết quả kiểm tra GitHub Releases đã cache.
+ * Lưu TAG THÔ chứ KHÔNG lưu cờ "có bản mới": phải so với version đang chạy lúc render,
+ * nếu không banner sẽ còn báo mãi sau khi người dùng đã cập nhật (tới khi hết TTL).
+ */
+export interface UpdateCheck {
+  /** Tag GitHub, dạng "v0.6.0". */
+  latestTag: string;
+  /** Link trang Release để mở cho người dùng tải tay. */
+  releaseUrl: string;
+  /** epoch ms lúc gọi API thành công. */
+  checkedAt: number;
+}
+
+export async function getUpdateCheck(): Promise<UpdateCheck | null> {
+  const res = await browser.storage.local.get(UPDATE_CHECK_KEY);
+  const v = res[UPDATE_CHECK_KEY] as Partial<UpdateCheck> | undefined;
+  if (
+    typeof v?.latestTag !== 'string' ||
+    typeof v?.releaseUrl !== 'string' ||
+    typeof v?.checkedAt !== 'number'
+  ) {
+    return null; // thiếu/hỏng -> coi như chưa kiểm tra, sẽ gọi lại API.
+  }
+  // Giá trị đến từ mạng và sẽ được mở bằng tabs.create -> chỉ nhận link github.com.
+  if (!v.releaseUrl.startsWith('https://github.com/')) return null;
+  return {
+    latestTag: v.latestTag,
+    releaseUrl: v.releaseUrl,
+    checkedAt: v.checkedAt,
+  };
+}
+
+export async function setUpdateCheck(check: UpdateCheck): Promise<void> {
+  await browser.storage.local.set({ [UPDATE_CHECK_KEY]: check });
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { formatVersionLabel } from '@/utils/version';
+import { formatVersionLabel, isUpdateAvailable } from '@/utils/version';
+import { fetchLatestRelease } from '@/utils/update';
 import { shortenUrl } from '@/utils/detect';
 import {
   computeFetchStats,
@@ -19,6 +20,7 @@ import {
   type DownloadEntry,
   type EnabledTypes,
   type HlsJob,
+  type UpdateCheck,
 } from '@/utils/storage';
 import {
   requestDownload,
@@ -68,6 +70,25 @@ function downloadStatusText(entry: DownloadEntry): string {
   }
 }
 
+/**
+ * Banner báo có bản mới trên GitHub Releases.
+ * Không tự cập nhật được (cài bằng load unpacked) -> chỉ mở trang Release cho người dùng tải tay.
+ */
+function UpdateBanner({ update }: { update: UpdateCheck }) {
+  return (
+    <div className="update-banner">
+      <span className="update-text">Có bản mới {update.latestTag}</span>
+      <button
+        type="button"
+        className="ghost-btn update-btn"
+        onClick={() => void browser.tabs.create({ url: update.releaseUrl })}
+      >
+        Tải về
+      </button>
+    </div>
+  );
+}
+
 /** Hiển thị tiến trình HLS đầy đủ theo phase: nhãn + % + tốc độ + ETA + thanh bar. */
 function HlsProgress({ job, now }: { job: HlsJob; now: number }) {
   if (job.phase === 'loading') {
@@ -92,7 +113,9 @@ function HlsProgress({ job, now }: { job: HlsJob; now: number }) {
       <div className="hls-progress">
         <span className="hls-label">
           Đang tải: {job.segmentsDone}/{job.segmentsTotal} segment · {s.pct}%
-          {s.speedBytesPerSec > 0 ? ` · ${formatSpeed(s.speedBytesPerSec)}` : ''}
+          {s.speedBytesPerSec > 0
+            ? ` · ${formatSpeed(s.speedBytesPerSec)}`
+            : ''}
           {` · còn ${formatEta(s.etaSec)}`}
         </span>
         <div className="progress-bar">
@@ -425,6 +448,7 @@ function App() {
   const [enabledTypes, setEnabledTypes] = useState<EnabledTypes>(
     DEFAULT_ENABLED_TYPES,
   );
+  const [update, setUpdate] = useState<UpdateCheck | null>(null);
   // Tick 1s để ETA đếm mượt giữa các lần cập nhật storage.
   const [now, setNow] = useState(() => Date.now());
 
@@ -436,6 +460,18 @@ function App() {
       // ngoài ngữ cảnh extension.
     }
     void (async () => setEnabledTypes(await getEnabledTypes()))();
+  }, []);
+
+  // Kiểm tra bản mới (qua cache 6h). Lỗi -> trả null, không báo gì: tính năng phụ, không làm phiền.
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const info = await fetchLatestRelease();
+      if (alive) setUpdate(info);
+    })();
+    return () => {
+      alive = false;
+    };
   }, []);
 
   const load = useCallback(async (id: number) => {
@@ -497,6 +533,9 @@ function App() {
       <h1 className="title">
         {formatVersionLabel('Your Video Is Mine', version)}
       </h1>
+      {update && isUpdateAvailable(update.latestTag, version) && (
+        <UpdateBanner update={update} />
+      )}
       {visible.length === 0 ? (
         <p className="hint">
           Chưa phát hiện video — thử phát video trên trang rồi mở lại popup.
