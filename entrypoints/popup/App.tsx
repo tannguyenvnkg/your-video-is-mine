@@ -2,6 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 import { formatVersionLabel } from '@/utils/version';
 import { shortenUrl } from '@/utils/detect';
 import {
+  computeFetchStats,
+  formatBytes,
+  formatEta,
+  formatSpeed,
+} from '@/utils/progress';
+import {
   DEFAULT_ENABLED_TYPES,
   getDownloads,
   getEnabledTypes,
@@ -31,18 +37,6 @@ const TYPE_LABEL: Record<MediaItem['type'], string> = {
   progressive: 'MP4',
   blob: 'BLOB',
 };
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  const units = ['KB', 'MB', 'GB', 'TB'];
-  let v = n / 1024;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(1)} ${units[i]}`;
-}
 
 function friendlyDownloadError(code?: string): string {
   switch (code) {
@@ -74,22 +68,76 @@ function downloadStatusText(entry: DownloadEntry): string {
   }
 }
 
-function hlsJobStatusText(job: HlsJob): string {
-  switch (job.phase) {
-    case 'fetching': {
-      if (job.segmentsTotal <= 0) return 'Đang chuẩn bị…';
-      const pct = Math.round((job.segmentsDone / job.segmentsTotal) * 100);
-      return `Đang tải segment ${job.segmentsDone}/${job.segmentsTotal} (${pct}%)`;
-    }
-    case 'muxing':
-      return 'Đang ghép video…';
-    case 'done':
-      return 'Đã ghép xong ✓ — đang lưu về máy';
-    case 'cancelled':
-      return 'Đã huỷ';
-    case 'error':
-      return `Lỗi: ${job.error ?? 'không rõ'}`;
+/** Hiển thị tiến trình HLS đầy đủ theo phase: nhãn + % + tốc độ + ETA + thanh bar. */
+function HlsProgress({ job, now }: { job: HlsJob; now: number }) {
+  if (job.phase === 'loading') {
+    return (
+      <div className="hls-progress">
+        <span className="hls-label">
+          Đang nạp bộ xử lý video… (lần đầu hơi lâu)
+        </span>
+        <div className="progress-bar indeterminate" />
+      </div>
+    );
   }
+  if (job.phase === 'fetching') {
+    const s = computeFetchStats({
+      segmentsDone: job.segmentsDone,
+      segmentsTotal: job.segmentsTotal,
+      bytesDownloaded: job.bytesDownloaded ?? 0,
+      startedAt: job.startedAt ?? now,
+      now,
+    });
+    return (
+      <div className="hls-progress">
+        <span className="hls-label">
+          Đang tải: {job.segmentsDone}/{job.segmentsTotal} segment · {s.pct}%
+          {s.speedBytesPerSec > 0 ? ` · ${formatSpeed(s.speedBytesPerSec)}` : ''}
+          {` · còn ${formatEta(s.etaSec)}`}
+        </span>
+        <div className="progress-bar">
+          <div className="progress-fill" style={{ width: `${s.pct}%` }} />
+        </div>
+      </div>
+    );
+  }
+  if (job.phase === 'muxing') {
+    const pct =
+      job.muxProgress != null ? Math.round(job.muxProgress * 100) : null;
+    return (
+      <div className="hls-progress">
+        <span className="hls-label">
+          Đang ghép video…{pct != null ? ` ${pct}%` : ''}
+        </span>
+        {pct != null && pct > 0 ? (
+          <div className="progress-bar">
+            <div className="progress-fill" style={{ width: `${pct}%` }} />
+          </div>
+        ) : (
+          <div className="progress-bar indeterminate" />
+        )}
+      </div>
+    );
+  }
+  if (job.phase === 'saving') {
+    return (
+      <div className="hls-progress">
+        <span className="hls-label">Đang lưu file…</span>
+        <div className="progress-bar indeterminate" />
+      </div>
+    );
+  }
+  if (job.phase === 'done') {
+    return <span className="dl-status dl-complete">Đã tải xong ✓</span>;
+  }
+  if (job.phase === 'cancelled') {
+    return <span className="dl-status">Đã huỷ</span>;
+  }
+  return (
+    <span className="dl-status dl-interrupted">
+      Lỗi: {job.error ?? 'không rõ'}
+    </span>
+  );
 }
 
 function nearestByHeight(
@@ -114,11 +162,13 @@ function MediaRow({
   tabId,
   download,
   hlsJob,
+  now,
 }: {
   media: MediaItem;
   tabId: number | null;
   download?: DownloadEntry;
   hlsJob?: HlsJob;
+  now: number;
 }) {
   const [copied, setCopied] = useState(false);
   const [open, setOpen] = useState(false);
@@ -127,12 +177,17 @@ function MediaRow({
   const [error, setError] = useState<string | null>(null);
   const [selectedUri, setSelectedUri] = useState<string | null>(null);
   const [dlError, setDlError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
 
   const canPickQuality = media.type === 'hls' || media.type === 'dash';
   const isProgressive = media.type === 'progressive';
   const isHls = media.type === 'hls';
   const isBlob = media.type === 'blob';
-  const jobBusy = hlsJob?.phase === 'fetching' || hlsJob?.phase === 'muxing';
+  const jobBusy =
+    hlsJob?.phase === 'loading' ||
+    hlsJob?.phase === 'fetching' ||
+    hlsJob?.phase === 'muxing' ||
+    hlsJob?.phase === 'saving';
 
   const copy = useCallback(async () => {
     try {
@@ -155,7 +210,14 @@ function MediaRow({
     async (variant: VariantInfo) => {
       if (tabId == null) return;
       setDlError(null);
-      const est = await requestHlsEstimate(variant.uri, variant.bandwidth);
+      // Bỏ khoảng im lặng: hiện "Đang kiểm tra…" trong lúc ước tính (job chưa tồn tại).
+      setChecking(true);
+      let est: Awaited<ReturnType<typeof requestHlsEstimate>>;
+      try {
+        est = await requestHlsEstimate(variant.uri, variant.bandwidth);
+      } finally {
+        setChecking(false);
+      }
       if (!est.ok) {
         setDlError(est.error);
         return;
@@ -281,8 +343,8 @@ function MediaRow({
       )}
 
       {hlsJob && (
-        <p className={`dl-status dl-hls-${hlsJob.phase}`}>
-          {hlsJobStatusText(hlsJob)}
+        <div className={`dl-hls-${hlsJob.phase}`}>
+          <HlsProgress job={hlsJob} now={now} />
           {jobBusy && (
             <button
               type="button"
@@ -292,8 +354,9 @@ function MediaRow({
               Hủy
             </button>
           )}
-        </p>
+        </div>
       )}
+      {checking && <p className="muted">Đang kiểm tra dung lượng…</p>}
       {dlError && <p className="error">{dlError}</p>}
 
       {open && (
@@ -362,6 +425,8 @@ function App() {
   const [enabledTypes, setEnabledTypes] = useState<EnabledTypes>(
     DEFAULT_ENABLED_TYPES,
   );
+  // Tick 1s để ETA đếm mượt giữa các lần cập nhật storage.
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     try {
@@ -410,6 +475,19 @@ function App() {
     return () => browser.storage.onChanged.removeListener(listener);
   }, [tabId, load]);
 
+  const anyJobActive = Object.values(hlsJobs).some(
+    (j) =>
+      j.phase === 'loading' ||
+      j.phase === 'fetching' ||
+      j.phase === 'muxing' ||
+      j.phase === 'saving',
+  );
+  useEffect(() => {
+    if (!anyJobActive) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [anyJobActive]);
+
   const downloadIndex = buildDownloadIndex(downloads);
   const hlsJobIndex = buildHlsJobIndex(hlsJobs);
   const visible = items.filter((m) => enabledTypes[m.type]);
@@ -432,6 +510,7 @@ function App() {
               tabId={tabId}
               download={downloadIndex.get(m.url)}
               hlsJob={hlsJobIndex.get(m.url)}
+              now={now}
             />
           ))}
         </ul>

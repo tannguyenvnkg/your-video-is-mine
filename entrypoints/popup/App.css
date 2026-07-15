@@ -219,3 +219,51 @@
   color: #d64545;
   margin: 6px 0 0;
 }
+.dl-hls-loading,
+.dl-hls-saving {
+  color: #2f6feb;
+  margin: 6px 0 0;
+}
+
+/* Thanh tiến trình tải/ghép HLS (v0.5.0) */
+.hls-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+}
+.hls-label {
+  font-size: 12px;
+  color: #cbd5e1;
+}
+.progress-bar {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: #1f2937;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: #1a7f37;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+.progress-bar.indeterminate::after {
+  content: '';
+  position: absolute;
+  left: -40%;
+  width: 40%;
+  height: 100%;
+  border-radius: 999px;
+  background: #2f6feb;
+  animation: yvim-indeterminate 1.1s infinite ease-in-out;
+}
+@keyframes yvim-indeterminate {
+  0% {
+    left: -40%;
+  }
+  100% {
+    left: 100%;
+  }
+}

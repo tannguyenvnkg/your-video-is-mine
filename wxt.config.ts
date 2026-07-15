@@ -26,6 +26,7 @@ export default defineConfig({
       'declarativeNetRequestWithHostAccess',
       'scripting',
       'tabs',
+      'notifications',
     ],
     host_permissions: ['<all_urls>'],
 

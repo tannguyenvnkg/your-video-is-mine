@@ -13,6 +13,7 @@ import {
   updateHlsJob,
   type DownloadEntry,
   type DownloadState,
+  type HlsJob,
 } from '@/utils/storage';
 import { parseHlsManifest, parseHlsSegments } from '@/utils/hls';
 import { parseDashManifest } from '@/utils/dash';
@@ -323,6 +324,72 @@ export default defineBackground(() => {
     })();
   });
 
+  // --- Tiến trình HLS -> badge % trên icon + thông báo khi xong/lỗi (v0.5.0) ---
+
+  // % tổng hợp để hiện lên badge theo phase.
+  function jobBadgePct(job: HlsJob): number {
+    if (job.phase === 'fetching') {
+      return job.segmentsTotal > 0
+        ? Math.min(99, Math.round((job.segmentsDone / job.segmentsTotal) * 100))
+        : 0;
+    }
+    if (job.phase === 'muxing') {
+      return Math.min(99, Math.round((job.muxProgress ?? 0) * 100));
+    }
+    if (job.phase === 'saving') return 99;
+    return 0;
+  }
+
+  async function setBadgePct(tabId: number, pct: number): Promise<void> {
+    try {
+      await browser.action.setBadgeText({ tabId, text: `${pct}%` });
+      await browser.action.setBadgeBackgroundColor({ tabId, color: '#1a7f37' });
+    } catch {
+      // tab có thể đã đóng.
+    }
+  }
+
+  function notify(title: string, message: string): void {
+    try {
+      browser.notifications.create({
+        type: 'basic',
+        iconUrl: browser.runtime.getURL('/icon/128.png'),
+        title,
+        message,
+      });
+    } catch {
+      // notifications có thể không khả dụng.
+    }
+  }
+
+  const ACTIVE_PHASES = new Set(['fetching', 'muxing', 'saving']);
+  const DONE_PHASES = new Set(['done', 'error', 'cancelled']);
+
+  browser.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'session' || !changes.hlsjobs) return;
+    const oldJobs = (changes.hlsjobs.oldValue ?? {}) as Record<string, HlsJob>;
+    const newJobs = (changes.hlsjobs.newValue ?? {}) as Record<string, HlsJob>;
+    void (async () => {
+      for (const [id, job] of Object.entries(newJobs)) {
+        if (job.tabId == null) continue;
+        const prevPhase = oldJobs[id]?.phase;
+        if (ACTIVE_PHASES.has(job.phase)) {
+          await setBadgePct(job.tabId, jobBadgePct(job));
+        } else if (DONE_PHASES.has(job.phase) && prevPhase !== job.phase) {
+          // Khôi phục badge số lượng media của tab.
+          const count = (await getTabMedia(job.tabId)).length;
+          await updateBadge(job.tabId, count);
+          const name = job.filename?.split('/').pop() ?? 'video';
+          if (job.phase === 'done') {
+            notify('Đã tải xong', name);
+          } else if (job.phase === 'error') {
+            notify('Tải thất bại', job.error ?? 'Lỗi không rõ');
+          }
+        }
+      }
+    })();
+  });
+
   browser.tabs.onRemoved.addListener((tabId) => {
     void clearTabMedia(tabId);
   });
@@ -439,10 +506,11 @@ async function handleHlsDownload(
       id: jobId,
       mediaUrl,
       variantUrl,
-      phase: 'fetching',
+      phase: 'loading',
       segmentsTotal: 0,
       segmentsDone: 0,
       filename,
+      tabId,
     });
     await ensureOffscreen();
     void browser.runtime.sendMessage({

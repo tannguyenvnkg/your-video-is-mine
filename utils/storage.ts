@@ -142,7 +142,14 @@ export async function getDownloadById(
 
 // --- Tiến trình job HLS (session), keyed theo jobId ---
 
-export type HlsPhase = 'fetching' | 'muxing' | 'done' | 'error' | 'cancelled';
+export type HlsPhase =
+  | 'loading'
+  | 'fetching'
+  | 'muxing'
+  | 'saving'
+  | 'done'
+  | 'error'
+  | 'cancelled';
 
 export interface HlsJob {
   id: string;
@@ -153,6 +160,17 @@ export interface HlsJob {
   segmentsDone: number;
   error?: string;
   filename?: string;
+  // MỚI (tiến trình chi tiết):
+  /** tab phát hiện media -> background đặt badge % đúng tab. */
+  tabId?: number;
+  /** epoch ms lúc vào 'fetching' -> popup tính tốc độ/ETA. */
+  startedAt?: number;
+  /** tổng byte segment đã tải -> tính MB/s. */
+  bytesDownloaded?: number;
+  /** dung lượng ước tính (bandwidth × duration) -> dự phòng. */
+  bytesTotal?: number;
+  /** tiến trình ghép/remux 0..1 từ sự kiện progress ffmpeg. */
+  muxProgress?: number;
 }
 
 export async function getHlsJobs(): Promise<Record<string, HlsJob>> {

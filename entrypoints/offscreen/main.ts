@@ -20,6 +20,11 @@ let loading: Promise<FFmpeg> | null = null;
 let jobChain: Promise<void> = Promise.resolve();
 const cancelledJobs = new Set<string>();
 
+// Job đang mux hiện tại (để nối sự kiện progress của ffmpeg vào đúng job). Job chạy tuần tự
+// nên chỉ có 1 mux tại một thời điểm.
+let currentMuxJobId: string | null = null;
+let lastMuxPct = -1;
+
 // Các blob URL đang giữ (thu hồi khi background báo tải xong, hoặc sau timeout dự phòng).
 const activeBlobUrls = new Set<string>();
 const BLOB_TTL_MS = 10 * 60 * 1000;
@@ -32,9 +37,15 @@ async function ensureFfmpeg(): Promise<FFmpeg> {
     loading = (async () => {
       const ff = new FFmpeg();
       ff.on('log', ({ message }) => console.debug('[ffmpeg]', message));
-      ff.on('progress', ({ progress }) =>
-        console.debug('[ffmpeg] mux', Math.round(progress * 100), '%'),
-      );
+      // Nối tiến trình remux vào job đang mux (throttle theo bước 1% để không spam storage).
+      ff.on('progress', ({ progress }) => {
+        if (!currentMuxJobId) return;
+        const pct = Math.floor(progress * 100);
+        if (pct !== lastMuxPct) {
+          lastMuxPct = pct;
+          void updateHlsJob(currentMuxJobId, { muxProgress: progress });
+        }
+      });
       const coreURL = browser.runtime.getURL('/ffmpeg/ffmpeg-core.js');
       const wasmURL = browser.runtime.getURL('/ffmpeg/ffmpeg-core.wasm');
       await ff.load({ coreURL, wasmURL });
@@ -69,31 +80,6 @@ async function fetchWithRetry(url: string, retries = 3): Promise<ArrayBuffer> {
   );
 }
 
-/** Chạy các task async với số luồng đồng thời tối đa `limit`. */
-async function runLimited(
-  tasks: Array<() => Promise<void>>,
-  limit: number,
-): Promise<void> {
-  let next = 0;
-  let failed: unknown = null;
-  const workers = Array.from(
-    { length: Math.min(Math.max(1, limit), tasks.length) },
-    async () => {
-      // Dừng lấy task mới khi có lỗi -> KHÔNG để worker "mồ côi" chạy nền ghi đè file job sau.
-      while (next < tasks.length && failed === null) {
-        const cur = next++;
-        try {
-          await tasks[cur]!();
-        } catch (e) {
-          failed = e;
-        }
-      }
-    },
-  );
-  await Promise.all(workers); // đợi TẤT CẢ worker kết thúc trước khi trả về
-  if (failed !== null) throw failed;
-}
-
 async function runFfmpegDemo(): Promise<FfmpegDemoResponse> {
   try {
     const ff = await ensureFfmpeg();
@@ -118,6 +104,10 @@ async function runFfmpegDemo(): Promise<FfmpegDemoResponse> {
 }
 
 // --- G5: tải & ghép HLS (chạy tuần tự qua jobChain) ---
+//
+// Tối ưu tốc độ (v0.5.0): tách FETCH (mạng, song song) khỏi WRITE (FS ảo, cần ffmpeg) để
+// chồng lấn việc tải segment với việc nạp ffmpeg.wasm. Prefetch CÓ TRẦN RAM (MAX_BUFFERED)
+// để không giữ toàn bộ video trong bộ nhớ.
 
 async function runHlsJob(
   req: Extract<OffscreenRequest, { kind: 'hls/run' }>,
@@ -132,6 +122,11 @@ async function runHlsJob(
 
   try {
     throwIfCancelled();
+    await updateHlsJob(jobId, { phase: 'loading' });
+
+    // Khởi động nạp ffmpeg SONG SONG với tải playlist (chưa await vội).
+    const ffPromise = ensureFfmpeg();
+
     const playlistText = await (
       await fetch(variantUrl, { credentials: 'include' })
     ).text();
@@ -153,13 +148,17 @@ async function runHlsJob(
       return;
     }
 
-    ff = await ensureFfmpeg();
-    const ffmpegRef = ff;
     const concurrency = await getConcurrency();
+    const total = parsed.segments.length;
+    const ext = parsed.hasInit ? 'm4s' : 'ts';
+
+    // Vào 'fetching' NGAY (dù ffmpeg còn đang nạp) -> KHÔNG còn khoảng "chết".
     await updateHlsJob(jobId, {
       phase: 'fetching',
-      segmentsTotal: parsed.segments.length,
+      segmentsTotal: total,
       segmentsDone: 0,
+      bytesDownloaded: 0,
+      startedAt: Date.now(),
     });
 
     const keyCache = new Map<string, ArrayBuffer>();
@@ -171,71 +170,128 @@ async function runHlsJob(
       return kb;
     };
 
-    const ext = parsed.hasInit ? 'm4s' : 'ts';
-    const firstInit = parsed.segments.find((s) => s.initUri)?.initUri;
-    let initName: string | undefined;
-    if (firstInit) {
-      const initBuf = await fetchWithRetry(firstInit);
-      initName = 'init.mp4';
-      await ffmpegRef.writeFile(initName, new Uint8Array(initBuf));
-      writtenFiles.add(initName);
-    }
-
-    const names: string[] = new Array<string>(parsed.segments.length);
+    // Tải + giải mã 1 segment thành bytes (CHƯA ghi FS). Đếm tiến trình theo segment FETCH xong.
     let done = 0;
-    const step = Math.max(1, Math.floor(parsed.segments.length / 33));
-
-    const processSegment = async (i: number): Promise<void> => {
+    let bytesDownloaded = 0;
+    const step = Math.max(1, Math.floor(total / 33));
+    const fetchSegmentBytes = async (i: number): Promise<Uint8Array> => {
       throwIfCancelled();
       const seg = parsed.segments[i]!;
-      // An toàn: nếu segment giữa chừng dùng mã hoá khác AES-128 (mixed method) -> DỪNG.
+      // An toàn: segment giữa chừng dùng mã hoá khác AES-128 (mixed method) -> DỪNG.
       const method = seg.keyMethod;
       if (method && method !== 'NONE' && method !== 'AES-128') {
         throw new Error(`Segment dùng mã hoá không hỗ trợ: ${method}`);
       }
       let buf = await fetchWithRetry(seg.uri);
+      bytesDownloaded += buf.byteLength; // byte thô đã tải (trước giải mã)
       if (method === 'AES-128' && seg.keyUri) {
         const key = await getKey(seg.keyUri);
         const iv = hlsSegmentIv(seg.seq, seg.iv);
         buf = await decryptAes128Cbc(buf, key, iv);
       }
-      const name = `seg${String(i).padStart(5, '0')}.${ext}`;
-      await ffmpegRef.writeFile(name, new Uint8Array(buf));
-      writtenFiles.add(name);
-      names[i] = name;
       done++;
-      if (done % step === 0 || done === parsed.segments.length) {
-        await updateHlsJob(jobId, { segmentsDone: done });
+      if (done % step === 0 || done === total) {
+        await updateHlsJob(jobId, { segmentsDone: done, bytesDownloaded });
+      }
+      return new Uint8Array(buf);
+    };
+
+    // Tải init segment (fMP4) SONG SONG với prefetch bên dưới.
+    const firstInit = parsed.segments.find((s) => s.initUri)?.initUri;
+    const initPromise: Promise<Uint8Array | null> = firstInit
+      ? fetchWithRetry(firstInit).then((b) => new Uint8Array(b))
+      : Promise.resolve(null);
+
+    // Prefetch CÓ TRẦN RAM: tối đa MAX_BUFFERED segment chưa-ghi nằm trong bộ nhớ (backpressure).
+    const MAX_BUFFERED = Math.min(2 * concurrency, 12);
+    const names = new Array<string>(total);
+    const buffers = new Array<Uint8Array | undefined>(total);
+    let nextFetch = 0; // chỉ số segment kế tiếp cần fetch
+    let nextWrite = 0; // chỉ số segment kế tiếp cần ghi FS
+    let failed: unknown = null;
+
+    const ffmpegRef = await ffPromise; // chờ engine trước khi ghi FS
+    ff = ffmpegRef;
+
+    const initBytes = await initPromise;
+    let initName: string | undefined;
+    if (initBytes) {
+      initName = 'init.mp4';
+      await ffmpegRef.writeFile(initName, initBytes);
+      writtenFiles.add(initName);
+    }
+
+    // Vòng writer: ghi tuần tự theo thứ tự index để giải phóng RAM sớm.
+    const writeReady = async (): Promise<void> => {
+      while (nextWrite < total && buffers[nextWrite] !== undefined) {
+        throwIfCancelled();
+        const i = nextWrite;
+        const name = `seg${String(i).padStart(5, '0')}.${ext}`;
+        await ffmpegRef.writeFile(name, buffers[i]!);
+        writtenFiles.add(name);
+        names[i] = name;
+        buffers[i] = undefined; // giải phóng RAM ngay sau khi ghi
+        nextWrite++;
       }
     };
 
-    await runLimited(
-      parsed.segments.map((_, i) => () => processSegment(i)),
-      concurrency,
-    );
+    // Worker fetch có backpressure: dừng lấy segment mới khi bộ đệm đầy.
+    const worker = async (): Promise<void> => {
+      while (failed === null) {
+        if (nextFetch - nextWrite >= MAX_BUFFERED) {
+          await writeReady();
+          if (nextFetch - nextWrite >= MAX_BUFFERED) {
+            await new Promise((r) => setTimeout(r, 5));
+            continue;
+          }
+        }
+        const i = nextFetch;
+        if (i >= total) return;
+        nextFetch++;
+        try {
+          buffers[i] = await fetchSegmentBytes(i);
+          await writeReady();
+        } catch (e) {
+          failed = e;
+          return;
+        }
+      }
+    };
+
+    const workerCount = Math.min(Math.max(1, concurrency), total);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    if (failed !== null) throw failed;
+    await writeReady(); // ghi nốt phần còn lại
     throwIfCancelled();
 
     // Ghép: concat: protocol nối byte các segment (+ init) rồi remux sang mp4 (-c copy).
-    await updateHlsJob(jobId, { phase: 'muxing' });
+    await updateHlsJob(jobId, { phase: 'muxing', muxProgress: 0 });
     const concatList = (initName ? [initName, ...names] : names).join('|');
     const outName = 'output.mp4';
-    await ffmpegRef.exec([
-      '-i',
-      `concat:${concatList}`,
-      '-c',
-      'copy',
-      '-movflags',
-      '+faststart',
-      '-y',
-      outName,
-    ]);
+    currentMuxJobId = jobId;
+    lastMuxPct = -1;
+    try {
+      await ffmpegRef.exec([
+        '-i',
+        `concat:${concatList}`,
+        '-c',
+        'copy',
+        '-movflags',
+        '+faststart',
+        '-y',
+        outName,
+      ]);
+    } finally {
+      currentMuxJobId = null;
+    }
     writtenFiles.add(outName);
 
+    await updateHlsJob(jobId, { phase: 'saving' });
     const out = await ffmpegRef.readFile(outName);
     const outBytes =
       typeof out === 'string' ? new TextEncoder().encode(out) : out;
 
-    // Nếu user đã huỷ trong lúc mux -> DỪNG, không tải file về (tránh "hoàn tất giả").
+    // Nếu user đã huỷ trong lúc mux/lưu -> DỪNG, không tải file về (tránh "hoàn tất giả").
     throwIfCancelled();
 
     // Blob .mp4 + nhờ background tải về máy. Cast BlobPart an toàn (single-thread, no SAB).
@@ -255,7 +311,7 @@ async function runHlsJob(
     });
     await updateHlsJob(jobId, {
       phase: 'done',
-      segmentsDone: parsed.segments.length,
+      segmentsDone: total,
     });
   } catch (e) {
     if (e instanceof CancelledError) {
@@ -321,5 +377,9 @@ browser.runtime.onMessage.addListener(
     }
   },
 );
+
+// Prewarm: nạp ffmpeg NGAY khi offscreen document được tạo -> job đầu tiên không phải chờ nạp
+// (offscreen chỉ được tạo khi cần ffmpeg/hls/demo nên không lãng phí).
+void ensureFfmpeg().catch(() => undefined);
 
 console.debug('[offscreen] ready');

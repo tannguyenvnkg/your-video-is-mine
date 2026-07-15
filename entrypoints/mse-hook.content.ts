@@ -57,7 +57,10 @@ export default defineContentScript({
       const s = head.trimStart();
       if (s.startsWith('#EXTM3U')) return 'hls';
       // DASH: tài liệu XML có phần tử gốc <MPD>.
-      if ((s.startsWith('<?xml') || s.startsWith('<MPD')) && s.includes('MPD')) {
+      if (
+        (s.startsWith('<?xml') || s.startsWith('<MPD')) &&
+        s.includes('MPD')
+      ) {
         return 'dash';
       }
       return null;
@@ -137,7 +140,14 @@ export default defineContentScript({
           // ignore
         }
         // Mặc định async = true (đúng hành vi XHR khi bỏ tham số).
-        return origOpen.call(this, method, url, isAsync ?? true, username, password);
+        return origOpen.call(
+          this,
+          method,
+          url,
+          isAsync ?? true,
+          username,
+          password,
+        );
       } as typeof XHRProto.open;
 
       const origSend = XHRProto.send;
@@ -152,9 +162,9 @@ export default defineContentScript({
               if (this.responseType === '' || this.responseType === 'text') {
                 const text = this.responseText;
                 if (text) {
-                  const t = sniffManifest(text.slice(0, 256));
                   const u = (this as XMLHttpRequest & { __yvimUrl?: string })
                     .__yvimUrl;
+                  const t = sniffManifest(text.slice(0, 256));
                   if (t && u) reportManifest(u, t);
                 }
               }
