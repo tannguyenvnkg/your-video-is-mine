@@ -2,6 +2,34 @@
 
 Mọi thay đổi đáng chú ý được ghi ở đây. Định dạng theo [Keep a Changelog], phiên bản theo [SemVer].
 
+## [0.5.0] - 2026-07-15
+
+### Thêm
+
+- **Tiến trình tải HLS rõ ràng**: thay thông báo mơ hồ "Đang chuẩn bị…" bằng các giai đoạn cụ thể
+  (nạp bộ xử lý → tải segment → ghép video → lưu file), kèm **phần trăm, tốc độ (MB/s), thời gian
+  còn lại (ETA)** và thanh progress. ETA đếm ngược mượt nhờ tick 1 giây trong popup.
+- **Badge % trên icon**: hiện tiến trình ngay trên icon tiện ích khi popup đóng; tự khôi phục về
+  số lượng media đã phát hiện khi tải xong/lỗi/huỷ.
+- **Thông báo hệ thống** khi tải xong hoặc gặp lỗi (quyền `notifications`).
+- Tiến trình ghép video (`muxing`) nay hiện **% thật** từ sự kiện progress của ffmpeg (throttle 1%);
+  tự chuyển sang thanh chạy vô định nếu ffmpeg chưa báo số.
+- `utils/progress.ts`: helper thuần tính %/tốc độ/ETA + định dạng, có unit test.
+
+### Tối ưu
+
+- **Nạp ffmpeg.wasm song song với tải dữ liệu** thay vì nối đuôi: engine được prewarm ngay khi
+  offscreen khởi tạo, và playlist/key AES/init segment tải đồng thời lúc engine đang nạp.
+- **Prefetch segment có trần RAM**: tách khâu *tải* (mạng, song song) khỏi khâu *ghi* (FS ảo, cần
+  ffmpeg) với backpressure `MAX_BUFFERED = min(2×luồng, 12)` segment — segment bắt đầu tải ngay
+  trong lúc ffmpeg còn đang nạp, lấp khoảng "chết" ~2–4s mà KHÔNG giữ cả video trong bộ nhớ.
+- Tiến trình đếm theo segment **tải xong** (đúng thứ người dùng chờ), giải phóng RAM ngay sau khi ghi.
+
+### Sửa
+
+- Bỏ log chẩn đoán (`[yvim]`/`[yvim-iso]`/`[yvim-bg]`) còn sót từ đợt điều tra phát hiện manifest —
+  không còn log thừa ở console người dùng cuối. Logic hook sniff giữ nguyên.
+
 ## [0.4.1] - 2026-07-12
 
 ### Thêm
