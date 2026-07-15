@@ -2,6 +2,26 @@
 
 Mọi thay đổi đáng chú ý được ghi ở đây. Định dạng theo [Keep a Changelog], phiên bản theo [SemVer].
 
+## [0.6.0] - 2026-07-15
+
+### Thêm
+
+- **Banner báo bản mới**: mở popup, nếu GitHub Releases có bản mới hơn bản đang cài thì hiện
+  "Có bản mới vX.Y.Z" kèm nút **Tải về** mở thẳng trang Release. Tiện ích cài bằng load unpacked
+  (không qua Web Store) nên **không tự cập nhật được** — banner chỉ báo để tải tay.
+- `utils/version.ts`: so sánh **SemVer thuần** (`parseVersion`/`compareVersions`/`isUpdateAvailable`),
+  bỏ tiền tố `v` của tag, xử lý đúng prerelease theo §11 — so chuỗi sẽ sai (`0.10.0` > `0.9.0`).
+- `utils/update.ts`: gọi GitHub Releases API + **cache 6 giờ** trong `storage.local`
+  (GitHub giới hạn 60 request/giờ/IP) — không gọi API mỗi lần mở popup.
+
+### Ghi chú kỹ thuật
+
+- Không cần quyền mới: `host_permissions` đã là `<all_urls>`, CSP không chặn `connect-src`.
+- Cache lưu **tag thô** rồi so với version lúc render, nhờ vậy banner tự tắt ngay sau khi cập nhật
+  (không chờ hết TTL). Dữ liệu từ mạng được kiểm kiểu và chỉ nhận link `https://github.com/`.
+- Lỗi mạng/timeout/hết quota đều **im lặng** (giữ cache cũ, không hiện lỗi) — đây là tính năng phụ.
+- Không gửi cookie sang API (`credentials: 'omit'`).
+
 ## [0.5.0] - 2026-07-15
 
 ### Thêm
