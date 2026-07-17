@@ -25,8 +25,7 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "postinstall": "node scripts/copy-ffmpeg-core.mjs && wxt prepare",
-    "e2e:demuxed-fixture": "node e2e/demuxed.mjs"
+    "postinstall": "node scripts/copy-ffmpeg-core.mjs && wxt prepare"
   },
   "dependencies": {
     "@ffmpeg/core": "^0.12.10",

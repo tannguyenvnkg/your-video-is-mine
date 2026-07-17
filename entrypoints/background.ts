@@ -276,7 +276,7 @@ export default defineBackground(() => {
           message.mediaUrl,
           message.tabId,
           message.jobId,
-          message.spoofHost,
+          message.spoofHosts,
         );
         return undefined;
       }
@@ -498,22 +498,37 @@ async function handleDownload(
   }
 }
 
+/** Máy chủ trả mã lỗi — giữ lại `status` để thông báo còn chỉ đúng hướng (403 = chống hotlink). */
+class HttpError extends Error {
+  constructor(readonly status: number) {
+    super(`HTTP ${status}`);
+  }
+}
+
 async function handleHlsEstimate(
   variantUrl: string,
   bandwidth?: number,
   audioUrl?: string,
 ): Promise<HlsEstimateResponse> {
   try {
+    // Mã HTTP PHẢI sống sót tới tay user: "Máy chủ trả mã 403." chỉ thẳng vào chống hotlink,
+    // còn "mạng hoặc CORS" chỉ sai hướng hoàn toàn — đúng kiểu "lý do thật bốc hơi" mà chính
+    // phiên này vừa vá ở khâu ffmpeg. Ném HttpError riêng để khối catch phân biệt được.
     const fetchParse = async (url: string) => {
       const res = await fetch(url, { credentials: 'include' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new HttpError(res.status);
       return parseHlsSegments(await res.text(), url);
     };
     // W1.1: job sẽ tải CẢ playlist tiếng -> ước lượng phải soi cả nó, nếu không popup báo
     // "10 segment" rồi thanh tiến trình chạy tới 21 — trông như lỗi.
+    //
+    // ⚠️ Playlist tiếng hỏng KHÔNG được chặn đường tải: đây chỉ là bước ƯỚC LƯỢNG. Hàm này chưa
+    // gọi applySpoof (bug §2.3, để W2.2 sửa) trong khi handleHlsDownload thì CÓ -> trên site chống
+    // hotlink, playlist tiếng rất dễ 403 ở đây rồi vẫn tải ngon ở kia. Để Promise.all reject thì
+    // user mất luôn nút tải vì một con số ước lượng — đổi một phiền toái nhỏ lấy một ngõ cụt.
     const [parsed, audio] = await Promise.all([
       fetchParse(variantUrl),
-      audioUrl ? fetchParse(audioUrl) : Promise.resolve(null),
+      audioUrl ? fetchParse(audioUrl).catch(() => null) : Promise.resolve(null),
     ]);
     // Thời lượng là MAX chứ KHÔNG phải tổng: hình và tiếng chạy SONG SONG, không nối đuôi.
     const durationSec = Math.max(parsed.totalDuration, audio?.totalDuration ?? 0);
@@ -530,7 +545,10 @@ async function handleHlsEstimate(
       durationSec,
       estBytes,
     };
-  } catch {
+  } catch (e) {
+    if (e instanceof HttpError) {
+      return { ok: false, error: `Máy chủ trả mã ${e.status}.` };
+    }
     return {
       ok: false,
       error: 'Không tải/parse được playlist (mạng hoặc CORS).',
@@ -552,8 +570,14 @@ async function handleHlsDownload(
     // W1.1: playlist tiếng hay nằm cùng host với hình, nhưng KHÔNG phải luôn luôn. Spoof thêm cho
     // host của nó khi khác — nếu không, stream tách tiếng trên CDN riêng sẽ 403 đúng ở luồng tiếng
     // và ra file câm y như cũ. (Bản phủ đầy đủ mọi host/thư mục là W2.3.)
+    //
+    // ⚠️ Mọi host spoof PHẢI được theo dõi để còn DỌN. Rule DNR session sống hết phiên trình duyệt
+    // (đúng lỗi §2.10) -> sót một cái là Referer/Origin bị ghi đè cho MỌI tab tới lúc đóng trình
+    // duyệt. Đây là lý do trường này là DANH SÁCH chứ không phải một host.
+    const spoofHosts = [hostFromUrl(variantUrl)];
     if (audioUrl && hostFromUrl(audioUrl) !== hostFromUrl(variantUrl)) {
       await applySpoof(audioUrl, media?.pageUrl);
+      spoofHosts.push(hostFromUrl(audioUrl));
     }
     const folder = await getDownloadFolder();
     const filename = buildDownloadFilename({
@@ -589,7 +613,7 @@ async function handleHlsDownload(
         filename,
         mediaUrl,
         tabId,
-        spoofHost: hostFromUrl(variantUrl) ?? undefined,
+        spoofHosts: spoofHosts.filter((h): h is string => h !== null),
         // Offscreen không đọc được settings (không có chrome.storage) -> đọc hộ rồi truyền vào.
         concurrency: await getConcurrency(),
       })
@@ -614,10 +638,10 @@ async function handleBlobDownload(
   mediaUrl: string,
   _tabId: number,
   jobId: string,
-  spoofHost?: string,
+  spoofHosts?: string[],
 ): Promise<void> {
-  // Segment đã fetch xong -> xoá rule spoof cho host chứa segment.
-  if (spoofHost) void removeSpoof(spoofHost);
+  // Segment đã fetch xong -> xoá rule spoof cho MỌI host của job (hình + tiếng nếu khác host).
+  for (const h of spoofHosts ?? []) void removeSpoof(h);
   try {
     const downloadId = await browser.downloads.download({
       url: blobUrl,

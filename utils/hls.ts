@@ -71,23 +71,33 @@ function flattenGroups(groups: RawGroups, manifestUrl: string): RenditionInfo[] 
 /**
  * Danh sách rendition cho MỘT variant: bản sao của mọi rendition, cờ `selected` ở cái variant dùng.
  *
- * Chọn trong ĐÚNG group mà variant trỏ tới (`AUDIO=`), ưu tiên `DEFAULT=YES`, không có thì lấy cái
- * đầu group.
- * ⚠️ Fallback "lấy cái đầu" KHÔNG phải cho có: Twitter/X không khai `DEFAULT` bao giờ (đã đo trên
- * manifest thật) -> mọi rendition `default=false` -> chỉ dựa vào DEFAULT sẽ chọn TRƯỢT và câm y cũ.
+ * Chọn trong ĐÚNG group mà variant trỏ tới (`AUDIO=`), theo thứ tự RFC 8216 §4.3.4.1.1:
+ * `DEFAULT=YES` -> `AUTOSELECT=YES` -> cái đầu group.
  * ⚠️ Phải tra qua group của CHÍNH variant: X cấp mỗi tier hình một group tiếng riêng
  * (`audio-128000`/`64000`/`32000`), lấy `#EXT-X-MEDIA` đầu tiên sẽ ghép tiếng 128k vào hình 480x270.
+ * ⚠️ Bậc `AUTOSELECT` KHÔNG thừa: bỏ nó thì group có `Commentary` (AUTOSELECT=NO, có URI) đứng
+ * TRƯỚC `Main` (AUTOSELECT=YES, không URI) sẽ chọn trúng tiếng bình luận — file ra hình đúng,
+ * tiếng SAI HOÀN TOÀN, không một cảnh báo. Thứ tự khai trong manifest không được quyết định thay ta.
+ * ⚠️ Bậc cuối "lấy cái đầu" cũng KHÔNG thừa: Twitter/X không khai `DEFAULT` bao giờ (đã đo trên
+ * manifest thật) -> chỉ dựa vào DEFAULT sẽ chọn TRƯỢT và câm y cũ.
  */
 function renditionsForVariant(
   all: RenditionInfo[],
   groupId: string | undefined,
+  variantUri: string,
 ): RenditionInfo[] | undefined {
   if (all.length === 0) return undefined;
   const copies = all.map((r) => ({ ...r }));
   if (groupId === undefined) return copies;
   const mine = copies.filter((r) => r.groupId === groupId);
-  const chosen = mine.find((r) => r.default) ?? mine[0];
-  if (chosen) chosen.selected = true;
+  const chosen =
+    mine.find((r) => r.default) ?? mine.find((r) => r.autoselect) ?? mine[0];
+  // ⚠️ Variant AUDIO-ONLY: uri của nó CHÍNH LÀ playlist tiếng (HLS Authoring Spec §2.3 bắt buộc
+  // master có một rendition audio-only; Apple/Shaka/Bento4/MediaConvert đều phát). Chọn nó nghĩa là
+  // tải CÙNG một playlist hai lần rồi ép `-map 0:v:0` lên một input KHÔNG có hình -> ffmpeg mã 234,
+  // job lỗi cứng. Mà trước W1.1 chính variant đó tải được (ra file chỉ-tiếng hợp lệ). Không chọn gì
+  // ở đây = trả về đường một-input đã chứng minh chạy, và hết tải đôi.
+  if (chosen && chosen.uri !== variantUri) chosen.selected = true;
   return copies;
 }
 
@@ -108,9 +118,10 @@ export function parseHlsManifest(
       const attr = p.attributes ?? {};
       const res = attr.RESOLUTION;
       const bandwidth = attr.BANDWIDTH ?? attr['AVERAGE-BANDWIDTH'];
-      const audioRenditions = renditionsForVariant(allAudio, attr.AUDIO);
+      const uri = resolveUri(p.uri, manifestUrl);
+      const audioRenditions = renditionsForVariant(allAudio, attr.AUDIO, uri);
       return {
-        uri: resolveUri(p.uri, manifestUrl),
+        uri,
         name: variantLabel(res?.height, bandwidth),
         bandwidth,
         width: res?.width,
@@ -138,6 +149,12 @@ export function parseHlsManifest(
 
 export type HlsEncryption = 'none' | 'aes-128' | 'sample-aes' | 'other';
 
+/** Một đoạn byte trong file lớn. `offset` luôn TUYỆT ĐỐI (byte đầu tiên, tính từ 0). */
+export interface HlsByteRange {
+  length: number;
+  offset: number;
+}
+
 export interface HlsSegment {
   /** URL tuyệt đối của segment (.ts/.m4s). */
   uri: string;
@@ -152,6 +169,14 @@ export interface HlsSegment {
   iv?: Uint8Array;
   /** URL tuyệt đối của init segment (fMP4) nếu có #EXT-X-MAP. */
   initUri?: string;
+  /**
+   * Đoạn byte của segment trong file lớn (#EXT-X-BYTERANGE). Có mặt = MỌI segment thường trỏ
+   * CÙNG một `uri`, chỉ khác đoạn -> tầng fetch BẮT BUỘC gửi header `Range`, nếu không sẽ tải
+   * nguyên file lớn một lần cho MỖI segment (đo thật: Apple fMP4 = 27MB x 101 lần).
+   */
+  byterange?: HlsByteRange;
+  /** Đoạn byte của init segment (#EXT-X-MAP BYTERANGE). Xem chú thích ở mapper. */
+  initByterange?: HlsByteRange;
 }
 
 export interface HlsSegmentsResult {
@@ -192,6 +217,13 @@ export function parseHlsSegments(
 
   const segments: HlsSegment[] = raw.map((s, i) => {
     const key = s.key;
+    // W1.3 — HAI luật byterange KHÁC NHAU, đừng gộp làm một (đã đo thật ở m3u8-parser@7.2.0):
+    //  - segment: parser ĐÃ cộng dồn offset thành TUYỆT ĐỐI (thiếu `@offset` = nối tiếp segment
+    //    trước). Cộng dồn thêm lần nữa = nhân đôi offset = đọc sai chỗ.
+    //  - #EXT-X-MAP: KHÔNG cộng dồn, và thiếu `@offset` thì key `offset` VẮNG HẲN. RFC 8216
+    //    §4.3.2.5: vắng `@offset` nghĩa là bắt đầu từ byte 0 — KHÔNG phải nối tiếp gì cả.
+    const br = s.byterange;
+    const mapBr = s.map?.byterange;
     return {
       uri: resolveUri(s.uri, manifestUrl),
       duration: typeof s.duration === 'number' ? s.duration : 0,
@@ -200,6 +232,10 @@ export function parseHlsSegments(
       keyUri: key?.uri ? resolveUri(key.uri, manifestUrl) : undefined,
       iv: ivToBytes(key?.iv),
       initUri: s.map?.uri ? resolveUri(s.map.uri, manifestUrl) : undefined,
+      ...(br ? { byterange: { length: br.length, offset: br.offset } } : {}),
+      ...(mapBr
+        ? { initByterange: { length: mapBr.length, offset: mapBr.offset ?? 0 } }
+        : {}),
     };
   });
 

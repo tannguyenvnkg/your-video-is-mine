@@ -8,7 +8,7 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { decryptAes128Cbc, hlsSegmentIv } from '@/utils/crypto';
 import { describeError } from '@/utils/errors';
-import { parseHlsSegments } from '@/utils/hls';
+import { parseHlsSegments, type HlsByteRange } from '@/utils/hls';
 import type { HlsJob } from '@/utils/storage';
 import type { FfmpegDemoResponse, OffscreenRequest } from '@/utils/messages';
 
@@ -103,14 +103,45 @@ async function ensureFfmpeg(): Promise<FFmpeg> {
   return loading;
 }
 
-async function fetchWithRetry(url: string, retries = 3): Promise<ArrayBuffer> {
+/** Lỗi KHÔNG thử lại được — thử lại chỉ tốn băng thông mà kết quả y hệt. */
+class FatalFetchError extends Error {}
+
+/**
+ * Tải một segment. `range` có mặt (W1.3) -> gửi header `Range` thay vì tải nguyên file.
+ */
+async function fetchWithRetry(
+  url: string,
+  retries = 3,
+  range?: HlsByteRange,
+): Promise<ArrayBuffer> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(url, { credentials: 'include' });
+      const res = await fetch(url, {
+        credentials: 'include',
+        ...(range
+          ? {
+              // HTTP Range là ĐÓNG hai đầu: byte cuối = offset + length - 1.
+              headers: {
+                Range: `bytes=${range.offset}-${range.offset + range.length - 1}`,
+              },
+            }
+          : {}),
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // ⚠️ BẪY W1.3: server PHỚT LỜ Range trả 200 + TOÀN BỘ file. Ghi cả file vào chỗ của một
+      // segment = file ra hỏng mà im lặng. Và vì playlist byterange cho cả trăm segment trỏ CÙNG
+      // một file, âm thầm chấp nhận còn nghĩa là tải nguyên file đó cả trăm lần (đo thật trên
+      // Apple fMP4: 27MB x 101 = ~2.8GB). Thà FAIL LỚN TIẾNG.
+      if (range && res.status !== 206) {
+        throw new FatalFetchError(
+          `máy chủ không hỗ trợ tải theo đoạn (Range): trả HTTP ${res.status} thay vì 206`,
+        );
+      }
       return await res.arrayBuffer();
     } catch (e) {
+      // Thử lại vô nghĩa: server sẽ lại phớt lờ Range, và mỗi lần thử kéo về NGUYÊN file lớn.
+      if (e instanceof FatalFetchError) throw e;
       lastErr = e;
     }
   }
@@ -223,7 +254,8 @@ async function downloadTrack(o: {
     if (method && method !== 'NONE' && method !== 'AES-128') {
       throw new Error(`Segment dùng mã hoá không hỗ trợ: ${method}`);
     }
-    let buf = await fetchWithRetry(seg.uri);
+    // W1.3: có byterange -> chỉ kéo đúng đoạn của segment này, KHÔNG kéo cả file.
+    let buf = await fetchWithRetry(seg.uri, 3, seg.byterange);
     const raw = buf.byteLength;
     if (method === 'AES-128' && seg.keyUri) {
       const key = await getKey(seg.keyUri);
@@ -235,9 +267,14 @@ async function downloadTrack(o: {
   };
 
   // Tải init segment (fMP4) SONG SONG với prefetch bên dưới.
-  const firstInit = parsed.segments.find((s) => s.initUri)?.initUri;
-  const initPromise: Promise<Uint8Array | null> = firstInit
-    ? fetchWithRetry(firstInit).then((b) => new Uint8Array(b))
+  // W1.3: init cũng có thể là một ĐOẠN của file lớn (#EXT-X-MAP:BYTERANGE) — Apple fMP4 để init
+  // ở 719 byte ĐẦU của chính file 27MB chứa mọi segment. Bỏ qua byterange ở đây = nạp 27MB byte
+  // rác làm "header" -> ffmpeg "error reading header".
+  const firstInitSeg = parsed.segments.find((s) => s.initUri);
+  const initPromise: Promise<Uint8Array | null> = firstInitSeg?.initUri
+    ? fetchWithRetry(firstInitSeg.initUri, 3, firstInitSeg.initByterange).then(
+        (b) => new Uint8Array(b),
+      )
     : Promise.resolve(null);
 
   // Prefetch CÓ TRẦN RAM: tối đa MAX_BUFFERED segment chưa-ghi nằm trong bộ nhớ (backpressure).
@@ -322,7 +359,7 @@ async function downloadTrack(o: {
 async function runHlsJob(
   req: Extract<OffscreenRequest, { kind: 'hls/run' }>,
 ): Promise<void> {
-  const { jobId, variantUrl, audioUrl, filename, mediaUrl, tabId, spoofHost } =
+  const { jobId, variantUrl, audioUrl, filename, mediaUrl, tabId, spoofHosts } =
     req;
   const throwIfCancelled = () => {
     if (cancelledJobs.has(jobId)) throw new CancelledError();
@@ -487,7 +524,7 @@ async function runHlsJob(
       mediaUrl,
       tabId,
       jobId,
-      spoofHost,
+      spoofHosts,
     });
     await updateHlsJob(jobId, {
       phase: 'done',

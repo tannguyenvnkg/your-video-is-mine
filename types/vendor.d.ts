@@ -44,15 +44,30 @@ declare module 'm3u8-parser' {
     [key: string]: unknown;
   }
 
+  /**
+   * Byterange của SEGMENT (#EXT-X-BYTERANGE).
+   * ⚠️ m3u8-parser ĐÃ cộng dồn `offset` thành TUYỆT ĐỐI (thiếu `@offset` = nối tiếp segment trước)
+   * -> đừng cộng dồn lần nữa, sẽ nhân đôi.
+   */
   export interface M3u8ByteRange {
     length: number;
     offset: number;
   }
 
+  /**
+   * Byterange của #EXT-X-MAP — LUẬT KHÁC hẳn segment (đã đo thật):
+   * KHÔNG cộng dồn, và thiếu `@offset` thì key `offset` **VẮNG HẲN** (không mặc định 0).
+   * Theo RFC 8216 §4.3.2.5, vắng `@offset` nghĩa là bắt đầu từ byte 0.
+   */
+  export interface M3u8MapByteRange {
+    length: number;
+    offset?: number;
+  }
+
   export interface M3u8Map {
     uri: string;
     key?: M3u8Key;
-    byterange?: M3u8ByteRange;
+    byterange?: M3u8MapByteRange;
   }
 
   export interface M3u8Segment {

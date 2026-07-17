@@ -12,13 +12,17 @@
 // 🔬 RATCHET TỰ BẬT: hôm nay ca này ĐỎ (file ra CÂM = bug §2.1 còn sống). Khi W1.1 xong, nó sẽ ĐẠT
 // -> harness ĐỎ NGƯỢC đòi đổi `EXPECT_MUTE` thành false. Không thể quên như TODO chết.
 //
-// 🔴 TRẠNG THÁI 2026-07-17 — CHƯA TỚI ĐƯỢC CÂU HỎI CÂM: chạy thật thì job fetch trọn 100/100 segment
-// rồi CHẾT ở khâu ghép với `FS error` (lỗi #30 — fMP4/CMAF hỏng + `exec` bị vứt mã lỗi, xem
-// PROMPT-THUC-THI.md §2b). Nên file này hiện đo được **lỗi #30**, chưa đo được bệnh câm.
-// 👉 Muốn đo bệnh câm SỚM mà không chờ sửa lỗi #30: dựng fixture demuxed **TS** cục bộ (ffmpeg sinh
-//    được master + playlist hình + playlist tiếng riêng) — đường TS đã chứng minh chạy tốt ở W0.3.
+// ✅ TRẠNG THÁI 2026-07-17 — ĐÃ XANH sau W1.1 + W1.3: 38.1MB, 600.0s, 201 segment (100 hình +
+// 101 tiếng), track video+audio. Đây là ca THẬT khó nhất của dự án vì gộp ĐỦ BA thứ cùng lúc:
+// fMP4/CMAF + `#EXT-X-BYTERANGE` + tiếng tách rời.
 //
-// Chạy: pnpm e2e:demuxed   (cần `pnpm build` trước; cần ffprobe)
+// LỊCH SỬ (đừng đi lại đường cũ): stream này từng chết với `FS error` cụt lủn và cái đó đã bị đặt
+// tên nhầm là "lỗi #30 — fMP4/CMAF hỏng". SAI. Gốc rễ là **byterange** (W1.3): playlist để MỌI
+// segment trỏ cùng file `main.mp4` 27MB, ta bỏ qua `#EXT-X-BYTERANGE` nên tải nguyên 27MB x 101
+// lần rồi nối ~2.8GB byte rác. `concat:` ghép fMP4 hoàn toàn bình thường. Xem PROMPT-THUC-THI.md §2b.
+//
+// Chạy: pnpm e2e:demuxed   (cần `pnpm build` trước; cần ffprobe). Chậm (~30s, tải 38MB thật) —
+// muốn kiểm bệnh câm NHANH và offline thì dùng `pnpm e2e:demuxed-fixture`.
 
 import {
   requireBuild,
@@ -33,8 +37,10 @@ import { existsSync, statSync } from 'node:fs';
 const MASTER_URL =
   'https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8';
 
-// Hôm nay bug §2.1 còn sống -> file ra PHẢI câm. Đổi thành false khi W1.1 xong.
-const EXPECT_MUTE = true;
+// ✅ 2026-07-17: W1.1 + W1.3 xong -> file ra PHẢI CÓ TIẾNG. Ratchet đã tự bật đòi đổi cờ này.
+// Đo thật trên stream Apple: 38.1MB, 600.0s, 201 segment, track video+audio [h264, aac].
+// Từ đây ca này là lưới chống tái phát trên STREAM THẬT (fMP4 + byterange + tách tiếng cùng lúc).
+const EXPECT_MUTE = false;
 
 const JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_MS ?? 600_000);
 const DOWNLOAD_FOLDER = `yvim-demuxed-${process.pid}`;
@@ -56,17 +62,30 @@ const result = await withBrowser(DOWNLOAD_FOLDER, async ({ page, logs }) => {
   if (!vres?.ok) return bail(`manifest/variants hỏng: ${vres?.error ?? JSON.stringify(vres)}`);
   console.log(`  ✓ Ra ${vres.variants.length} chất lượng`);
 
-  // Chọn variant NHỎ NHẤT cho nhanh — bệnh câm không phụ thuộc bitrate.
-  const variant = [...vres.variants].sort(
-    (a, b) => (a.height ?? 1e9) - (b.height ?? 1e9) || (a.bandwidth ?? 0) - (b.bandwidth ?? 0),
-  )[0];
+  // Chọn variant NHỎ NHẤT CÓ HÌNH cho nhanh — bệnh câm không phụ thuộc bitrate.
+  // Lọc `height` vì master Apple có cả variant AUDIO-ONLY (HLS Authoring Spec §2.3 bắt buộc):
+  // chọn trúng nó thì "file ra không có hình" chứ chẳng liên quan gì bệnh câm.
+  const variant = [...vres.variants]
+    .filter((v) => (v.height ?? 0) > 0)
+    .sort((a, b) => (a.height ?? 1e9) - (b.height ?? 1e9) || (a.bandwidth ?? 0) - (b.bandwidth ?? 0))[0];
+  const audioUrl = variant.audioRenditions?.find((r) => r.selected)?.uri;
   console.log(`  → tải variant ${variant.height ?? '?'}p (${variant.bandwidth ?? '?'} bps)`);
+  console.log(`  → luồng tiếng: ${audioUrl ?? '(không có — tiếng nằm trong variant)'}`);
 
   // --- Bước 2: tải thật ---
+  // PHẢI gửi audioUrl y như popup (giao thức W1.1). Thiếu nó thì harness tự tay dựng lại đúng
+  // bệnh câm rồi đổ cho sản phẩm — đo sai, và tệ hơn là đo sai theo hướng bi quan.
   const start = await page.evaluate(
-    ([variantUrl, mediaUrl, height]) =>
-      chrome.runtime.sendMessage({ kind: 'hls/download', variantUrl, mediaUrl, tabId: -1, height }),
-    [variant.uri, MASTER_URL, variant.height],
+    ([variantUrl, mediaUrl, height, aUrl]) =>
+      chrome.runtime.sendMessage({
+        kind: 'hls/download',
+        variantUrl,
+        mediaUrl,
+        tabId: -1,
+        height,
+        audioUrl: aUrl,
+      }),
+    [variant.uri, MASTER_URL, variant.height, audioUrl],
   );
   if (!start?.ok) return bail(`hls/download bị từ chối: ${JSON.stringify(start)}`);
 

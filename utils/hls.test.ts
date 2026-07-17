@@ -408,6 +408,55 @@ muxed/pl.m3u8`;
   });
 });
 
+// --- W1.1: hai lỗi do review đối kháng bắt được (2026-07-17) ------------
+// Cả hai đều do chính bản sửa W1.1 sinh ra, và cả hai đã được kiểm bằng CHẠY THẬT ffmpeg trước
+// khi sửa. Giữ test ở đây để không tái phát.
+describe('W1.1 variant AUDIO-ONLY -> KHÔNG được chọn tiếng (chống hồi quy)', () => {
+  // HLS Authoring Spec §2.3 BẮT BUỘC master có một rendition audio-only, và nó thường được khai
+  // luôn thành #EXT-X-STREAM-INF (Apple/Shaka/Bento4/MediaConvert đều phát kiểu này). Khi đó
+  // uri của variant TRÙNG KHÍT uri của rendition tiếng.
+  const AUDIO_ONLY_VARIANT = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud1",NAME="English",DEFAULT=YES,URI="a1/prog.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2200000,RESOLUTION=960x540,CODECS="avc1.64001f,mp4a.40.2",AUDIO="aud1"
+v5/prog.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=68000,CODECS="mp4a.40.2",AUDIO="aud1"
+a1/prog.m3u8`;
+
+  const r = parseHlsManifest(AUDIO_ONLY_VARIANT, 'https://ex.com/dir/master.m3u8');
+  const audioOnly = r.variants.find((v) => v.uri.endsWith('a1/prog.m3u8'))!;
+  const withVideo = r.variants.find((v) => v.uri.endsWith('v5/prog.m3u8'))!;
+
+  // Chọn tiếng cho nó = gửi audioUrl TRÙNG variantUrl -> offscreen tải cùng playlist 2 lần rồi
+  // ép `-map 0:v:0` lên input KHÔNG có hình -> ffmpeg mã 234 (đã đo thật), job LỖI CỨNG.
+  // Trước W1.1 chính variant này tải được (ra file chỉ-tiếng hợp lệ) => sẽ là HỒI QUY.
+  it('variant audio-only KHÔNG chọn rendition nào (tránh mã 234 + tải đôi)', () => {
+    expect(selectedAudioUri(audioOnly)).toBe('');
+  });
+
+  it('variant có hình vẫn chọn tiếng bình thường', () => {
+    expect(selectedAudioUri(withVideo)).toBe('https://ex.com/dir/a1/prog.m3u8');
+  });
+});
+
+describe('W1.1 AUTOSELECT: RFC 8216 §4.3.4.1.1 — không có DEFAULT thì xét AUTOSELECT', () => {
+  // Commentary (AUTOSELECT=NO, CÓ URI) đứng TRƯỚC Main (AUTOSELECT=YES, KHÔNG URI = tiếng nằm
+  // sẵn trong variant). Fallback "lấy cái đầu" sẽ trúng Commentary -> `-map 1:a:0` thay tiếng
+  // chính bằng tiếng bình luận: hình đúng, TIẾNG SAI HOÀN TOÀN, job vẫn 'done', không cảnh báo.
+  const COMMENTARY = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="g",NAME="Commentary",AUTOSELECT=NO,URI="commentary/pl.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="g",NAME="Main",AUTOSELECT=YES
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=640x360,CODECS="avc1.42c01e,mp4a.40.2",AUDIO="g"
+muxed/pl.m3u8`;
+
+  it('AUTOSELECT=YES thắng cái đứng đầu có AUTOSELECT=NO', () => {
+    const r = parseHlsManifest(COMMENTARY, 'https://ex.com/dir/master.m3u8');
+    const sel = r.variants[0]!.audioRenditions!.find((x) => x.selected)!;
+    expect(sel.name).toBe('Main');
+    // Main không có URI -> tiếng đã nằm trong variant -> giữ đường một-input, không ghép đè.
+    expect(selectedAudioUri(r.variants[0])).toBe('');
+  });
+});
+
 // --- Fixture: RFC 8216 §4.3.4.2.1 — #EXT-X-MEDIA KHÔNG có URI ------------
 // "clients MUST assume that the audio data ... is present in every video
 // Rendition" => tiếng ĐÃ nằm trong variant => giữ nguyên đường MỘT input.
@@ -554,19 +603,18 @@ describe('W0.4/W1.3 EXT-X-BYTERANGE', () => {
     expect(new Set(r.segments.map((s) => s.uri)).size).toBe(1);
   });
 
-  // ĐỎ hôm nay: HlsSegment chưa có byterange -> tầng fetch không diễn đạt nổi Range.
-  it.fails('segment phải mang byterange', () => {
+  // ✅ W1.3 (2026-07-17): it.fails -> it (ratchet tự bật).
+  it('segment phải mang byterange', () => {
     expect(r.segments[0]).toHaveProperty('byterange');
   });
 
-  // ĐỎ hôm nay + ghim bẫy cộng dồn hai lần (76232, KHÔNG phải 152464).
-  it.fails('byterange.offset giữ nguyên giá trị tuyệt đối của parser', () => {
+  // Ghim bẫy cộng dồn hai lần (76232, KHÔNG phải 152464).
+  it('byterange.offset giữ nguyên giá trị tuyệt đối của parser', () => {
     expect(r.segments[1]).toHaveProperty('byterange.offset', 76232);
     expect(r.segments[1]).toHaveProperty('byterange.length', 82112);
   });
 
-  // ĐỎ hôm nay: hls.ts:153 chỉ lấy s.map?.uri -> init segment ranged sẽ hỏng.
-  it.fails('init segment (#EXT-X-MAP) phải mang byterange riêng', () => {
+  it('init segment (#EXT-X-MAP) phải mang byterange riêng', () => {
     expect(r.segments[0]).toHaveProperty('initByterange.length', 1000);
     expect(r.segments[0]).toHaveProperty('initByterange.offset', 0);
   });
@@ -592,9 +640,9 @@ describe('W0.4/W1.3 #EXT-X-MAP BYTERANGE thiếu @offset', () => {
     expect('offset' in mapBr).toBe(false);
   });
 
-  // ĐỎ hôm nay. Ghim luôn: thiếu @offset ở MAP nghĩa là bắt đầu từ byte 0,
-  // KHÔNG phải "nối tiếp segment trước" như luật của EXT-X-BYTERANGE.
-  it.fails('thiếu @offset ở MAP -> phải hiểu là offset 0', () => {
+  // ✅ W1.3 (2026-07-17): it.fails -> it. Ghim luôn: thiếu @offset ở MAP nghĩa là bắt đầu
+  // từ byte 0, KHÔNG phải "nối tiếp segment trước" như luật của EXT-X-BYTERANGE.
+  it('thiếu @offset ở MAP -> phải hiểu là offset 0', () => {
     const r = parseHlsSegments(
       MAP_BYTERANGE_NO_OFFSET,
       'https://cdn.example.com/dir/x.m3u8',

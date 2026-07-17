@@ -20,10 +20,15 @@ bản này bị CÂM** — tải xong, báo "Đã tải xong ✓", mở ra thì 
 - **Thiếu segment nay báo lỗi thay vì giao file hỏng**: trước đây một lỗ hổng trong danh sách segment
   bị `join('|')` render thành chuỗi rỗng và ffmpeg lặng lẽ cho ra file thiếu đoạn.
 
-### Đã biết còn hỏng
+### Sửa lỗi — VIDEO fMP4/CMAF NAY TẢI ĐƯỢC (trước đây hỏng hẳn)
 
-- **fMP4/CMAF chưa ghép được** (`Ghép video thất bại (ffmpeg mã 1)`): cách nối segment hiện tại chỉ
-  đúng với MPEG-TS. Ảnh hưởng các site đóng gói fMP4. Đang xử lý.
+- **Hỗ trợ `EXT-X-BYTERANGE`**: nhiều site (kể cả stream mẫu chính thức của Apple) gói toàn bộ video
+  vào **một file lớn**, mỗi "segment" chỉ là một đoạn byte trong đó. Trước đây phần đánh dấu đoạn bị
+  bỏ qua, nên extension tải **nguyên file lớn một lần cho mỗi segment** — với video 10 phút của Apple
+  là 27MB × 101 lần — rồi ghép ra byte rác và báo lỗi. Nay chỉ tải đúng đoạn cần (header `Range`).
+  Video 10 phút này giờ tải xong trong ~26 giây, đủ hình và tiếng.
+- Máy chủ phớt lờ yêu cầu tải theo đoạn (trả cả file thay vì đoạn) nay **báo lỗi rõ ràng** thay vì
+  âm thầm ghi sai và ngốn băng thông.
 
 ## [0.6.1] - 2026-07-17
 
