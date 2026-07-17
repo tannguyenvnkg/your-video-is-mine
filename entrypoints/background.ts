@@ -195,50 +195,74 @@ export default defineBackground(() => {
   );
 
   // Router message.
+  //
+  // HỢP ĐỒNG: trả `true` ĐỒNG BỘ cho mọi nhánh async, rồi gọi `sendResponse` sau.
+  // TUYỆT ĐỐI KHÔNG trả Promise: đó là hợp đồng của webextension-polyfill (dự án KHÔNG dùng).
+  // Chrome chỉ nhận Promise từ bản 148 và còn "rolling out gradually" -> máy dev (Edge 150) chạy
+  // ngon trong khi máy user cũ hơn nhận về `undefined` — KHÔNG phải lỗi, nên `catch` ở
+  // utils/messages.ts không bao giờ bắn: popup chỉ lặng lẽ nhận undefined rồi nổ chỗ khác.
+  // Chrome docs: `return true` chạy "whether this capability is enabled or not".
+  // Ghim bằng tests/background-messaging.test.ts (KHÔNG đặt test trong entrypoints/ — WXT coi mọi
+  // file ở đó là entrypoint và `pnpm build` sẽ chết vì trùng tên). Listener KHÔNG được là `async`:
+  // hàm `async` LUÔN trả Promise, tức là quay lại đúng lỗi này mà tsc/lint không hề kêu.
   browser.runtime.onMessage.addListener(
     (
       message: unknown,
       sender,
-    ):
-      | undefined
-      | Promise<
-          | VariantsResponse
-          | DownloadStartResponse
-          | FfmpegDemoResponse
-          | HlsEstimateResponse
-          | HlsDownloadResponse
-          | HlsProgressResponse
-        > => {
+      sendResponse: (response?: unknown) => void,
+    ): true | undefined => {
       if (isOffscreenTargeted(message)) return undefined;
       if (!isRuntimeMessage(message)) return undefined;
 
+      // Giữ kênh mở rồi trả lời khi promise xong. Handler tự bắt lỗi và trả {ok:false}, nhưng
+      // vẫn phải có nhánh reject: sót một lỗi ngoài dự kiến là popup quay spinner vĩnh viễn.
+      const respond = (p: Promise<unknown>): true => {
+        void p
+          .then(
+            (res) => sendResponse(res),
+            (e: unknown) =>
+              sendResponse({ ok: false, error: describeError(e) }),
+          )
+          // Kênh đã đóng (user đóng popup giữa chừng) -> sendResponse ném. Không có gì để làm,
+          // nhưng không được để unhandled rejection.
+          .catch(() => undefined);
+        return true;
+      };
+
       if (message.kind === 'manifest/variants') {
-        return handleVariants(message.url, message.mediaType);
+        return respond(handleVariants(message.url, message.mediaType));
       }
       if (message.kind === 'download/progressive') {
-        return handleDownload(message.url, message.tabId);
+        return respond(handleDownload(message.url, message.tabId));
       }
       if (message.kind === 'ffmpeg/demo') {
-        return handleFfmpegDemo();
+        return respond(handleFfmpegDemo());
       }
       if (message.kind === 'hls/estimate') {
-        return handleHlsEstimate(message.variantUrl, message.bandwidth);
+        return respond(
+          handleHlsEstimate(message.variantUrl, message.bandwidth),
+        );
       }
       if (message.kind === 'hls/download') {
-        return handleHlsDownload(
-          message.variantUrl,
-          message.mediaUrl,
-          message.tabId,
-          message.height,
+        return respond(
+          handleHlsDownload(
+            message.variantUrl,
+            message.mediaUrl,
+            message.tabId,
+            message.height,
+          ),
         );
       }
       // Offscreen báo tiến trình -> background ghi hộ vào storage.session.
-      // Trả về promise để offscreen `await` được: nhờ vậy các bản cập nhật giữ ĐÚNG THỨ TỰ và
-      // lỗi ghi không biến mất trong hư không.
+      // ACK để offscreen `await` được: nhờ vậy các bản cập nhật giữ ĐÚNG THỨ TỰ và lỗi ghi không
+      // biến mất trong hư không. ACK này PHẢI đi qua `respond` — trả Promise ở đây thì trên
+      // Chrome <148 nó resolve `undefined` NGAY, và thứ tự ghi storage âm thầm mất.
       if (message.kind === 'hls/progress') {
-        return updateHlsJob(message.jobId, message.patch).then(() => ({
-          ok: true,
-        }));
+        return respond(
+          updateHlsJob(message.jobId, message.patch).then(
+            (): HlsProgressResponse => ({ ok: true }),
+          ),
+        );
       }
       if (message.kind === 'download/blob') {
         void handleBlobDownload(

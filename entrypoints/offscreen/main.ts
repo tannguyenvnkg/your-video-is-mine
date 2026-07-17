@@ -16,11 +16,23 @@ import type { FfmpegDemoResponse, OffscreenRequest } from '@/utils/messages';
 // `chrome.runtime` — `chrome.storage` là UNDEFINED ở đây (`Object.keys(chrome)` = loadTimes,csi,runtime).
 // => TUYỆT ĐỐI không import hàm đọc/ghi storage vào file này: nó sẽ ném TypeError lúc chạy mà mọi
 // cổng tĩnh (tsc/eslint/vitest) đều không thấy. Mọi state đi qua background bằng runtime message.
+//
+// KHÔNG NÉM RA NGOÀI (W0.1): hàm này được gọi ~mọi bước của một job có thể chạy 30 phút, và cả
+// trong khối `catch` báo lỗi ở cuối runHlsJob. Nếu nó ném thì (1) một trục trặc nhắn tin nhất
+// thời giết trọn job, và (2) khối catch tự ném -> LỖI GỐC BỊ XOÁ, user nhận job treo không lời
+// giải thích. Nuốt lỗi ở đây là CÓ CHỦ ĐÍCH — nhưng không im lặng: vẫn phải log ra.
 async function updateHlsJob(
   jobId: string,
   patch: Partial<HlsJob>,
 ): Promise<void> {
-  await browser.runtime.sendMessage({ kind: 'hls/progress', jobId, patch });
+  try {
+    await browser.runtime.sendMessage({ kind: 'hls/progress', jobId, patch });
+  } catch (e) {
+    console.warn(
+      '[offscreen] không gửi được tiến trình về background:',
+      describeError(e),
+    );
+  }
 }
 
 // Offscreen là trang bền (không phải service worker) -> giữ singleton trong biến module được.
@@ -388,13 +400,27 @@ function asOffscreenRequest(m: unknown): OffscreenRequest | null {
   return null;
 }
 
+// Hợp đồng giống background (xem chú thích ở entrypoints/background.ts): `true` ĐỒNG BỘ cho
+// nhánh async, KHÔNG trả Promise. Message không phải của offscreen -> trả `undefined` để KHÔNG
+// cướp kênh trả lời của background.
 browser.runtime.onMessage.addListener(
-  (message: unknown): undefined | Promise<FfmpegDemoResponse> => {
+  (
+    message: unknown,
+    _sender: unknown,
+    sendResponse: (response?: unknown) => void,
+  ): true | undefined => {
     const req = asOffscreenRequest(message);
     if (!req) return undefined;
     switch (req.kind) {
       case 'ffmpeg/demo':
-        return runFfmpegDemo();
+        void runFfmpegDemo()
+          .then(
+            (res: FfmpegDemoResponse) => sendResponse(res),
+            (e: unknown) =>
+              sendResponse({ ok: false, error: describeError(e) }),
+          )
+          .catch(() => undefined);
+        return true;
       case 'hls/run':
         enqueueHlsJob(req);
         return undefined;
