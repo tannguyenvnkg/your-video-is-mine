@@ -144,8 +144,19 @@ export async function getDownloadById(
 
 // --- Tiến trình job HLS (session), keyed theo jobId ---
 
+// 'queued'  = background đã tạo job, ĐÃ gửi sang offscreen, offscreen CHƯA nhận (hoặc đang xếp hàng).
+// 'loading' = offscreen ĐÃ nhận việc và bắt đầu chạy (tải playlist + nạp ffmpeg song song).
+// Tách 2 phase này ra là CÓ CHỦ Ý: gộp làm một thì "job kẹt" không phân biệt được là message rớt
+// hay playlist treo — đúng ca đã ngốn 2 tiếng debug mà không có lấy một dòng manh mối.
 export type HlsPhase =
-  'loading' | 'fetching' | 'muxing' | 'saving' | 'done' | 'error' | 'cancelled';
+  | 'queued'
+  | 'loading'
+  | 'fetching'
+  | 'muxing'
+  | 'saving'
+  | 'done'
+  | 'error'
+  | 'cancelled';
 
 export interface HlsJob {
   id: string;

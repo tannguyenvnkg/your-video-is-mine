@@ -36,9 +36,26 @@ jobs:
       - name: Đóng gói (Chrome/Edge MV3)
         run: pnpm zip
 
+      # Thân release = đúng mục CHANGELOG của phiên bản đang tag, để người tải thấy ngay
+      # "bản này làm được gì" thay vì chỉ danh sách commit thô. Thiếu mục -> FAIL (ép ghi CHANGELOG).
+      - name: Trích ghi chú phát hành từ CHANGELOG
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v hdr="## [$VERSION] " '
+            index($0, hdr) == 1 { found = 1; next }
+            found && /^## \[/   { exit }
+            found               { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::Không tìm thấy mục '## [$VERSION]' trong CHANGELOG.md — hãy thêm trước khi tag."
+            exit 1
+          fi
+          cat release-notes.md
+
       - name: Tạo GitHub Release + đính kèm .zip
         uses: softprops/action-gh-release@v2
         with:
           files: .output/*.zip
+          body_path: release-notes.md
           generate_release_notes: true
           fail_on_unmatched_files: true

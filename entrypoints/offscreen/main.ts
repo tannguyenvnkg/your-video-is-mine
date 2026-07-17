@@ -7,9 +7,21 @@
 
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { decryptAes128Cbc, hlsSegmentIv } from '@/utils/crypto';
+import { describeError } from '@/utils/errors';
 import { parseHlsSegments } from '@/utils/hls';
-import { getConcurrency, updateHlsJob } from '@/utils/storage';
+import type { HlsJob } from '@/utils/storage';
 import type { FfmpegDemoResponse, OffscreenRequest } from '@/utils/messages';
+
+// RÀNG BUỘC NỀN TẢNG (đo được, không phải suy đoán): offscreen document CHỈ được cấp
+// `chrome.runtime` — `chrome.storage` là UNDEFINED ở đây (`Object.keys(chrome)` = loadTimes,csi,runtime).
+// => TUYỆT ĐỐI không import hàm đọc/ghi storage vào file này: nó sẽ ném TypeError lúc chạy mà mọi
+// cổng tĩnh (tsc/eslint/vitest) đều không thấy. Mọi state đi qua background bằng runtime message.
+async function updateHlsJob(
+  jobId: string,
+  patch: Partial<HlsJob>,
+): Promise<void> {
+  await browser.runtime.sendMessage({ kind: 'hls/progress', jobId, patch });
+}
 
 // Offscreen là trang bền (không phải service worker) -> giữ singleton trong biến module được.
 let ffmpeg: FFmpeg | null = null;
@@ -28,6 +40,9 @@ let lastMuxPct = -1;
 // Các blob URL đang giữ (thu hồi khi background báo tải xong, hoặc sau timeout dự phòng).
 const activeBlobUrls = new Set<string>();
 const BLOB_TTL_MS = 10 * 60 * 1000;
+
+// Trần thời gian tải playlist (manifest chỉ vài KB -> 30s là quá rộng rãi).
+const PLAYLIST_TIMEOUT_MS = 30_000;
 
 class CancelledError extends Error {}
 
@@ -58,10 +73,6 @@ async function ensureFfmpeg(): Promise<FFmpeg> {
     });
   }
   return loading;
-}
-
-function describeError(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
 }
 
 async function fetchWithRetry(url: string, retries = 3): Promise<ArrayBuffer> {
@@ -127,9 +138,22 @@ async function runHlsJob(
     // Khởi động nạp ffmpeg SONG SONG với tải playlist (chưa await vội).
     const ffPromise = ensureFfmpeg();
 
-    const playlistText = await (
-      await fetch(variantUrl, { credentials: 'include' })
-    ).text();
+    // Playlist PHẢI có timeout + kiểm status. Không có timeout thì một request treo = job treo
+    // VĨNH VIỄN ở 'loading', không lỗi, không cách nào biết. Không kiểm status thì body của trang
+    // lỗi (403/404) lọt xuống parser và báo sai thành "playlist không có segment".
+    let playlistText: string;
+    try {
+      const res = await fetch(variantUrl, {
+        credentials: 'include',
+        signal: AbortSignal.timeout(PLAYLIST_TIMEOUT_MS),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      playlistText = await res.text();
+    } catch (e) {
+      throw new Error(`Không tải được playlist: ${describeError(e)}`, {
+        cause: e,
+      });
+    }
     const parsed = parseHlsSegments(playlistText, variantUrl);
 
     // Ranh giới cứng: SAMPLE-AES/EME -> DỪNG.
@@ -148,7 +172,7 @@ async function runHlsJob(
       return;
     }
 
-    const concurrency = await getConcurrency();
+    const concurrency = req.concurrency;
     const total = parsed.segments.length;
     const ext = parsed.hasInit ? 'm4s' : 'ts';
 
@@ -222,16 +246,22 @@ async function runHlsJob(
     }
 
     // Vòng writer: ghi tuần tự theo thứ tự index để giải phóng RAM sớm.
+    //
+    // PHẢI "xí phần" chỉ số (nextWrite++) TRƯỚC khi await. writeReady() được gọi từ NHIỀU worker
+    // fetch song song; nếu tăng sau await thì worker B đọc lại đúng nextWrite mà worker A đang ghi
+    // dở -> ghi trùng một buffer. Mà writeFile của ffmpeg TRANSFER (detach) ArrayBuffer, nên lần
+    // ghi thứ hai nổ "ArrayBuffer is detached and could not be cloned".
     const writeReady = async (): Promise<void> => {
       while (nextWrite < total && buffers[nextWrite] !== undefined) {
         throwIfCancelled();
         const i = nextWrite;
-        const name = `seg${String(i).padStart(5, '0')}.${ext}`;
-        await ffmpegRef.writeFile(name, buffers[i]!);
-        writtenFiles.add(name);
-        names[i] = name;
-        buffers[i] = undefined; // giải phóng RAM ngay sau khi ghi
         nextWrite++;
+        const name = `seg${String(i).padStart(5, '0')}.${ext}`;
+        const bytes = buffers[i]!;
+        buffers[i] = undefined; // nhả tham chiếu ngay: buffer sắp bị transfer đi worker ffmpeg
+        writtenFiles.add(name); // ghi tên TRƯỚC khi await -> lỗi giữa chừng vẫn dọn được file
+        await ffmpegRef.writeFile(name, bytes);
+        names[i] = name;
       }
     };
 
@@ -380,6 +410,10 @@ browser.runtime.onMessage.addListener(
 
 // Prewarm: nạp ffmpeg NGAY khi offscreen document được tạo -> job đầu tiên không phải chờ nạp
 // (offscreen chỉ được tạo khi cần ffmpeg/hls/demo nên không lãng phí).
-void ensureFfmpeg().catch(() => undefined);
+// Lỗi prewarm KHÔNG ném ra ngoài (ensureFfmpeg đã reset `loading` về null nên job sau vẫn thử lại
+// được), nhưng PHẢI log: nuốt im lặng ở đây từng khiến ffmpeg hỏng suốt nhiều tháng mà không ai thấy.
+void ensureFfmpeg().catch((e: unknown) => {
+  console.error('[offscreen] prewarm ffmpeg thất bại:', describeError(e), e);
+});
 
 console.debug('[offscreen] ready');

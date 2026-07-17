@@ -91,11 +91,21 @@ function UpdateBanner({ update }: { update: UpdateCheck }) {
 
 /** Hiển thị tiến trình HLS đầy đủ theo phase: nhãn + % + tốc độ + ETA + thanh bar. */
 function HlsProgress({ job, now }: { job: HlsJob; now: number }) {
+  if (job.phase === 'queued') {
+    return (
+      <div className="hls-progress">
+        <span className="hls-label">Đang chờ bộ xử lý nhận việc…</span>
+        <div className="progress-bar indeterminate" />
+      </div>
+    );
+  }
   if (job.phase === 'loading') {
+    // Nhãn phải nói ĐÚNG việc đang chạy: ở phase này offscreen tải playlist VÀ nạp ffmpeg song song.
+    // Nhãn cũ chỉ nói "nạp bộ xử lý" -> khi playlist treo, người dùng lại đi nghi oan ffmpeg.
     return (
       <div className="hls-progress">
         <span className="hls-label">
-          Đang nạp bộ xử lý video… (lần đầu hơi lâu)
+          Đang đọc playlist &amp; nạp bộ xử lý video… (lần đầu hơi lâu)
         </span>
         <div className="progress-bar indeterminate" />
       </div>
@@ -207,6 +217,7 @@ function MediaRow({
   const isHls = media.type === 'hls';
   const isBlob = media.type === 'blob';
   const jobBusy =
+    hlsJob?.phase === 'queued' ||
     hlsJob?.phase === 'loading' ||
     hlsJob?.phase === 'fetching' ||
     hlsJob?.phase === 'muxing' ||
@@ -513,6 +524,7 @@ function App() {
 
   const anyJobActive = Object.values(hlsJobs).some(
     (j) =>
+      j.phase === 'queued' ||
       j.phase === 'loading' ||
       j.phase === 'fetching' ||
       j.phase === 'muxing' ||

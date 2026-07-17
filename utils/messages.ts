@@ -1,6 +1,7 @@
 // Giao thức message runtime giữa content script / popup / options / offscreen và background.
 // Discriminated union theo trường `kind` để type-safe.
 
+import type { HlsJob } from './storage';
 import type { MediaType, VariantInfo } from './types';
 
 export interface DomMediaCandidate {
@@ -35,6 +36,9 @@ export type HlsEstimateResponse =
 export type HlsDownloadResponse =
   { ok: true; jobId: string } | { ok: false; error: string };
 
+/** ACK cho 'hls/progress' — offscreen await để giữ đúng thứ tự cập nhật. */
+export type HlsProgressResponse = { ok: true };
+
 /** Message gửi tới BACKGROUND (từ content/popup/options/offscreen). */
 export type RuntimeMessage =
   | { kind: 'media/dom'; candidates: DomMediaCandidate[] }
@@ -54,6 +58,10 @@ export type RuntimeMessage =
       tabId: number;
       height?: number;
     }
+  // offscreen -> background: cập nhật tiến trình job HLS.
+  // Offscreen KHÔNG ghi thẳng chrome.storage được (chỉ có chrome.runtime) -> mọi thay đổi state
+  // phải đi qua đây để background ghi hộ. Đây là ràng buộc của Chrome, không phải lựa chọn.
+  | { kind: 'hls/progress'; jobId: string; patch: Partial<HlsJob> }
   // offscreen -> background: đã ghép xong, nhờ background tải blob về máy.
   | {
       kind: 'download/blob';
@@ -79,6 +87,11 @@ export type OffscreenRequest =
       mediaUrl: string;
       tabId: number;
       spoofHost?: string;
+      /**
+       * Số luồng tải song song. PHẢI do background đọc từ settings rồi truyền vào:
+       * offscreen KHÔNG có `chrome.storage` (chỉ có `chrome.runtime`) nên không tự đọc được.
+       */
+      concurrency: number;
     }
   | { target: 'offscreen'; kind: 'revoke'; url: string }
   | { target: 'offscreen'; kind: 'hls/cancel'; jobId: string };

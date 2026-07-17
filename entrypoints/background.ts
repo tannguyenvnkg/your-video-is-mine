@@ -1,8 +1,10 @@
 import { buildMediaItem, mediaId, type BuildMediaInput } from '@/utils/detect';
+import { describeError } from '@/utils/errors';
 import { buildDownloadFilename } from '@/utils/filename';
 import {
   addTabMedia,
   clearTabMedia,
+  getConcurrency,
   getDownloadById,
   getDownloadFolder,
   getTabMedia,
@@ -29,6 +31,7 @@ import type {
   FfmpegDemoResponse,
   HlsDownloadResponse,
   HlsEstimateResponse,
+  HlsProgressResponse,
   ManifestKind,
   RuntimeMessage,
   VariantsResponse,
@@ -204,6 +207,7 @@ export default defineBackground(() => {
           | FfmpegDemoResponse
           | HlsEstimateResponse
           | HlsDownloadResponse
+          | HlsProgressResponse
         > => {
       if (isOffscreenTargeted(message)) return undefined;
       if (!isRuntimeMessage(message)) return undefined;
@@ -227,6 +231,14 @@ export default defineBackground(() => {
           message.tabId,
           message.height,
         );
+      }
+      // Offscreen báo tiến trình -> background ghi hộ vào storage.session.
+      // Trả về promise để offscreen `await` được: nhờ vậy các bản cập nhật giữ ĐÚNG THỨ TỰ và
+      // lỗi ghi không biến mất trong hư không.
+      if (message.kind === 'hls/progress') {
+        return updateHlsJob(message.jobId, message.patch).then(() => ({
+          ok: true,
+        }));
       }
       if (message.kind === 'download/blob') {
         void handleBlobDownload(
@@ -506,23 +518,37 @@ async function handleHlsDownload(
       id: jobId,
       mediaUrl,
       variantUrl,
-      phase: 'loading',
+      // 'queued' chứ KHÔNG phải 'loading': offscreen chưa chạy dòng nào. Chỉ offscreen mới được
+      // đặt 'loading' (main.ts), nhờ vậy job kẹt ở 'queued' = message không tới nơi.
+      phase: 'queued',
       segmentsTotal: 0,
       segmentsDone: 0,
       filename,
       tabId,
     });
     await ensureOffscreen();
-    void browser.runtime.sendMessage({
-      target: 'offscreen',
-      kind: 'hls/run',
-      jobId,
-      variantUrl,
-      filename,
-      mediaUrl,
-      tabId,
-      spoofHost: hostFromUrl(variantUrl) ?? undefined,
-    });
+    // KHÔNG await: job chạy dài, offscreen báo tiến trình qua storage chứ không qua response.
+    // NHƯNG phải bắt lỗi — nuốt ở đây thì message rớt (vd offscreen chưa đăng ký listener) sẽ khiến
+    // job kẹt 'queued' VĨNH VIỄN mà không một dòng lỗi nào hiện ra.
+    void browser.runtime
+      .sendMessage({
+        target: 'offscreen',
+        kind: 'hls/run',
+        jobId,
+        variantUrl,
+        filename,
+        mediaUrl,
+        tabId,
+        spoofHost: hostFromUrl(variantUrl) ?? undefined,
+        // Offscreen không đọc được settings (không có chrome.storage) -> đọc hộ rồi truyền vào.
+        concurrency: await getConcurrency(),
+      })
+      .catch(async (e: unknown) => {
+        await updateHlsJob(jobId, {
+          phase: 'error',
+          error: `Không gửi được việc sang bộ xử lý video: ${describeError(e)}`,
+        });
+      });
     return { ok: true, jobId };
   } catch (e) {
     return {
@@ -589,8 +615,11 @@ async function ensureOffscreen(): Promise<void> {
       justification:
         'Chạy ffmpeg.wasm để ghép/remux video và tạo blob URL để tải.',
     });
-  } catch {
-    // Mỗi extension chỉ được 1 offscreen document -> nếu đã tồn tại thì bỏ qua.
+  } catch (e) {
+    // Mỗi extension chỉ được 1 offscreen document -> "đã tồn tại" là BÌNH THƯỜNG, bỏ qua.
+    // Mọi lỗi khác (tạo document hỏng thật) PHẢI ném lên: nuốt hết thì caller tưởng offscreen sống
+    // và job sẽ treo mãi không lời giải thích.
+    if (!/single offscreen document/i.test(describeError(e))) throw e;
   }
 }
 
