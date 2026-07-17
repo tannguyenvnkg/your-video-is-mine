@@ -30,6 +30,13 @@ bản này bị CÂM** — tải xong, báo "Đã tải xong ✓", mở ra thì 
 - Máy chủ phớt lờ yêu cầu tải theo đoạn (trả cả file thay vì đoạn) nay **báo lỗi rõ ràng** thay vì
   âm thầm ghi sai và ngốn băng thông.
 
+### Cải thiện — MỖI VIDEO CHỈ CÒN MỘT DÒNG TRONG DANH SÁCH
+
+- **Ẩn playlist con**: một video HLS tách tiếng trước đây hiện lên **ba dòng "HLS" giống nhau**
+  (bản gốc + luồng hình + luồng tiếng), vì trình phát tải cả ba và extension thấy hết. Bấm nhầm
+  dòng con cho ra "video" chỉ có tiếng hoặc chỉ có hình. Nay extension đọc bản gốc, nhận ra hai
+  dòng kia là thành phần con của nó và **ẩn đi** — bạn chỉ thấy một dòng, chọn chất lượng như cũ.
+
 ## [0.6.1] - 2026-07-17
 
 ### Sửa lỗi — TẢI HLS NAY MỚI THỰC SỰ CHẠY

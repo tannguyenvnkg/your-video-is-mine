@@ -2,12 +2,15 @@ import { buildMediaItem, mediaId, type BuildMediaInput } from '@/utils/detect';
 import { describeError } from '@/utils/errors';
 import { buildDownloadFilename } from '@/utils/filename';
 import {
+  addChildUrls,
   addTabMedia,
+  claimMasterParse,
   clearTabMedia,
   getConcurrency,
   getDownloadById,
   getDownloadFolder,
   getTabMedia,
+  getTabState,
   putDownload,
   putHlsJob,
   resetTab,
@@ -17,7 +20,11 @@ import {
   type DownloadState,
   type HlsJob,
 } from '@/utils/storage';
-import { parseHlsManifest, parseHlsSegments } from '@/utils/hls';
+import {
+  childUrlsOfMaster,
+  parseHlsManifest,
+  parseHlsSegments,
+} from '@/utils/hls';
 import { parseDashManifest } from '@/utils/dash';
 import {
   buildRefererSpoofRule,
@@ -76,6 +83,46 @@ export default defineBackground(() => {
       });
     } catch {
       // best-effort.
+    }
+    // W4.2 — mọi .m3u8 đều có thể là master; chỉ đọc nó ra mới biết con của nó là ai.
+    if (item.type === 'hls') void learnMasterChildren(input.tabId, item.url);
+  }
+
+  /**
+   * W4.2 — đọc một master để biết playlist con của nó, rồi ẩn các dòng con khỏi popup.
+   *
+   * ĐO THẬT (Edge + extension, fixture tách tiếng): một video = 3 dòng "HLS" y hệt nhau
+   * (master + video.m3u8 + audio.m3u8) vì webRequest thấy mọi request .m3u8 của player.
+   *
+   * Vì sao FETCH LẠI master (player vừa fetch rồi): body của request không đọc được từ MV3
+   * webRequest — đó là hạn chế của API, không phải lựa chọn. Cú fetch này thường trúng HTTP cache
+   * của trình duyệt. Best-effort hoàn toàn: 403/mạng hỏng -> không học được gì -> popup về đúng
+   * hành vi cũ (hiện cả 3 dòng), KHÔNG bao giờ chặn đường tải.
+   * ⚠️ Hàm này chưa spoof Referer (§2.3, để W2.2 sửa) -> trên site chống hotlink nó sẽ 403 và
+   * W4.2 im lặng không có tác dụng. Đó là giới hạn ĐÃ BIẾT, không phải lỗi ẩn.
+   */
+  async function learnMasterChildren(
+    tabId: number,
+    url: string,
+  ): Promise<void> {
+    try {
+      // Đã biết là con của master khác -> chắc chắn không phải master -> khỏi tốn một cú fetch.
+      const state = await getTabState(tabId);
+      if (state.childUrls?.[url]) return;
+      // Xí phần TRƯỚC khi fetch: cùng một URL được onBeforeRequest và onHeadersReceived báo hai
+      // lần, không xí thì fetch đôi.
+      if (!(await serialize(() => claimMasterParse(tabId, url)))) return;
+
+      const res = await fetch(url, { credentials: 'include' });
+      if (!res.ok) return;
+      const children = childUrlsOfMaster(
+        parseHlsManifest(await res.text(), url),
+      );
+      if (children.length === 0) return; // media playlist -> không có con.
+      const count = await serialize(() => addChildUrls(tabId, url, children));
+      if (count !== null) await updateBadge(tabId, count);
+    } catch {
+      // best-effort: ẩn dòng rác là tiện nghi, không được phép làm hỏng phát hiện.
     }
   }
 
@@ -531,7 +578,10 @@ async function handleHlsEstimate(
       audioUrl ? fetchParse(audioUrl).catch(() => null) : Promise.resolve(null),
     ]);
     // Thời lượng là MAX chứ KHÔNG phải tổng: hình và tiếng chạy SONG SONG, không nối đuôi.
-    const durationSec = Math.max(parsed.totalDuration, audio?.totalDuration ?? 0);
+    const durationSec = Math.max(
+      parsed.totalDuration,
+      audio?.totalDuration ?? 0,
+    );
     // BANDWIDTH của #EXT-X-STREAM-INF đã gồm cả rendition tiếng (RFC 8216 §4.3.4.2) -> KHÔNG
     // cộng thêm, cộng nữa là đếm đôi.
     const estBytes =

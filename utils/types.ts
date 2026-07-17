@@ -37,6 +37,18 @@ export interface MediaItem {
    * true -> KHÔNG cho tải (điền ở G5). Ranh giới cứng theo §7 lộ trình.
    */
   protected?: boolean;
+  /**
+   * Playlist CON của một master ĐÃ PARSE (variant hình hoặc rendition tiếng) -> ẩn khỏi popup (W4.2).
+   *
+   * VÌ SAO ẨN: webRequest thấy MỌI `.m3u8` mà player fetch, nên một video tách tiếng hiện ra ĐÚNG
+   * 3 dòng cùng nhãn "HLS" (master + video.m3u8 + audio.m3u8 — đã đo trên Edge thật). Trước W1.1,
+   * dòng tiếng là cách DUY NHẤT lấy được tiếng nên còn có lý do tồn tại; từ sau W1.1 offscreen tự
+   * ghép tiếng vào, nên nó chỉ còn là rác: bấm vào ra "video" chỉ có tiếng. Dòng master vẫn cho
+   * chọn đủ chất lượng nên KHÔNG mất chức năng nào.
+   */
+  child?: boolean;
+  /** URL master đã khai ra item này (giải thích vì sao bị ẩn; dùng cho nhãn ở W4.4). */
+  parentUrl?: string;
 }
 
 /**

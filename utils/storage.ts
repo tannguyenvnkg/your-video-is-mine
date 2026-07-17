@@ -6,7 +6,7 @@
 // - Cache kiểm tra bản mới trên GitHub Releases (local): tag + link + lúc kiểm tra.
 
 import type { MediaItem, MediaType } from './types';
-import { upsertMedia } from './detect';
+import { markChildren, upsertMedia, visibleMedia } from './detect';
 
 const MEDIA_KEY_PREFIX = 'media:';
 const DOWNLOADS_KEY = 'downloads';
@@ -36,6 +36,18 @@ export interface TabMediaState {
   /** epoch ms của lần điều hướng main_frame gần nhất. */
   navStartedAt: number;
   items: MediaItem[];
+  /**
+   * W4.2 — URL playlist con học được từ các master đã parse của tab này (child -> master).
+   * Phải LƯU LẠI chứ không chỉ đánh dấu item: playlist con thường bị phát hiện SAU khi master
+   * parse xong, nên item mới tới cần tra bảng này để biết mình là con.
+   */
+  childUrls?: Record<string, string>;
+  /**
+   * W4.2 — master đã parse rồi, đừng fetch lại.
+   * Nằm trong storage chứ KHÔNG phải biến toàn cục: service worker MV3 ephemeral, biến toàn cục
+   * bốc hơi giữa chừng -> mỗi lần SW hồi sinh lại đi fetch lại toàn bộ master của tab.
+   */
+  parsedMasters?: string[];
 }
 
 function mediaKey(tabId: number): string {
@@ -49,6 +61,8 @@ export async function getTabState(tabId: number): Promise<TabMediaState> {
   return {
     navStartedAt: typeof val?.navStartedAt === 'number' ? val.navStartedAt : 0,
     items: Array.isArray(val?.items) ? val.items : [],
+    childUrls: val?.childUrls ?? {},
+    parsedMasters: Array.isArray(val?.parsedMasters) ? val.parsedMasters : [],
   };
 }
 
@@ -80,10 +94,55 @@ export async function addTabMedia(
   if (requestStartedAt !== undefined && requestStartedAt < state.navStartedAt) {
     return null;
   }
-  const { list, changed } = upsertMedia(state.items, item);
+  // W4.2 — master thường parse xong TRƯỚC khi playlist con bị phát hiện, nên item mới phải tự tra
+  // bảng con. Thiếu bước này thì thứ tự đến quyết định có ẩn được hay không (race).
+  const parent = state.childUrls?.[item.url];
+  const incoming: MediaItem = parent
+    ? { ...item, child: true, parentUrl: parent }
+    : item;
+  const { list, changed } = upsertMedia(state.items, incoming);
   if (!changed) return null;
-  await setTabState(tabId, { navStartedAt: state.navStartedAt, items: list });
-  return list.length;
+  await setTabState(tabId, { ...state, items: list });
+  // Badge đếm thứ user THẤY. Đếm cả dòng con thì badge báo "3" trong khi popup có 1 dòng.
+  return visibleMedia(list).length;
+}
+
+/**
+ * W4.2 — xí phần quyền parse một master: `true` = chưa ai parse, hãy đi parse.
+ *
+ * Dedupe PHẢI qua storage: cùng một URL bị `onBeforeRequest` và `onHeadersReceived` báo hai lần
+ * (lần hai merge thêm contentType nên vẫn `changed`), và SW ephemeral thì biến toàn cục không
+ * sống nổi để nhớ. Không có nó = fetch mỗi master hai lần trở lên.
+ */
+export async function claimMasterParse(
+  tabId: number,
+  url: string,
+): Promise<boolean> {
+  const state = await getTabState(tabId);
+  if (state.parsedMasters?.includes(url)) return false;
+  await setTabState(tabId, {
+    ...state,
+    parsedMasters: [...(state.parsedMasters ?? []), url],
+  });
+  return true;
+}
+
+/**
+ * W4.2 — ghi nhận các playlist con vừa học được từ `parentUrl` + ẩn ngay những cái đã có trong list.
+ * @returns số dòng CÒN HIỆN (để cập nhật badge), hoặc null nếu không có gì đổi.
+ */
+export async function addChildUrls(
+  tabId: number,
+  parentUrl: string,
+  childUrls: readonly string[],
+): Promise<number | null> {
+  if (childUrls.length === 0) return null;
+  const state = await getTabState(tabId);
+  const map = { ...(state.childUrls ?? {}) };
+  for (const u of childUrls) map[u] = parentUrl;
+  const { list, changed } = markChildren(state.items, childUrls, parentUrl);
+  await setTabState(tabId, { ...state, items: list, childUrls: map });
+  return changed ? visibleMedia(list).length : null;
 }
 
 // --- Trạng thái tải progressive (session), keyed theo downloadId ---

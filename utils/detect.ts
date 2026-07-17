@@ -208,3 +208,33 @@ export function upsertMedia(
   next[idx] = merged;
   return { list: next, changed: true };
 }
+
+/**
+ * W4.2 — đánh dấu các item là playlist CON của `parentUrl` (ẩn khỏi popup).
+ *
+ * Gọi khi vừa parse xong một master: `childUrls` là kết quả `childUrlsOfMaster()`.
+ * Idempotent (đánh dấu lại không đổi gì) và KHÔNG đột biến list/item gốc.
+ *
+ * `changed: false` khi không có gì để đánh -> caller đừng ghi storage: ghi thừa sẽ bắn
+ * `storage.onChanged` -> popup render lại vô ích.
+ */
+export function markChildren(
+  list: MediaItem[],
+  childUrls: readonly string[],
+  parentUrl: string,
+): { list: MediaItem[]; changed: boolean } {
+  const set = new Set(childUrls);
+  let changed = false;
+  const next = list.map((m) => {
+    // Master KHÔNG bao giờ là con của chính nó (thủ sẵn, dù childUrlsOfMaster đã loại).
+    if (m.child || m.url === parentUrl || !set.has(m.url)) return m;
+    changed = true;
+    return { ...m, child: true, parentUrl };
+  });
+  return changed ? { list: next, changed } : { list, changed: false };
+}
+
+/** Item hiện lên popup: bỏ playlist con của master đã parse (W4.2). */
+export function visibleMedia(list: MediaItem[]): MediaItem[] {
+  return list.filter((m) => !m.child);
+}

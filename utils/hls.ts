@@ -49,7 +49,10 @@ function firstKeyMethod(segments: M3u8Segment[]): string | undefined {
 type RawGroups = Record<string, Record<string, M3u8Rendition>>;
 
 /** Dàn phẳng mediaGroups thành danh sách rendition (uri đã resolve tuyệt đối). */
-function flattenGroups(groups: RawGroups, manifestUrl: string): RenditionInfo[] {
+function flattenGroups(
+  groups: RawGroups,
+  manifestUrl: string,
+): RenditionInfo[] {
   const out: RenditionInfo[] = [];
   for (const [groupId, group] of Object.entries(groups)) {
     for (const [name, r] of Object.entries(group)) {
@@ -112,7 +115,10 @@ export function parseHlsManifest(
 
   const playlists = manifest.playlists ?? [];
   if (playlists.length > 0) {
-    const allAudio = flattenGroups(manifest.mediaGroups?.AUDIO ?? {}, manifestUrl);
+    const allAudio = flattenGroups(
+      manifest.mediaGroups?.AUDIO ?? {},
+      manifestUrl,
+    );
 
     const variants: VariantInfo[] = playlists.map((p) => {
       const attr = p.attributes ?? {};
@@ -143,6 +149,30 @@ export function parseHlsManifest(
     keyMethod,
     isProtected: keyMethod === 'SAMPLE-AES',
   };
+}
+
+/**
+ * Mọi URL playlist CON mà một master khai ra: variant hình + rendition tiếng (đã resolve tuyệt đối).
+ *
+ * Dùng cho W4.2: player fetch cả master lẫn con, webRequest thấy hết, nên một video hiện thành
+ * nhiều dòng "HLS" giống hệt nhau trong popup. Biết tập con này thì ẩn được chúng đi.
+ *
+ * ⚠️ Guard `isMaster` KHÔNG thừa: parse một MEDIA playlist trả về `variants: [{ uri: manifestUrl }]`
+ * — tức CHÍNH NÓ. Bỏ guard thì mỗi playlist con tự khai mình là con của chính mình rồi tự ẩn ->
+ * site nào phát thẳng media playlist (không master) sẽ có popup TRỐNG TRƠN.
+ * ⚠️ Dedupe bằng Set là BẮT BUỘC: `audioRenditions` mang rendition của MỌI group ở MỌI variant
+ * (thiết kế §3.2), nên cùng một URL tiếng xuất hiện lặp ở mỗi variant.
+ */
+export function childUrlsOfMaster(parsed: HlsParseResult): string[] {
+  if (!parsed.isMaster) return [];
+  const out = new Set<string>();
+  for (const v of parsed.variants) {
+    out.add(v.uri);
+    // Rendition không có `uri` = tiếng nằm sẵn trong variant (RFC 8216 §4.3.4.2.1) -> không có
+    // URL riêng nào để ẩn. Nặn ra một cái ở đây sẽ ẩn nhầm chính master.
+    for (const r of v.audioRenditions ?? []) if (r.uri) out.add(r.uri);
+  }
+  return [...out];
 }
 
 // --- G5: phân tích segment để tải & giải mã ---

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { formatVersionLabel, isUpdateAvailable } from '@/utils/version';
 import { fetchLatestRelease } from '@/utils/update';
-import { shortenUrl } from '@/utils/detect';
+import { shortenUrl, visibleMedia } from '@/utils/detect';
 import {
   computeFetchStats,
   formatBytes,
@@ -249,7 +249,11 @@ function MediaRow({
       const audioUri = variant.audioRenditions?.find((r) => r.selected)?.uri;
       let est: Awaited<ReturnType<typeof requestHlsEstimate>>;
       try {
-        est = await requestHlsEstimate(variant.uri, variant.bandwidth, audioUri);
+        est = await requestHlsEstimate(
+          variant.uri,
+          variant.bandwidth,
+          audioUri,
+        );
       } finally {
         setChecking(false);
       }
@@ -542,7 +546,9 @@ function App() {
 
   const downloadIndex = buildDownloadIndex(downloads);
   const hlsJobIndex = buildHlsJobIndex(hlsJobs);
-  const visible = items.filter((m) => enabledTypes[m.type]);
+  // W4.2 — bỏ playlist con (variant hình / rendition tiếng của một master đã parse): một video
+  // phải là MỘT dòng. Dòng master vẫn cho chọn đủ chất lượng nên không mất chức năng nào.
+  const visible = visibleMedia(items).filter((m) => enabledTypes[m.type]);
 
   return (
     <main className="app">

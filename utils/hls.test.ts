@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Parser } from 'm3u8-parser';
 import {
+  childUrlsOfMaster,
   parseHlsManifest,
   parseHlsSegments,
   resolveUri,
@@ -207,9 +208,7 @@ function selectedAudioUri(variant: unknown): string {
     audioUri?: string;
     audioRenditions?: { uri?: string; selected?: boolean }[];
   };
-  return (
-    v.audioUri ?? v.audioRenditions?.find((x) => x.selected)?.uri ?? ''
-  );
+  return v.audioUri ?? v.audioRenditions?.find((x) => x.selected)?.uri ?? '';
 }
 
 // --- Fixture: Twitter/X. Dạng gây câm phổ biến nhất ---------------------
@@ -340,19 +339,19 @@ describe('W1.1 audioRenditions: mang cả danh sách, chọn đúng một', () =
       const sel = v.audioRenditions!.filter((x) => x.selected);
       expect(sel).toHaveLength(1);
     }
-    expect(r.variants[0]!.audioRenditions!.find((x) => x.selected)!.groupId).toBe(
-      'audio-128000',
-    );
-    expect(r.variants[2]!.audioRenditions!.find((x) => x.selected)!.groupId).toBe(
-      'audio-32000',
-    );
+    expect(
+      r.variants[0]!.audioRenditions!.find((x) => x.selected)!.groupId,
+    ).toBe('audio-128000');
+    expect(
+      r.variants[2]!.audioRenditions!.find((x) => x.selected)!.groupId,
+    ).toBe('audio-32000');
   });
 
   // X không khai DEFAULT bao giờ -> nếu chỉ dựa vào DEFAULT thì KHÔNG chọn được gì -> câm y cũ.
   it('không có DEFAULT vẫn chọn được (fallback lấy đầu group)', () => {
-    expect(r.variants.every((v) => v.audioRenditions!.every((x) => !x.default))).toBe(
-      true,
-    );
+    expect(
+      r.variants.every((v) => v.audioRenditions!.every((x) => !x.default)),
+    ).toBe(true);
     expect(selectedAudioUri(r.variants[0])).toBe(
       'https://video.twimg.com/aud/128/pl.m3u8',
     );
@@ -422,7 +421,10 @@ v5/prog.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=68000,CODECS="mp4a.40.2",AUDIO="aud1"
 a1/prog.m3u8`;
 
-  const r = parseHlsManifest(AUDIO_ONLY_VARIANT, 'https://ex.com/dir/master.m3u8');
+  const r = parseHlsManifest(
+    AUDIO_ONLY_VARIANT,
+    'https://ex.com/dir/master.m3u8',
+  );
   const audioOnly = r.variants.find((v) => v.uri.endsWith('a1/prog.m3u8'))!;
   const withVideo = r.variants.find((v) => v.uri.endsWith('v5/prog.m3u8'))!;
 
@@ -700,5 +702,70 @@ describe('W0.4/W1.4 EXT-X-DISCONTINUITY', () => {
   // cảnh báo trước khi tải.
   it.fails('kết quả phải đếm discontinuity để còn cảnh báo', () => {
     expect(r).toHaveProperty('discontinuityCount', 2);
+  });
+});
+
+// --- W4.2: URL con của master -> ẩn khỏi popup --------------------------
+// ĐO THẬT trước khi viết (Edge + extension + fixture tách tiếng, 2026-07-17): một video phát ra
+// popup hiện ĐÚNG 3 DÒNG cùng nhãn "HLS" — master.m3u8, video.m3u8, audio.m3u8 — vì webRequest
+// thấy cả 3 và `classifyMedia` chỉ nhìn đuôi `.m3u8`. Sau W1.1, dòng tiếng KHÔNG còn là cách lấy
+// tiếng nữa (offscreen tự ghép) => nó chỉ còn là rác: bấm vào ra "video" chỉ có tiếng.
+describe('W4.2 childUrlsOfMaster: variant + rendition của master đều là CON', () => {
+  // Đúng hình dạng fixture e2e tách tiếng (và của Twitter/X, Vimeo, CMAF).
+  const MASTER_DEMUXED = `#EXTM3U
+#EXT-X-MEDIA:NAME="Audio",AUTOSELECT=YES,TYPE=AUDIO,GROUP-ID="aud-64000",URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=150000,RESOLUTION=128x96,CODECS="avc1.42c00c,mp4a.40.2",AUDIO="aud-64000"
+video.m3u8`;
+
+  it('trả về CẢ playlist hình lẫn playlist tiếng (uri tuyệt đối)', () => {
+    const r = parseHlsManifest(
+      MASTER_DEMUXED,
+      'https://ex.com/hls/master.m3u8',
+    );
+    expect(childUrlsOfMaster(r).sort()).toEqual([
+      'https://ex.com/hls/audio.m3u8',
+      'https://ex.com/hls/video.m3u8',
+    ]);
+  });
+
+  // 🔴 BẪY CHẾT NGƯỜI: parse một MEDIA playlist trả về `variants: [{ uri: manifestUrl }]` — tức
+  // chính nó. Thiếu guard `isMaster` thì mỗi playlist con sẽ tự khai mình là con của CHÍNH MÌNH
+  // -> bị ẩn -> user mở popup thấy TRỐNG TRƠN trên site phát thẳng media playlist (không master).
+  it('MEDIA playlist -> KHÔNG có con (không được tự ẩn chính mình)', () => {
+    const r = parseHlsManifest(
+      `#EXTM3U\n#EXTINF:9.9,\nseg0.ts\n#EXT-X-ENDLIST`,
+      'https://ex.com/hls/media.m3u8',
+    );
+    expect(r.isMaster).toBe(false);
+    expect(childUrlsOfMaster(r)).toEqual([]);
+  });
+
+  it('nhiều group tiếng (kiểu Twitter/X) -> gom hết, không trùng lặp', () => {
+    const X = `#EXTM3U
+#EXT-X-MEDIA:NAME="a128",TYPE=AUDIO,GROUP-ID="audio-128000",URI="aud/128/pl.m3u8"
+#EXT-X-MEDIA:NAME="a64",TYPE=AUDIO,GROUP-ID="audio-64000",URI="aud/64/pl.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,AUDIO="audio-128000"
+vid/720/pl.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=300000,RESOLUTION=480x270,AUDIO="audio-64000"
+vid/270/pl.m3u8`;
+    const r = parseHlsManifest(X, 'https://video.twimg.com/x/master.m3u8');
+    // audioRenditions mang MỌI group ở MỌI variant -> dễ ra URL trùng nếu quên dedupe.
+    expect(childUrlsOfMaster(r).sort()).toEqual([
+      'https://video.twimg.com/x/aud/128/pl.m3u8',
+      'https://video.twimg.com/x/aud/64/pl.m3u8',
+      'https://video.twimg.com/x/vid/270/pl.m3u8',
+      'https://video.twimg.com/x/vid/720/pl.m3u8',
+    ]);
+  });
+
+  // Rendition KHÔNG có URI = tiếng nằm sẵn trong variant (RFC 8216 §4.3.4.2.1) -> không có URL
+  // nào để ẩn. Nặn ra một URL ở đây sẽ ẩn nhầm chính master.
+  it('rendition không URI -> không sinh URL con bịa', () => {
+    const NO_URI = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="g",NAME="Main",AUTOSELECT=YES
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=640x360,AUDIO="g"
+muxed/pl.m3u8`;
+    const r = parseHlsManifest(NO_URI, 'https://ex.com/d/master.m3u8');
+    expect(childUrlsOfMaster(r)).toEqual(['https://ex.com/d/muxed/pl.m3u8']);
   });
 });

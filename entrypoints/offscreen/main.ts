@@ -408,8 +408,7 @@ async function runHlsJob(
     }
 
     const concurrency = req.concurrency;
-    const total =
-      parsed.segments.length + (parsedAudio?.segments.length ?? 0);
+    const total = parsed.segments.length + (parsedAudio?.segments.length ?? 0);
 
     // Vào 'fetching' NGAY (dù ffmpeg còn đang nạp) -> KHÔNG còn khoảng "chết".
     await updateHlsJob(jobId, {
@@ -499,7 +498,9 @@ async function runHlsJob(
     // tới readFile('output.mp4') — file CHƯA TỪNG được tạo — và user nhận `FS error` cụt lủn
     // trong khi lý do thật đã bị vứt mất. Kiểm mã ở đây là chỗ DUY NHẤT còn giữ được lý do đó.
     if (code !== 0) {
-      throw new Error(`Ghép video thất bại (ffmpeg mã ${code}).${recentFfmpegLog()}`);
+      throw new Error(
+        `Ghép video thất bại (ffmpeg mã ${code}).${recentFfmpegLog()}`,
+      );
     }
     writtenFiles.add(outName);
 

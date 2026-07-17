@@ -4,6 +4,7 @@ import {
   classifyMedia,
   getExtension,
   isLikelySegment,
+  markChildren,
   mediaId,
   shortenUrl,
   upsertMedia,
@@ -174,5 +175,86 @@ describe('upsertMedia', () => {
     expect(list).not.toBe(base);
     expect(list[0]!.size).toBe(100);
     expect(list[0]!.contentType).toBe('video/mp4');
+  });
+});
+
+// --- W4.2: đánh dấu playlist con -> popup ẩn đi -------------------------
+// Bối cảnh ĐO THẬT (Edge + extension + fixture tách tiếng): một video = 3 dòng "HLS" trong popup
+// (master + video.m3u8 + audio.m3u8). §3.4 bắt W4.2 đi kèm W1.1, và nay nó là NỢ: từ sau W1.1
+// offscreen tự ghép tiếng, nên dòng tiếng chỉ còn là rác gây nhầm (bấm vào ra file chỉ-tiếng).
+describe('W4.2 markChildren', () => {
+  const mkItem = (url: string, extra: Partial<MediaItem> = {}): MediaItem => ({
+    id: mediaId(url),
+    type: 'hls',
+    url,
+    tabId: 1,
+    detectedAt: 1,
+    ...extra,
+  });
+
+  const MASTER = 'https://ex.com/hls/master.m3u8';
+  const VIDEO = 'https://ex.com/hls/video.m3u8';
+  const AUDIO = 'https://ex.com/hls/audio.m3u8';
+
+  it('gắn cờ con + parentUrl cho item khớp, chừa master lại', () => {
+    const base = [mkItem(MASTER), mkItem(VIDEO), mkItem(AUDIO)];
+    const { list, changed } = markChildren(base, [VIDEO, AUDIO], MASTER);
+    expect(changed).toBe(true);
+    expect(list.find((m) => m.url === MASTER)!.child).toBeUndefined();
+    expect(list.find((m) => m.url === VIDEO)!.child).toBe(true);
+    expect(list.find((m) => m.url === AUDIO)!.parentUrl).toBe(MASTER);
+  });
+
+  it('không có gì để đánh dấu -> changed false, giữ NGUYÊN list cũ', () => {
+    // Quan trọng cho storage: changed=false -> không ghi storage.session -> không bắn
+    // storage.onChanged -> popup không render lại vô ích (và không tạo vòng lặp ghi).
+    const base = [mkItem(MASTER)];
+    const { list, changed } = markChildren(base, [VIDEO], MASTER);
+    expect(changed).toBe(false);
+    expect(list).toBe(base);
+  });
+
+  it('đánh dấu lại lần hai -> changed false (idempotent)', () => {
+    const base = [mkItem(MASTER), mkItem(VIDEO)];
+    const once = markChildren(base, [VIDEO], MASTER);
+    const twice = markChildren(once.list, [VIDEO], MASTER);
+    expect(twice.changed).toBe(false);
+    expect(twice.list).toBe(once.list);
+  });
+
+  it('không đột biến list/item gốc', () => {
+    const base = [mkItem(VIDEO)];
+    markChildren(base, [VIDEO], MASTER);
+    expect(base[0]!.child).toBeUndefined();
+  });
+});
+
+// 🔴 BẪY THẬT: onBeforeRequest thêm item, master parse xong đánh dấu con, RỒI onHeadersReceived
+// mới upsert bản mới (có contentType, KHÔNG có cờ child) đè lên. Mất cờ ở đây = dòng rác hiện lại
+// sau ~1 giây, đúng lúc user đang nhìn.
+describe('W4.2 upsertMedia giữ cờ con khi merge', () => {
+  it('merge field mới KHÔNG được xoá cờ child/parentUrl', () => {
+    const url = 'https://ex.com/hls/audio.m3u8';
+    const base: MediaItem[] = [
+      {
+        id: mediaId(url),
+        type: 'hls',
+        url,
+        tabId: 1,
+        detectedAt: 1,
+        child: true,
+        parentUrl: 'https://ex.com/hls/master.m3u8',
+      },
+    ];
+    const { list } = upsertMedia(base, {
+      id: mediaId(url),
+      type: 'hls',
+      url,
+      tabId: 1,
+      detectedAt: 2,
+      contentType: 'application/vnd.apple.mpegurl',
+    });
+    expect(list[0]!.child).toBe(true);
+    expect(list[0]!.parentUrl).toBe('https://ex.com/hls/master.m3u8');
   });
 });
