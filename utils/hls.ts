@@ -1,8 +1,8 @@
 // Parse HLS playlist (m3u8) THUẦN -> danh sách variant chất lượng + danh sách segment.
 // Không phụ thuộc chrome API. Xử lý cả master playlist lẫn media playlist trực tiếp.
 
-import { Parser, type M3u8Segment } from 'm3u8-parser';
-import type { VariantInfo } from './types';
+import { Parser, type M3u8Rendition, type M3u8Segment } from 'm3u8-parser';
+import type { RenditionInfo, VariantInfo } from './types';
 
 export interface HlsParseResult {
   isMaster: boolean;
@@ -46,6 +46,51 @@ function firstKeyMethod(segments: M3u8Segment[]): string | undefined {
   return undefined;
 }
 
+type RawGroups = Record<string, Record<string, M3u8Rendition>>;
+
+/** Dàn phẳng mediaGroups thành danh sách rendition (uri đã resolve tuyệt đối). */
+function flattenGroups(groups: RawGroups, manifestUrl: string): RenditionInfo[] {
+  const out: RenditionInfo[] = [];
+  for (const [groupId, group] of Object.entries(groups)) {
+    for (const [name, r] of Object.entries(group)) {
+      out.push({
+        groupId,
+        name,
+        // CHỈ resolve khi có uri thật: rendition không URI nghĩa là luồng nằm sẵn trong variant
+        // (RFC 8216 §4.3.4.2.1). Resolve `undefined` sẽ nặn ra chính URL master -> URL BỊA.
+        ...(r.uri ? { uri: resolveUri(r.uri, manifestUrl) } : {}),
+        ...(r.language !== undefined ? { language: r.language } : {}),
+        default: r.default === true,
+        autoselect: r.autoselect === true,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Danh sách rendition cho MỘT variant: bản sao của mọi rendition, cờ `selected` ở cái variant dùng.
+ *
+ * Chọn trong ĐÚNG group mà variant trỏ tới (`AUDIO=`), ưu tiên `DEFAULT=YES`, không có thì lấy cái
+ * đầu group.
+ * ⚠️ Fallback "lấy cái đầu" KHÔNG phải cho có: Twitter/X không khai `DEFAULT` bao giờ (đã đo trên
+ * manifest thật) -> mọi rendition `default=false` -> chỉ dựa vào DEFAULT sẽ chọn TRƯỢT và câm y cũ.
+ * ⚠️ Phải tra qua group của CHÍNH variant: X cấp mỗi tier hình một group tiếng riêng
+ * (`audio-128000`/`64000`/`32000`), lấy `#EXT-X-MEDIA` đầu tiên sẽ ghép tiếng 128k vào hình 480x270.
+ */
+function renditionsForVariant(
+  all: RenditionInfo[],
+  groupId: string | undefined,
+): RenditionInfo[] | undefined {
+  if (all.length === 0) return undefined;
+  const copies = all.map((r) => ({ ...r }));
+  if (groupId === undefined) return copies;
+  const mine = copies.filter((r) => r.groupId === groupId);
+  const chosen = mine.find((r) => r.default) ?? mine[0];
+  if (chosen) chosen.selected = true;
+  return copies;
+}
+
 export function parseHlsManifest(
   text: string,
   manifestUrl: string,
@@ -57,10 +102,13 @@ export function parseHlsManifest(
 
   const playlists = manifest.playlists ?? [];
   if (playlists.length > 0) {
+    const allAudio = flattenGroups(manifest.mediaGroups?.AUDIO ?? {}, manifestUrl);
+
     const variants: VariantInfo[] = playlists.map((p) => {
       const attr = p.attributes ?? {};
       const res = attr.RESOLUTION;
       const bandwidth = attr.BANDWIDTH ?? attr['AVERAGE-BANDWIDTH'];
+      const audioRenditions = renditionsForVariant(allAudio, attr.AUDIO);
       return {
         uri: resolveUri(p.uri, manifestUrl),
         name: variantLabel(res?.height, bandwidth),
@@ -68,6 +116,7 @@ export function parseHlsManifest(
         width: res?.width,
         height: res?.height,
         codecs: attr.CODECS,
+        ...(audioRenditions ? { audioRenditions } : {}),
       };
     });
     sortVariantsDesc(variants);

@@ -2,6 +2,29 @@
 
 Mọi thay đổi đáng chú ý được ghi ở đây. Định dạng theo [Keep a Changelog], phiên bản theo [SemVer].
 
+## [Chưa phát hành]
+
+### Sửa lỗi — VIDEO TẢI VỀ NAY ĐÃ CÓ TIẾNG
+
+**Video tải từ các site tách luồng tiếng (Twitter/X, Vimeo, Twitch, Mux, Cloudflare Stream…) trước
+bản này bị CÂM** — tải xong, báo "Đã tải xong ✓", mở ra thì không có tiếng. Không lỗi, không cảnh báo.
+
+- **Ghép luồng tiếng tách rời (`#EXT-X-MEDIA`)**: các site trên để hình và tiếng ở hai playlist riêng.
+  Trước đây chỉ playlist hình được tải, tiếng bị vứt thẳng. Nay đọc `mediaGroups.AUDIO`, chọn đúng
+  luồng tiếng của **chính mức chất lượng** bạn bấm (mỗi tier hình thường có một luồng tiếng riêng),
+  tải cả hai rồi ghép bằng hai input + map tường minh.
+- **Ước lượng dung lượng** nay tính cả segment tiếng (trước báo thiếu, thanh tiến trình chạy quá số).
+- **Lỗi ffmpeg không còn bị nuốt**: mã trả về của `exec` trước đây bị vứt, nên khi ghép hỏng người
+  dùng nhận thông báo vô nghĩa (`FS error`) ở sai chỗ, còn lý do thật bốc hơi. Nay báo đúng lý do
+  kèm log ffmpeg.
+- **Thiếu segment nay báo lỗi thay vì giao file hỏng**: trước đây một lỗ hổng trong danh sách segment
+  bị `join('|')` render thành chuỗi rỗng và ffmpeg lặng lẽ cho ra file thiếu đoạn.
+
+### Đã biết còn hỏng
+
+- **fMP4/CMAF chưa ghép được** (`Ghép video thất bại (ffmpeg mã 1)`): cách nối segment hiện tại chỉ
+  đúng với MPEG-TS. Ảnh hưởng các site đóng gói fMP4. Đang xử lý.
+
 ## [0.6.1] - 2026-07-17
 
 ### Sửa lỗi — TẢI HLS NAY MỚI THỰC SỰ CHẠY

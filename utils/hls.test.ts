@@ -275,18 +275,16 @@ describe('W0.4/W1.1 master tách tiếng (Twitter/X) -> file tải về BỊ CÂ
     expect(r.variants.map((v) => v.height)).toEqual([720, 360, 270]);
   });
 
-  // ĐỎ hôm nay: parseHlsManifest không hề đọc mediaGroups -> tiếng bốc hơi.
-  it.fails(
-    '720p phải mang playlist tiếng 128k (hiện: mất tiếng -> CÂM)',
-    () => {
-      expect(JSON.stringify(r.variants[0])).toContain(
-        'https://video.twimg.com/aud/128/pl.m3u8',
-      );
-    },
-  );
+  // ✅ W1.1 (2026-07-17): đổi it.fails -> it. Ratchet đã tự bật ("Expect test to fail") ngay khi
+  // parseHlsManifest bắt đầu đọc mediaGroups.AUDIO — đúng như W0.4 thiết kế, không cần ai nhớ.
+  it('720p phải mang playlist tiếng 128k (trước W1.1: mất tiếng -> CÂM)', () => {
+    expect(JSON.stringify(r.variants[0])).toContain(
+      'https://video.twimg.com/aud/128/pl.m3u8',
+    );
+  });
 
-  // ĐỎ hôm nay: cùng lỗi, nhưng ghim thêm việc phải tra ĐÚNG group của tier.
-  it.fails('270p phải mang tiếng 32k của chính tier mình', () => {
+  // Ghim việc phải tra ĐÚNG group của tier mình.
+  it('270p phải mang tiếng 32k của chính tier mình', () => {
     expect(JSON.stringify(r.variants[2])).toContain(
       'https://video.twimg.com/aud/32/pl.m3u8',
     );
@@ -318,6 +316,96 @@ describe('W0.4/W1.1 master tách tiếng (Twitter/X) -> file tải về BỊ CÂ
   // chứa URL. Một test không bắt nổi đúng thứ nó mang tên = niềm tin giả —
   // chính căn bệnh W0.4 sinh ra để chữa. Ca "bịa" QUAN SÁT ĐƯỢC nằm ở fixture
   // AUDIO_NO_URI ngay dưới: ở đó URL bịa KHÔNG THỂ đến từ manifest.
+});
+
+// --- W1.1: hình dạng audioRenditions (thiết kế đã chốt ở §2b) -----------
+// Chốt: mang rendition của MỌI group + cờ `selected` ở ĐÚNG MỘT cái variant dùng.
+// Lý do mang cả danh sách: W4.4 (picker ngôn ngữ) cần thấy mọi lựa chọn mà KHÔNG phải đổi lại
+// giao thức messages.ts. Lý do chỉ MỘT `selected`: "CHỞ" khác "DÙNG" — chỉ cái được DÙNG mới
+// quyết định file có câm hay không.
+describe('W1.1 audioRenditions: mang cả danh sách, chọn đúng một', () => {
+  const r = parseHlsManifest(X_MASTER, X_BASE);
+
+  it('mỗi variant mang rendition của MỌI group (để W4.4 thêm picker)', () => {
+    expect(r.variants[0]!.audioRenditions).toHaveLength(3);
+    expect(r.variants[0]!.audioRenditions!.map((x) => x.groupId)).toEqual([
+      'audio-128000',
+      'audio-64000',
+      'audio-32000',
+    ]);
+  });
+
+  it('ĐÚNG MỘT rendition được chọn, và là của group variant trỏ tới', () => {
+    for (const v of r.variants) {
+      const sel = v.audioRenditions!.filter((x) => x.selected);
+      expect(sel).toHaveLength(1);
+    }
+    expect(r.variants[0]!.audioRenditions!.find((x) => x.selected)!.groupId).toBe(
+      'audio-128000',
+    );
+    expect(r.variants[2]!.audioRenditions!.find((x) => x.selected)!.groupId).toBe(
+      'audio-32000',
+    );
+  });
+
+  // X không khai DEFAULT bao giờ -> nếu chỉ dựa vào DEFAULT thì KHÔNG chọn được gì -> câm y cũ.
+  it('không có DEFAULT vẫn chọn được (fallback lấy đầu group)', () => {
+    expect(r.variants.every((v) => v.audioRenditions!.every((x) => !x.default))).toBe(
+      true,
+    );
+    expect(selectedAudioUri(r.variants[0])).toBe(
+      'https://video.twimg.com/aud/128/pl.m3u8',
+    );
+  });
+});
+
+describe('W1.1 chọn rendition trong group: ưu tiên DEFAULT, không có thì lấy đầu', () => {
+  // Group nhiều ngôn ngữ, DEFAULT nằm ở cái THỨ HAI -> phải chọn nó, không phải cái đầu.
+  const MULTI = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="g",NAME="English",LANGUAGE="en",URI="en/pl.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="g",NAME="Spanish",LANGUAGE="es",DEFAULT=YES,URI="es/pl.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=640x360,CODECS="avc1.42c01e,mp4a.40.2",AUDIO="g"
+v/pl.m3u8`;
+
+  it('DEFAULT=YES thắng dù không đứng đầu', () => {
+    const r = parseHlsManifest(MULTI, 'https://ex.com/d/master.m3u8');
+    expect(selectedAudioUri(r.variants[0])).toBe('https://ex.com/d/es/pl.m3u8');
+  });
+
+  it('vẫn CHỞ đủ cả 2 ngôn ngữ để W4.4 dựng picker', () => {
+    const r = parseHlsManifest(MULTI, 'https://ex.com/d/master.m3u8');
+    expect(r.variants[0]!.audioRenditions!.map((x) => x.language)).toEqual([
+      'en',
+      'es',
+    ]);
+  });
+});
+
+describe('W1.1 master KHÔNG tách tiếng -> giữ nguyên đường một-input', () => {
+  it('master không có #EXT-X-MEDIA -> không mang audioRenditions', () => {
+    const MUXED = `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=90000,RESOLUTION=128x96,CODECS="avc1.42c00c,mp4a.40.2"
+media.m3u8`;
+    const r = parseHlsManifest(MUXED, 'https://ex.com/d/master.m3u8');
+    expect(r.variants[0]!.audioRenditions).toBeUndefined();
+    expect(selectedAudioUri(r.variants[0])).toBe('');
+  });
+
+  // Ca lai: master CÓ mediaGroups nhưng variant này KHÔNG trỏ AUDIO= -> tiếng nằm trong nó.
+  // Vẫn CHỞ danh sách (W4.4 cần) nhưng KHÔNG chọn gì -> không ghép nhầm tiếng của variant khác.
+  it('variant không khai AUDIO= -> chở danh sách nhưng KHÔNG chọn gì', () => {
+    const MIXED = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="g",NAME="Main",DEFAULT=YES,URI="aud/pl.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=640x360,CODECS="avc1.42c01e",AUDIO="g"
+sep/pl.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=320x180,CODECS="avc1.42c00c,mp4a.40.2"
+muxed/pl.m3u8`;
+    const r = parseHlsManifest(MIXED, 'https://ex.com/d/master.m3u8');
+    const muxed = r.variants.find((v) => v.uri.includes('muxed'))!;
+    const sep = r.variants.find((v) => v.uri.includes('sep'))!;
+    expect(selectedAudioUri(sep)).toBe('https://ex.com/d/aud/pl.m3u8');
+    expect(selectedAudioUri(muxed)).toBe('');
+  });
 });
 
 // --- Fixture: RFC 8216 §4.3.4.2.1 — #EXT-X-MEDIA KHÔNG có URI ------------
@@ -382,16 +470,13 @@ describe('W0.4/W1.1 Vimeo: tiếng/hình trùng path, chỉ khác query', () => 
     );
   });
 
-  // ĐỎ hôm nay: tiếng bị vứt.
-  it.fails(
-    'variant phải mang playlist tiếng (st=audio), resolve tuyệt đối',
-    () => {
-      const r = parseHlsManifest(VIMEO_MASTER, VIMEO_BASE);
-      expect(JSON.stringify(r.variants[0])).toContain(
-        'https://vod.vimeocdn.com/a/parcel/v2/pl.m3u8?st=audio&tk=abc',
-      );
-    },
-  );
+  // ✅ W1.1 (2026-07-17): đổi it.fails -> it (ratchet tự bật).
+  it('variant phải mang playlist tiếng (st=audio), resolve tuyệt đối', () => {
+    const r = parseHlsManifest(VIMEO_MASTER, VIMEO_BASE);
+    expect(JSON.stringify(r.variants[0])).toContain(
+      'https://vod.vimeocdn.com/a/parcel/v2/pl.m3u8?st=audio&tk=abc',
+    );
+  });
 });
 
 // --- Fixture: Apple fMP4 — CÙNG uri variant dưới 3 group tiếng -----------

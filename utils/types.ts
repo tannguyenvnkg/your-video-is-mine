@@ -39,6 +39,35 @@ export interface MediaItem {
   protected?: boolean;
 }
 
+/**
+ * Một luồng tách rời khai bằng `#EXT-X-MEDIA` (HLS mediaGroups) — tiếng hoặc phụ đề.
+ *
+ * VÌ SAO MANG CẢ DANH SÁCH thay vì một `audioUri` đã resolve: W4.4 (cho user chọn ngôn ngữ) cần
+ * thấy MỌI lựa chọn. Mang sẵn từ W1.1 thì thêm picker sau KHÔNG phải đổi lại giao thức
+ * `messages.ts` lần nữa.
+ */
+export interface RenditionInfo {
+  /** GROUP-ID của `#EXT-X-MEDIA`; variant trỏ tới group qua `AUDIO=` / `SUBTITLES=`. */
+  groupId: string;
+  /** NAME — key trong group, cũng là nhãn hiển thị cho user. */
+  name: string;
+  /**
+   * URL tuyệt đối của playlist rendition.
+   *
+   * VẮNG khi `#EXT-X-MEDIA` không khai URI. Theo RFC 8216 §4.3.4.2.1 điều đó nghĩa là luồng này
+   * ĐÃ nằm sẵn trong variant -> KHÔNG có gì để tải riêng -> giữ nguyên đường một-input.
+   */
+  uri?: string;
+  language?: string;
+  default: boolean;
+  autoselect: boolean;
+  /**
+   * true ở ĐÚNG MỘT rendition của danh sách: cái mà variant này THẬT SỰ dùng.
+   * (`selected` mà `uri` vắng = luồng nằm sẵn trong variant, không cần tải riêng.)
+   */
+  selected?: boolean;
+}
+
 /** Một mức chất lượng (variant HLS / representation DASH) để user chọn (G2). */
 export interface VariantInfo {
   /** URL tuyệt đối của media playlist / representation. */
@@ -49,4 +78,11 @@ export interface VariantInfo {
   width?: number;
   height?: number;
   codecs?: string;
+  /**
+   * Luồng tiếng tách rời (`#EXT-X-MEDIA:TYPE=AUDIO`) của MỌI group trong master, cờ `selected` ở
+   * cái variant này dùng. Vắng = master không khai tiếng tách rời -> tiếng nằm trong variant.
+   *
+   * Bỏ qua trường này chính là bệnh CÂM (§2.1): dữ liệu nằm sẵn trong manifest và bị vứt đi.
+   */
+  audioRenditions?: RenditionInfo[];
 }

@@ -246,9 +246,10 @@ function MediaRow({
       setDlError(null);
       // Bỏ khoảng im lặng: hiện "Đang kiểm tra…" trong lúc ước tính (job chưa tồn tại).
       setChecking(true);
+      const audioUri = variant.audioRenditions?.find((r) => r.selected)?.uri;
       let est: Awaited<ReturnType<typeof requestHlsEstimate>>;
       try {
-        est = await requestHlsEstimate(variant.uri, variant.bandwidth);
+        est = await requestHlsEstimate(variant.uri, variant.bandwidth, audioUri);
       } finally {
         setChecking(false);
       }
@@ -275,6 +276,9 @@ function MediaRow({
         media.url,
         tabId,
         variant.height,
+        // W1.1: luồng tiếng tách rời mà variant này dùng. Vắng `uri` = tiếng đã nằm sẵn trong
+        // variant (RFC 8216 §4.3.4.2.1) -> không gửi gì -> offscreen giữ đường một-input.
+        audioUri,
       );
       if (!res.ok) setDlError(res.error);
     },

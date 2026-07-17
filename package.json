@@ -16,7 +16,8 @@
     "e2e": "node e2e/smoke.mjs",
     "e2e:fixture": "node e2e/hls-403.mjs",
     "e2e:demuxed": "node e2e/real-demuxed.mjs",
-    "test:e2e": "node e2e/smoke.mjs && node e2e/hls-403.mjs",
+    "e2e:demuxed-fixture": "node e2e/demuxed.mjs",
+    "test:e2e": "node e2e/smoke.mjs && node e2e/hls-403.mjs && node e2e/demuxed.mjs",
     "compile": "tsc --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -24,7 +25,8 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "postinstall": "node scripts/copy-ffmpeg-core.mjs && wxt prepare"
+    "postinstall": "node scripts/copy-ffmpeg-core.mjs && wxt prepare",
+    "e2e:demuxed-fixture": "node e2e/demuxed.mjs"
   },
   "dependencies": {
     "@ffmpeg/core": "^0.12.10",

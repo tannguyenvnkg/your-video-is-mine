@@ -240,7 +240,11 @@ export default defineBackground(() => {
       }
       if (message.kind === 'hls/estimate') {
         return respond(
-          handleHlsEstimate(message.variantUrl, message.bandwidth),
+          handleHlsEstimate(
+            message.variantUrl,
+            message.bandwidth,
+            message.audioUrl,
+          ),
         );
       }
       if (message.kind === 'hls/download') {
@@ -250,6 +254,7 @@ export default defineBackground(() => {
             message.mediaUrl,
             message.tabId,
             message.height,
+            message.audioUrl,
           ),
         );
       }
@@ -496,20 +501,33 @@ async function handleDownload(
 async function handleHlsEstimate(
   variantUrl: string,
   bandwidth?: number,
+  audioUrl?: string,
 ): Promise<HlsEstimateResponse> {
   try {
-    const res = await fetch(variantUrl, { credentials: 'include' });
-    if (!res.ok) return { ok: false, error: `Máy chủ trả mã ${res.status}.` };
-    const parsed = parseHlsSegments(await res.text(), variantUrl);
+    const fetchParse = async (url: string) => {
+      const res = await fetch(url, { credentials: 'include' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return parseHlsSegments(await res.text(), url);
+    };
+    // W1.1: job sẽ tải CẢ playlist tiếng -> ước lượng phải soi cả nó, nếu không popup báo
+    // "10 segment" rồi thanh tiến trình chạy tới 21 — trông như lỗi.
+    const [parsed, audio] = await Promise.all([
+      fetchParse(variantUrl),
+      audioUrl ? fetchParse(audioUrl) : Promise.resolve(null),
+    ]);
+    // Thời lượng là MAX chứ KHÔNG phải tổng: hình và tiếng chạy SONG SONG, không nối đuôi.
+    const durationSec = Math.max(parsed.totalDuration, audio?.totalDuration ?? 0);
+    // BANDWIDTH của #EXT-X-STREAM-INF đã gồm cả rendition tiếng (RFC 8216 §4.3.4.2) -> KHÔNG
+    // cộng thêm, cộng nữa là đếm đôi.
     const estBytes =
       bandwidth && bandwidth > 0
-        ? Math.round((bandwidth / 8) * parsed.totalDuration)
+        ? Math.round((bandwidth / 8) * durationSec)
         : undefined;
     return {
       ok: true,
-      protected: parsed.isProtected,
-      segmentCount: parsed.segments.length,
-      durationSec: parsed.totalDuration,
+      protected: parsed.isProtected || (audio?.isProtected ?? false),
+      segmentCount: parsed.segments.length + (audio?.segments.length ?? 0),
+      durationSec,
       estBytes,
     };
   } catch {
@@ -525,11 +543,18 @@ async function handleHlsDownload(
   mediaUrl: string,
   tabId: number,
   height?: number,
+  audioUrl?: string,
 ): Promise<HlsDownloadResponse> {
   try {
     const media = (await getTabMedia(tabId)).find((m) => m.url === mediaUrl);
     // Spoof Referer/Origin cho host chứa segment (vượt hotlink/403).
     await applySpoof(variantUrl, media?.pageUrl);
+    // W1.1: playlist tiếng hay nằm cùng host với hình, nhưng KHÔNG phải luôn luôn. Spoof thêm cho
+    // host của nó khi khác — nếu không, stream tách tiếng trên CDN riêng sẽ 403 đúng ở luồng tiếng
+    // và ra file câm y như cũ. (Bản phủ đầy đủ mọi host/thư mục là W2.3.)
+    if (audioUrl && hostFromUrl(audioUrl) !== hostFromUrl(variantUrl)) {
+      await applySpoof(audioUrl, media?.pageUrl);
+    }
     const folder = await getDownloadFolder();
     const filename = buildDownloadFilename({
       url: variantUrl,
@@ -560,6 +585,7 @@ async function handleHlsDownload(
         kind: 'hls/run',
         jobId,
         variantUrl,
+        audioUrl,
         filename,
         mediaUrl,
         tabId,

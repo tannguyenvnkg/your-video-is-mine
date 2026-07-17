@@ -8,6 +8,31 @@ declare module 'm3u8-parser' {
     RESOLUTION?: { width: number; height: number };
     CODECS?: string;
     NAME?: string;
+    /** GROUP-ID của nhóm tiếng tách rời mà variant này dùng (trỏ vào mediaGroups.AUDIO). */
+    AUDIO?: string;
+    /** GROUP-ID của nhóm phụ đề (trỏ vào mediaGroups.SUBTITLES). */
+    SUBTITLES?: string;
+    [key: string]: unknown;
+  }
+
+  /** Một rendition khai bằng #EXT-X-MEDIA. */
+  export interface M3u8Rendition {
+    default?: boolean;
+    autoselect?: boolean;
+    language?: string;
+    /**
+     * ⚠️ VẮNG HẲN (không phải undefined) khi #EXT-X-MEDIA không khai URI — đã đo thật ở
+     * m3u8-parser@7.2.0. Theo RFC 8216 §4.3.4.2.1 nghĩa là luồng nằm sẵn trong mọi variant.
+     * ⚠️ NGUYÊN VĂN manifest: parser KHÔNG resolve, phải tự resolveUri.
+     */
+    uri?: string;
+    [key: string]: unknown;
+  }
+
+  /** mediaGroups[TYPE][GROUP-ID][NAME] — ⚠️ key trong group là NAME, không phải id. */
+  export interface M3u8MediaGroups {
+    AUDIO?: Record<string, Record<string, M3u8Rendition>>;
+    SUBTITLES?: Record<string, Record<string, M3u8Rendition>>;
     [key: string]: unknown;
   }
 
@@ -47,6 +72,7 @@ declare module 'm3u8-parser' {
 
   export interface M3u8Manifest {
     playlists?: M3u8Playlist[];
+    mediaGroups?: M3u8MediaGroups;
     segments?: M3u8Segment[];
     mediaSequence?: number;
     targetDuration?: number;

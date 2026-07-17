@@ -49,7 +49,13 @@ export type RuntimeMessage =
   | { kind: 'download/progressive'; url: string; tabId: number }
   | { kind: 'ffmpeg/demo' }
   // popup -> background: ước tính dung lượng + kiểm tra DRM trước khi tải HLS.
-  | { kind: 'hls/estimate'; variantUrl: string; bandwidth?: number }
+  | {
+      kind: 'hls/estimate';
+      variantUrl: string;
+      bandwidth?: number;
+      /** W1.1: playlist tiếng tách rời — job sẽ tải CẢ nó, nên ước lượng phải tính cả. */
+      audioUrl?: string;
+    }
   // popup -> background: bắt đầu tải & ghép HLS.
   | {
       kind: 'hls/download';
@@ -57,6 +63,12 @@ export type RuntimeMessage =
       mediaUrl: string;
       tabId: number;
       height?: number;
+      /**
+       * URL playlist TIẾNG tách rời (W1.1) — lấy từ rendition `selected` của variant.
+       * Vắng = tiếng đã nằm trong variant -> đường một-input.
+       * W4.4 (chọn ngôn ngữ) chỉ việc gửi URL khác vào đây, KHÔNG phải đổi giao thức lần nữa.
+       */
+      audioUrl?: string;
     }
   // offscreen -> background: cập nhật tiến trình job HLS.
   // Offscreen KHÔNG ghi thẳng chrome.storage được (chỉ có chrome.runtime) -> mọi thay đổi state
@@ -87,6 +99,8 @@ export type OffscreenRequest =
       mediaUrl: string;
       tabId: number;
       spoofHost?: string;
+      /** W1.1: playlist tiếng tách rời. Có -> offscreen tải 2 bộ segment rồi ghép 2 input. */
+      audioUrl?: string;
       /**
        * Số luồng tải song song. PHẢI do background đọc từ settings rồi truyền vào:
        * offscreen KHÔNG có `chrome.storage` (chỉ có `chrome.runtime`) nên không tự đọc được.
@@ -148,12 +162,14 @@ export async function requestFfmpegDemo(): Promise<FfmpegDemoResponse> {
 export async function requestHlsEstimate(
   variantUrl: string,
   bandwidth?: number,
+  audioUrl?: string,
 ): Promise<HlsEstimateResponse> {
   try {
     const res = await browser.runtime.sendMessage({
       kind: 'hls/estimate',
       variantUrl,
       bandwidth,
+      audioUrl,
     });
     return res as HlsEstimateResponse;
   } catch {
@@ -166,6 +182,7 @@ export async function requestHlsDownload(
   mediaUrl: string,
   tabId: number,
   height?: number,
+  audioUrl?: string,
 ): Promise<HlsDownloadResponse> {
   try {
     const res = await browser.runtime.sendMessage({
@@ -174,6 +191,7 @@ export async function requestHlsDownload(
       mediaUrl,
       tabId,
       height,
+      audioUrl,
     });
     return res as HlsDownloadResponse;
   } catch {

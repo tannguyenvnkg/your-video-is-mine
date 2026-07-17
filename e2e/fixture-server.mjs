@@ -19,6 +19,10 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const FIXTURES = resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures/hls');
+const FIXTURES_DEMUXED = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  'fixtures/hls-demuxed',
+);
 
 /** Nội dung fixture đọc một lần (nhỏ, 168KB). */
 function readFixture(name) {
@@ -104,6 +108,75 @@ export async function startFixtureServer({
     mediaUrl: `http://127.0.0.1:${port}/hls/media.m3u8`,
     /** Số request bị chặn 403 -> bằng chứng cổng có bắn. */
     blocked: () => requests.filter((r) => r.status === 403),
+    close: () => new Promise((r) => server.close(r)),
+  };
+}
+
+/**
+ * Server fixture HLS **TÁCH TIẾNG** (master + playlist hình + playlist tiếng RIÊNG).
+ *
+ * VÌ SAO TÁCH RIÊNG KHỎI startFixtureServer: fixture kia là master **MUXED** (hình+tiếng chung một
+ * segment) — đúng "ca dễ" mà §1.1 cảnh báo, và là lý do 193 test xanh trong khi sản phẩm câm.
+ * Fixture này có `#EXT-X-MEDIA:TYPE=AUDIO` + variant trỏ `AUDIO="aud-64000"`, tức ĐÚNG hình dạng
+ * làm file tải về mất tiếng (§2.1) — dạng mà Twitter/X, Vimeo, Twitch, CMAF đều dùng.
+ *
+ * Sinh bằng ffmpeg (offline, tất định, KHÔNG dính lỗi #30 của fMP4 vì đây là MPEG-TS):
+ *   hình: testsrc 128x96, 10fps, 10s, -an  -> 10 segment = 100 khung
+ *   tiếng: sine 440Hz, 10s, aac 64k, -vn   -> 11 segment (segment tiếng LỆCH số lượng với hình —
+ *          đúng như thật, và bắt lỗi bản sửa nào ngầm giả định hai bên cùng số segment).
+ *
+ * Master cố ý KHÔNG khai `DEFAULT` -> mọi rendition `default=false` (bẫy Twitter/X thật, đã đo ở
+ * W0.4): bản sửa nào chỉ dựa vào "ưu tiên DEFAULT=YES" sẽ chọn trượt và lộ ra ngay tại đây.
+ */
+export async function startDemuxedServer() {
+  /** @type {{url:string, status:number}[]} */
+  const requests = [];
+
+  const server = createServer((req, res) => {
+    const path = (req.url ?? '/').split('?')[0];
+    const send = (status, body, type) => {
+      requests.push({ url: path, status });
+      res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store' });
+      res.end(body);
+    };
+
+    // Đuôi .ts trên URL (đuôi HLS thật) nhưng file trên đĩa là .bin — cùng lý do như fixture muxed:
+    // .ts trùng đuôi TypeScript nên tsc/eslint sẽ parse file video như mã nguồn (đã trả giá ở W0.3).
+    const m = /^\/hls\/((?:v|a)\d+)\.ts$/.exec(path);
+    if (m) {
+      send(200, readFileSync(join(FIXTURES_DEMUXED, `${m[1]}.bin`)), 'video/mp2t');
+      return;
+    }
+    const pl = /^\/hls\/(master|video|audio)\.m3u8$/.exec(path);
+    if (pl) {
+      send(
+        200,
+        readFileSync(join(FIXTURES_DEMUXED, `${pl[1]}.m3u8`)),
+        'application/vnd.apple.mpegurl',
+      );
+      return;
+    }
+    if (path === '/page.html') {
+      send(200, '<!doctype html><title>fixture tách tiếng</title><p>fixture', 'text/html');
+      return;
+    }
+    send(404, 'not found', 'text/plain');
+  });
+
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+
+  return {
+    port,
+    requests,
+    origin: `http://127.0.0.1:${port}`,
+    pageUrl: `http://127.0.0.1:${port}/page.html`,
+    masterUrl: `http://127.0.0.1:${port}/hls/master.m3u8`,
+    /** Playlist HÌNH — đây là thứ user chọn khi bấm 720p (nó KHÔNG chứa tiếng). */
+    videoUrl: `http://127.0.0.1:${port}/hls/video.m3u8`,
+    audioUrl: `http://127.0.0.1:${port}/hls/audio.m3u8`,
+    /** Đã fetch segment tiếng lần nào chưa -> bằng chứng đường tiếng có thật sự chạy. */
+    audioSegmentHits: () => requests.filter((r) => /\/a\d+\.ts$/.test(r.url)).length,
     close: () => new Promise((r) => server.close(r)),
   };
 }
