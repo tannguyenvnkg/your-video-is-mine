@@ -2,6 +2,48 @@
 
 Mọi thay đổi đáng chú ý được ghi ở đây. Định dạng theo [Keep a Changelog], phiên bản theo [SemVer].
 
+## [0.6.1] - 2026-07-17
+
+### Sửa lỗi — TẢI HLS NAY MỚI THỰC SỰ CHẠY
+
+**Tải HLS (.m3u8) trước bản này CHƯA TỪNG hoạt động** — kể từ commit đầu tiên. Bấm "Tải .mp4" thì
+job đứng im ở "Đang nạp bộ xử lý video…" **vĩnh viễn, không báo lỗi**. Ba lỗi độc lập chồng lên nhau,
+cả ba đều im lặng tuyệt đối:
+
+- **ffmpeg không nạp được**: bản `@ffmpeg/core` đóng gói là **UMD**, trong khi `@ffmpeg/ffmpeg` luôn
+  tạo worker `type:"module"` nên nạp core bằng `import()` và cần `export default` (chỉ bản **ESM** có).
+  Sinh ra `Lỗi: Error: failed to import ffmpeg-core.js`. Đã chuyển sang `dist/esm` + khoá bằng unit test.
+- **Offscreen không có `chrome.storage`**: offscreen document chỉ được cấp `chrome.runtime`. Mọi lời gọi
+  ghi tiến trình (`updateHlsJob`) ném `TypeError` ngay lập tức; khối `catch` lại ghi lỗi bằng đúng hàm
+  đó nên **ném tiếp**, và lỗi bị `.catch(() => undefined)` nuốt sạch → job kẹt mãi mãi. Nay offscreen
+  báo tiến trình qua message `hls/progress` để background ghi hộ; `concurrency` do background truyền vào.
+- **Race khi ghi segment song song**: chỉ số ghi được tăng *sau* `await`, nên hai luồng ghi trùng một
+  buffer — mà `writeFile` của ffmpeg **transfer (detach)** ArrayBuffer → `"ArrayBuffer is detached"`
+  ở khoảng segment thứ 10. Nay xí phần chỉ số trước khi `await`.
+
+Đã kiểm chứng thật: tải trọn 184 segment và ghép ra `.mp4` trong ~75 giây.
+
+### Sửa lỗi — hết "hỏng mà không nói"
+
+- Message gửi sang bộ xử lý video nếu rớt thì **báo lỗi ra popup** thay vì im lặng treo.
+- Tải playlist có **timeout 30s** + kiểm mã HTTP (trước đây treo là treo vĩnh viễn, và trang lỗi
+  403/404 bị hiểu nhầm thành "playlist không có segment").
+- `ensureOffscreen` chỉ còn bỏ qua đúng lỗi "document đã tồn tại"; lỗi thật sẽ hiện ra.
+- Lỗi nạp ffmpeg lúc khởi động không còn bị nuốt — ghi ra console của offscreen.
+- Hết chuỗi lặp xấu `Lỗi: Error: ...` (ffmpeg reject bằng chuỗi, không phải `Error`).
+
+### Thay đổi
+
+- Trạng thái mới **"Đang chờ bộ xử lý nhận việc…"** tách khỏi "Đang nạp bộ xử lý video…", để phân biệt
+  "chưa nhận việc" với "đang tải playlist". Nhãn cũ nói sai việc đang chạy.
+
+### Nội bộ
+
+- **`pnpm e2e`**: cổng kiểm thử tự động nạp bản build vào Edge thật, chạy "Kiểm tra ffmpeg" và tải trọn
+  một video HLS. Toàn bộ compile/lint/test/build đều XANH suốt thời gian tính năng chủ lực đã chết —
+  không cổng tĩnh nào bắt được lớp lỗi này.
+- Ghi chú phát hành trên GitHub nay lấy đúng mục CHANGELOG của phiên bản thay vì danh sách commit thô.
+
 ## [0.6.0] - 2026-07-15
 
 ### Thêm

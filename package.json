@@ -2,7 +2,7 @@
   "name": "your_video_is_mine",
   "description": "Your Video Is Mine — extension phát hiện và tải video (HLS/DASH/progressive)",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.6.1",
   "packageManager": "pnpm@11.11.0",
   "type": "module",
   "scripts": {
