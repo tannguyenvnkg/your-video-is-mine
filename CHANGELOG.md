@@ -30,6 +30,13 @@ bản này bị CÂM** — tải xong, báo "Đã tải xong ✓", mở ra thì 
 - Máy chủ phớt lờ yêu cầu tải theo đoạn (trả cả file thay vì đoạn) nay **báo lỗi rõ ràng** thay vì
   âm thầm ghi sai và ngốn băng thông.
 
+### Sửa lỗi — CHỌN CHẤT LƯỢNG KHÔNG CÒN BÁO "403" TRÊN SITE CHẶN TẢI
+
+- **Bật vượt-chặn ngay từ bước đầu**: trên site chống hotlink (chặn tải bằng cách kiểm "bạn đến từ
+  đâu"), trước đây bấm **Chất lượng** là báo *"Máy chủ trả mã 403"* — không bao giờ tới được nút tải,
+  nên tính năng vượt chặn thành vô dụng đúng chỗ cần nó nhất. Nay extension gửi đúng thông tin "đến
+  từ trang gốc" **ngay từ cú đọc manifest đầu tiên**, nên danh sách chất lượng hiện ra bình thường.
+
 ### Cải thiện — MỖI VIDEO CHỈ CÒN MỘT DÒNG TRONG DANH SÁCH
 
 - **Ẩn playlist con**: một video HLS tách tiếng trước đây hiện lên **ba dòng "HLS" giống nhau**

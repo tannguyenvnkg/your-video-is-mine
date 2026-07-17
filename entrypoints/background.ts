@@ -277,7 +277,9 @@ export default defineBackground(() => {
       };
 
       if (message.kind === 'manifest/variants') {
-        return respond(handleVariants(message.url, message.mediaType));
+        return respond(
+          handleVariants(message.url, message.mediaType, message.tabId),
+        );
       }
       if (message.kind === 'download/progressive') {
         return respond(handleDownload(message.url, message.tabId));
@@ -291,6 +293,7 @@ export default defineBackground(() => {
             message.variantUrl,
             message.bandwidth,
             message.audioUrl,
+            message.tabId,
           ),
         );
       }
@@ -483,12 +486,64 @@ export default defineBackground(() => {
   });
 });
 
+/**
+ * W2.2 — bật spoof Referer/Origin ÔM SÁT một cú fetch rồi gỡ ngay trong `finally`.
+ *
+ * §2.3: `handleVariants`/`handleHlsEstimate` là HAI cú fetch ĐẦU TIÊN của flow, mà trước đây chúng
+ * fetch trần ⇒ site chống hotlink 403 ngay bước "Chất lượng", `handleHlsDownload` (hàm CÓ spoof)
+ * không bao giờ được gọi tới ⇒ tính năng vượt 403 là code chết đúng trên site cần nó nhất.
+ *
+ * `pageUrl` (từ `media.pageUrl` tra theo tabId) là Referer THẬT của trang — quan trọng vì hotlink
+ * thường kiểm Referer khớp domain site, không phải domain CDN. Thiếu pageUrl thì applySpoof tự lùi
+ * về dùng chính targetUrl (đủ qua cổng "thiếu Referer", nhưng kém khớp trên site kiểm domain).
+ *
+ * ⚠️ Giới hạn ĐÃ BIẾT (để W2.4 xử): rule keyed theo host, nên nếu một download khác đang chạy trên
+ * CÙNG host thì `removeSpoof` ở đây gỡ nhầm rule của nó. W2.4 cấp id riêng mỗi download để hết đụng.
+ */
+async function withSpoofedFetch<T>(
+  targetUrl: string,
+  pageUrl: string | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  await applySpoof(targetUrl, pageUrl);
+  try {
+    return await fn();
+  } finally {
+    const host = hostFromUrl(targetUrl);
+    if (host) await removeSpoof(host);
+  }
+}
+
+/**
+ * pageUrl để dựng Referer thật. Ưu tiên item khớp `url` (master); nếu không (vd estimate chỉ có
+ * URL variant, không khớp media nào) thì lùi về pageUrl của item bất kỳ trên tab — pageUrl thực chất
+ * là của cả TRANG (resetTab xoá sạch khi điều hướng nên mọi item cùng một trang). undefined khi
+ * không có tabId hoặc tab chưa có media nào.
+ */
+async function pageUrlFor(
+  tabId?: number,
+  url?: string,
+): Promise<string | undefined> {
+  if (tabId === undefined || tabId < 0) return undefined;
+  const items = await getTabMedia(tabId);
+  if (url) {
+    const exact = items.find((m) => m.url === url)?.pageUrl;
+    if (exact) return exact;
+  }
+  return items.find((m) => m.pageUrl)?.pageUrl;
+}
+
 async function handleVariants(
   url: string,
   mediaType: ManifestKind,
+  tabId?: number,
 ): Promise<VariantsResponse> {
   try {
-    const res = await fetch(url, { credentials: 'include' });
+    const pageUrl = await pageUrlFor(tabId, url);
+    // W2.2: spoof TRƯỚC khi fetch — 403 không được giết bước chọn chất lượng.
+    const res = await withSpoofedFetch(url, pageUrl, () =>
+      fetch(url, { credentials: 'include' }),
+    );
     if (!res.ok) return { ok: false, error: `Máy chủ trả mã ${res.status}.` };
     const text = await res.text();
     const parsed =
@@ -556,45 +611,15 @@ async function handleHlsEstimate(
   variantUrl: string,
   bandwidth?: number,
   audioUrl?: string,
+  tabId?: number,
 ): Promise<HlsEstimateResponse> {
+  // W2.2: spoof Referer/Origin quanh cú fetch ước lượng — cùng lý do §2.3 như handleVariants.
+  // Ước lượng thường trỏ cùng host với hình; host tiếng khác (nếu có) là phần W2.3 phủ đầy đủ.
+  const pageUrl = await pageUrlFor(tabId, variantUrl);
   try {
-    // Mã HTTP PHẢI sống sót tới tay user: "Máy chủ trả mã 403." chỉ thẳng vào chống hotlink,
-    // còn "mạng hoặc CORS" chỉ sai hướng hoàn toàn — đúng kiểu "lý do thật bốc hơi" mà chính
-    // phiên này vừa vá ở khâu ffmpeg. Ném HttpError riêng để khối catch phân biệt được.
-    const fetchParse = async (url: string) => {
-      const res = await fetch(url, { credentials: 'include' });
-      if (!res.ok) throw new HttpError(res.status);
-      return parseHlsSegments(await res.text(), url);
-    };
-    // W1.1: job sẽ tải CẢ playlist tiếng -> ước lượng phải soi cả nó, nếu không popup báo
-    // "10 segment" rồi thanh tiến trình chạy tới 21 — trông như lỗi.
-    //
-    // ⚠️ Playlist tiếng hỏng KHÔNG được chặn đường tải: đây chỉ là bước ƯỚC LƯỢNG. Hàm này chưa
-    // gọi applySpoof (bug §2.3, để W2.2 sửa) trong khi handleHlsDownload thì CÓ -> trên site chống
-    // hotlink, playlist tiếng rất dễ 403 ở đây rồi vẫn tải ngon ở kia. Để Promise.all reject thì
-    // user mất luôn nút tải vì một con số ước lượng — đổi một phiền toái nhỏ lấy một ngõ cụt.
-    const [parsed, audio] = await Promise.all([
-      fetchParse(variantUrl),
-      audioUrl ? fetchParse(audioUrl).catch(() => null) : Promise.resolve(null),
-    ]);
-    // Thời lượng là MAX chứ KHÔNG phải tổng: hình và tiếng chạy SONG SONG, không nối đuôi.
-    const durationSec = Math.max(
-      parsed.totalDuration,
-      audio?.totalDuration ?? 0,
+    return await withSpoofedFetch(variantUrl, pageUrl, () =>
+      estimateFromPlaylists(variantUrl, bandwidth, audioUrl),
     );
-    // BANDWIDTH của #EXT-X-STREAM-INF đã gồm cả rendition tiếng (RFC 8216 §4.3.4.2) -> KHÔNG
-    // cộng thêm, cộng nữa là đếm đôi.
-    const estBytes =
-      bandwidth && bandwidth > 0
-        ? Math.round((bandwidth / 8) * durationSec)
-        : undefined;
-    return {
-      ok: true,
-      protected: parsed.isProtected || (audio?.isProtected ?? false),
-      segmentCount: parsed.segments.length + (audio?.segments.length ?? 0),
-      durationSec,
-      estBytes,
-    };
   } catch (e) {
     if (e instanceof HttpError) {
       return { ok: false, error: `Máy chủ trả mã ${e.status}.` };
@@ -604,6 +629,47 @@ async function handleHlsEstimate(
       error: 'Không tải/parse được playlist (mạng hoặc CORS).',
     };
   }
+}
+
+async function estimateFromPlaylists(
+  variantUrl: string,
+  bandwidth?: number,
+  audioUrl?: string,
+): Promise<HlsEstimateResponse> {
+  // Mã HTTP PHẢI sống sót tới tay user: "Máy chủ trả mã 403." chỉ thẳng vào chống hotlink,
+  // còn "mạng hoặc CORS" chỉ sai hướng hoàn toàn — đúng kiểu "lý do thật bốc hơi" mà chính
+  // phiên này vừa vá ở khâu ffmpeg. Ném HttpError riêng để khối catch phân biệt được.
+  const fetchParse = async (url: string) => {
+    const res = await fetch(url, { credentials: 'include' });
+    if (!res.ok) throw new HttpError(res.status);
+    return parseHlsSegments(await res.text(), url);
+  };
+  // W1.1: job sẽ tải CẢ playlist tiếng -> ước lượng phải soi cả nó, nếu không popup báo
+  // "10 segment" rồi thanh tiến trình chạy tới 21 — trông như lỗi.
+  //
+  // ⚠️ Playlist tiếng hỏng KHÔNG được chặn đường tải: đây chỉ là bước ƯỚC LƯỢNG. Host tiếng có
+  // thể khác host hình nên spoof của estimate (chỉ phủ host hình) không tới nó -> trên site chống
+  // hotlink, playlist tiếng rất dễ 403 ở đây rồi vẫn tải ngon ở handleHlsDownload. Để Promise.all
+  // reject thì user mất luôn nút tải vì một con số ước lượng — đổi một phiền toái nhỏ lấy ngõ cụt.
+  const [parsed, audio] = await Promise.all([
+    fetchParse(variantUrl),
+    audioUrl ? fetchParse(audioUrl).catch(() => null) : Promise.resolve(null),
+  ]);
+  // Thời lượng là MAX chứ KHÔNG phải tổng: hình và tiếng chạy SONG SONG, không nối đuôi.
+  const durationSec = Math.max(parsed.totalDuration, audio?.totalDuration ?? 0);
+  // BANDWIDTH của #EXT-X-STREAM-INF đã gồm cả rendition tiếng (RFC 8216 §4.3.4.2) -> KHÔNG
+  // cộng thêm, cộng nữa là đếm đôi.
+  const estBytes =
+    bandwidth && bandwidth > 0
+      ? Math.round((bandwidth / 8) * durationSec)
+      : undefined;
+  return {
+    ok: true,
+    protected: parsed.isProtected || (audio?.isProtected ?? false),
+    segmentCount: parsed.segments.length + (audio?.segments.length ?? 0),
+    durationSec,
+    estBytes,
+  };
 }
 
 async function handleHlsDownload(

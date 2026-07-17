@@ -45,7 +45,14 @@ export type RuntimeMessage =
   | { kind: 'media/mse'; url: string }
   // content script sniff được manifest HLS/DASH bị nguỵ trang (đọc #EXTM3U/<MPD từ body).
   | { kind: 'media/manifest'; url: string; mediaType: ManifestKind }
-  | { kind: 'manifest/variants'; url: string; mediaType: ManifestKind }
+  // W2.2: `tabId` để background tra `media.pageUrl` -> spoof Referer ÔM SÁT cú fetch manifest.
+  // Không có nó thì cú fetch đầu tiên trần trụi và site chống hotlink 403 ngay ở bước chọn chất lượng.
+  | {
+      kind: 'manifest/variants';
+      url: string;
+      mediaType: ManifestKind;
+      tabId?: number;
+    }
   | { kind: 'download/progressive'; url: string; tabId: number }
   | { kind: 'ffmpeg/demo' }
   // popup -> background: ước tính dung lượng + kiểm tra DRM trước khi tải HLS.
@@ -55,6 +62,8 @@ export type RuntimeMessage =
       bandwidth?: number;
       /** W1.1: playlist tiếng tách rời — job sẽ tải CẢ nó, nên ước lượng phải tính cả. */
       audioUrl?: string;
+      /** W2.2: tra `media.pageUrl` để spoof Referer trước khi fetch playlist ước lượng. */
+      tabId?: number;
     }
   // popup -> background: bắt đầu tải & ghép HLS.
   | {
@@ -127,12 +136,14 @@ export async function sendRuntimeMessage(msg: RuntimeMessage): Promise<void> {
 export async function requestVariants(
   url: string,
   mediaType: ManifestKind,
+  tabId?: number,
 ): Promise<VariantsResponse> {
   try {
     const res = await browser.runtime.sendMessage({
       kind: 'manifest/variants',
       url,
       mediaType,
+      tabId,
     });
     return res as VariantsResponse;
   } catch {
@@ -169,6 +180,7 @@ export async function requestHlsEstimate(
   variantUrl: string,
   bandwidth?: number,
   audioUrl?: string,
+  tabId?: number,
 ): Promise<HlsEstimateResponse> {
   try {
     const res = await browser.runtime.sendMessage({
@@ -176,6 +188,7 @@ export async function requestHlsEstimate(
       variantUrl,
       bandwidth,
       audioUrl,
+      tabId,
     });
     return res as HlsEstimateResponse;
   } catch {

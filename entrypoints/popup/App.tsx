@@ -253,6 +253,7 @@ function MediaRow({
           variant.uri,
           variant.bandwidth,
           audioUri,
+          tabId,
         );
       } finally {
         setChecking(false);
@@ -300,7 +301,11 @@ function MediaRow({
 
     setLoading(true);
     setError(null);
-    const res = await requestVariants(media.url, media.type);
+    const res = await requestVariants(
+      media.url,
+      media.type,
+      tabId ?? undefined,
+    );
     setLoading(false);
     if (!res.ok) {
       setError(res.error);
@@ -313,7 +318,7 @@ function MediaRow({
         ? nearestByHeight(res.variants, preferred)
         : res.variants[0];
     if (pick) setSelectedUri(pick.uri);
-  }, [open, variants, loading, media.type, media.url]);
+  }, [open, variants, loading, media.type, media.url, tabId]);
 
   const chooseVariant = useCallback(async (v: VariantInfo) => {
     setSelectedUri(v.uri);

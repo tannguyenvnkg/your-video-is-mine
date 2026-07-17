@@ -151,9 +151,10 @@ const SCENARIOS = [
   },
   {
     id: 'variants-403',
-    title: 'Cổng 403 manifest: bấm "Chất lượng" -> ghim §2.3 (spoof KHÔNG bật ở handleVariants)',
-    expect: 'known-fail',
-    pins: '§2.3 -> gói W2.2 (bật spoof TRƯỚC cú fetch manifest)',
+    title: 'Cổng 403 manifest: bấm "Chất lượng" -> spoof bật TRƯỚC fetch (W2.2) -> phải qua',
+    // W2.2 XONG (2026-07-17): handleVariants nay applySpoof ÔM SÁT cú fetch -> qua cổng hotlink.
+    // Ratchet đã bật đúng lúc sửa xong (known-fail -> pass), giờ là lưới chống hồi quy.
+    expect: 'pass',
     run: () => runVariants({ gate: 'manifest' }),
   },
   {
