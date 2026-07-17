@@ -30,12 +30,18 @@ bản này bị CÂM** — tải xong, báo "Đã tải xong ✓", mở ra thì 
 - Máy chủ phớt lờ yêu cầu tải theo đoạn (trả cả file thay vì đoạn) nay **báo lỗi rõ ràng** thay vì
   âm thầm ghi sai và ngốn băng thông.
 
-### Sửa lỗi — CHỌN CHẤT LƯỢNG KHÔNG CÒN BÁO "403" TRÊN SITE CHẶN TẢI
+### Sửa lỗi — VƯỢT "403 / TRANG CHẶN TẢI" ĐẦY ĐỦ HƠN
 
 - **Bật vượt-chặn ngay từ bước đầu**: trên site chống hotlink (chặn tải bằng cách kiểm "bạn đến từ
   đâu"), trước đây bấm **Chất lượng** là báo *"Máy chủ trả mã 403"* — không bao giờ tới được nút tải,
   nên tính năng vượt chặn thành vô dụng đúng chỗ cần nó nhất. Nay extension gửi đúng thông tin "đến
   từ trang gốc" **ngay từ cú đọc manifest đầu tiên**, nên danh sách chất lượng hiện ra bình thường.
+- **Vượt chặn cho cả các máy chủ phụ**: nhiều video để phần hình một máy chủ, các mảnh video và **khoá
+  giải mã** ở máy chủ khác — mà khoá lại là thứ hay bị kiểm "đến từ đâu" nhất. Trước đây chỉ máy chủ
+  chính được vượt chặn, nên tải tới giữa chừng là kẹt *"Tải mảnh lỗi… 403"*. Nay extension đọc trước
+  danh sách mảnh, rồi bật vượt-chặn cho **mọi máy chủ** liên quan trước khi tải.
+- **Dọn sạch dấu vết vượt-chặn** khi tải xong/lỗi/huỷ (trước chỉ dọn khi tải xong), tránh ảnh hưởng
+  các trang khác bạn duyệt trong cùng phiên.
 
 ### Cải thiện — MỖI VIDEO CHỈ CÒN MỘT DÒNG TRONG DANH SÁCH
 

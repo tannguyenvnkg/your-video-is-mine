@@ -5,6 +5,7 @@ import {
   parseHlsManifest,
   parseHlsSegments,
   resolveUri,
+  spoofTargetsFromSegments,
   variantLabel,
 } from './hls';
 
@@ -767,5 +768,49 @@ vid/270/pl.m3u8`;
 muxed/pl.m3u8`;
     const r = parseHlsManifest(NO_URI, 'https://ex.com/d/master.m3u8');
     expect(childUrlsOfMaster(r)).toEqual(['https://ex.com/d/muxed/pl.m3u8']);
+  });
+});
+
+// --- W2.3: mọi host trong playlist -> spoof để segment/key/init khác host không 403 ------
+// §2.4: segment hay ở CDN khác host với playlist, và key AES gần như LUÔN ở host khác — lại là thứ
+// hay kiểm Referer nhất. applySpoof cũ chỉ phủ host playlist ⇒ job tới 'fetching' rồi mọi segment
+// 403. spoofTargetsFromSegments trả MỘT url đại diện cho mỗi host để background bật spoof đủ.
+describe('W2.3 spoofTargetsFromSegments', () => {
+  const MULTI_HOST = `#EXTM3U
+#EXT-X-KEY:METHOD=AES-128,URI="https://keys.example.com/k.bin"
+#EXT-X-MAP:URI="https://init.example.com/init.mp4"
+#EXTINF:6,
+https://seg.example.com/0.ts
+#EXTINF:6,
+https://seg.example.com/1.ts
+#EXT-X-ENDLIST`;
+
+  it('gom đúng mỗi host một lần: segment + key + init', () => {
+    const r = parseHlsSegments(MULTI_HOST, 'https://pl.example.com/media.m3u8');
+    const hosts = spoofTargetsFromSegments(r.segments)
+      .map((u) => new URL(u).hostname)
+      .sort();
+    expect(hosts).toEqual([
+      'init.example.com',
+      'keys.example.com',
+      'seg.example.com',
+    ]);
+  });
+
+  it('segment cùng host -> chỉ một url đại diện (không nở theo số segment)', () => {
+    const SAME = `#EXTM3U
+#EXTINF:6,
+https://cdn.example.com/0.ts
+#EXTINF:6,
+https://cdn.example.com/1.ts
+#EXTINF:6,
+https://cdn.example.com/2.ts
+#EXT-X-ENDLIST`;
+    const r = parseHlsSegments(SAME, 'https://cdn.example.com/media.m3u8');
+    expect(spoofTargetsFromSegments(r.segments)).toHaveLength(1);
+  });
+
+  it('playlist rỗng -> mảng rỗng', () => {
+    expect(spoofTargetsFromSegments([])).toEqual([]);
   });
 });

@@ -159,9 +159,10 @@ const SCENARIOS = [
   },
   {
     id: 'segments-other-host',
-    title: 'Segment ở host KHÁC manifest + cổng 403 -> ghim §2.4 (rule chỉ phủ 1 host)',
-    expect: 'known-fail',
-    pins: '§2.4 -> gói W2.3 (rule phủ mọi host đã parse, theo thư mục)',
+    title: 'Segment ở host KHÁC manifest + cổng 403 -> spoof MỌI host đã parse (W2.3) -> tải trọn',
+    // W2.3 XONG (2026-07-17): handleHlsDownload parse playlist TRƯỚC rồi spoof mọi host của
+    // segment/key/init. Ratchet đã bật đúng lúc sửa xong (known-fail -> pass), nay là lưới hồi quy.
+    expect: 'pass',
     run: () => runDownload({ gate: 'segments', segmentHost: 'localhost' }),
   },
 ];

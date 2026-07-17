@@ -1,4 +1,9 @@
-import { buildMediaItem, mediaId, type BuildMediaInput } from '@/utils/detect';
+import {
+  buildMediaItem,
+  mediaId,
+  visibleMedia,
+  type BuildMediaInput,
+} from '@/utils/detect';
 import { describeError } from '@/utils/errors';
 import { buildDownloadFilename } from '@/utils/filename';
 import {
@@ -24,6 +29,7 @@ import {
   childUrlsOfMaster,
   parseHlsManifest,
   parseHlsSegments,
+  spoofTargetsFromSegments,
 } from '@/utils/hls';
 import { parseDashManifest } from '@/utils/dash';
 import {
@@ -462,13 +468,21 @@ export default defineBackground(() => {
     const newJobs = (changes.hlsjobs.newValue ?? {}) as Record<string, HlsJob>;
     void (async () => {
       for (const [id, job] of Object.entries(newJobs)) {
-        if (job.tabId == null) continue;
         const prevPhase = oldJobs[id]?.phase;
+        const justFinished =
+          DONE_PHASES.has(job.phase) && prevPhase !== job.phase;
+        // W2.3: dọn MỌI rule spoof của job ở nhánh kết thúc (done/error/cancelled) — KHÔNG phụ
+        // thuộc tabId (badge cần tabId, gỡ rule thì không). Nhánh thành công còn dọn thêm ở
+        // handleBlobDownload; trùng nhau vô hại (removeRuleIds bỏ qua id không tồn tại).
+        if (justFinished) {
+          for (const h of job.spoofHosts ?? []) void removeSpoof(h);
+        }
+        if (job.tabId == null) continue;
         if (ACTIVE_PHASES.has(job.phase)) {
           await setBadgePct(job.tabId, jobBadgePct(job));
-        } else if (DONE_PHASES.has(job.phase) && prevPhase !== job.phase) {
-          // Khôi phục badge số lượng media của tab.
-          const count = (await getTabMedia(job.tabId)).length;
+        } else if (justFinished) {
+          // Khôi phục badge = số dòng CÒN HIỆN (W4.2: không đếm playlist con đã ẩn).
+          const count = visibleMedia(await getTabMedia(job.tabId)).length;
           await updateBadge(job.tabId, count);
           const name = job.filename?.split('/').pop() ?? 'video';
           if (job.phase === 'done') {
@@ -681,20 +695,36 @@ async function handleHlsDownload(
 ): Promise<HlsDownloadResponse> {
   try {
     const media = (await getTabMedia(tabId)).find((m) => m.url === mediaUrl);
-    // Spoof Referer/Origin cho host chứa segment (vượt hotlink/403).
-    await applySpoof(variantUrl, media?.pageUrl);
-    // W1.1: playlist tiếng hay nằm cùng host với hình, nhưng KHÔNG phải luôn luôn. Spoof thêm cho
-    // host của nó khi khác — nếu không, stream tách tiếng trên CDN riêng sẽ 403 đúng ở luồng tiếng
-    // và ra file câm y như cũ. (Bản phủ đầy đủ mọi host/thư mục là W2.3.)
-    //
-    // ⚠️ Mọi host spoof PHẢI được theo dõi để còn DỌN. Rule DNR session sống hết phiên trình duyệt
-    // (đúng lỗi §2.10) -> sót một cái là Referer/Origin bị ghi đè cho MỌI tab tới lúc đóng trình
-    // duyệt. Đây là lý do trường này là DANH SÁCH chứ không phải một host.
-    const spoofHosts = [hostFromUrl(variantUrl)];
-    if (audioUrl && hostFromUrl(audioUrl) !== hostFromUrl(variantUrl)) {
-      await applySpoof(audioUrl, media?.pageUrl);
-      spoofHosts.push(hostFromUrl(audioUrl));
+    const pageUrl = media?.pageUrl;
+    // Mọi host đã spoof PHẢI được theo dõi để còn DỌN: rule DNR session sống hết phiên trình duyệt
+    // (§2.10) -> sót một cái là Referer/Origin bị ghi đè cho MỌI tab tới lúc đóng trình duyệt.
+    const spoofed = new Set<string>();
+    const spoof = async (url: string): Promise<void> => {
+      const host = hostFromUrl(url);
+      if (!host || spoofed.has(host) || spoofed.size >= MAX_SPOOF_HOSTS) return;
+      await applySpoof(url, pageUrl);
+      spoofed.add(host);
+    };
+    // Spoof host playlist hình + tiếng (tiếng có thể ở CDN riêng — W1.1).
+    await spoof(variantUrl);
+    if (audioUrl) await spoof(audioUrl);
+    // W2.3: parse playlist TRƯỚC rồi spoof MỌI host của segment/key/init. Chúng rất hay ở CDN khác
+    // host với playlist (key AES gần như LUÔN khác, lại là thứ hay kiểm Referer nhất) -> bỏ sót là
+    // job tới 'fetching' rồi mọi segment 403. Rule áp XONG ở đây, TRƯỚC khi offscreen tải segment.
+    // Best-effort: playlist 403 ở bước này thì offscreen vẫn tự thử lại; ta chỉ mất phần "khác host".
+    for (const pl of audioUrl ? [variantUrl, audioUrl] : [variantUrl]) {
+      try {
+        const res = await fetch(pl, { credentials: 'include' });
+        if (!res.ok) continue;
+        const parsed = parseHlsSegments(await res.text(), pl);
+        for (const url of spoofTargetsFromSegments(parsed.segments)) {
+          await spoof(url);
+        }
+      } catch {
+        // best-effort — không được để việc dò host làm hỏng đường tải.
+      }
     }
+    const spoofHosts = [...spoofed];
     const folder = await getDownloadFolder();
     const filename = buildDownloadFilename({
       url: variantUrl,
@@ -714,6 +744,9 @@ async function handleHlsDownload(
       segmentsDone: 0,
       filename,
       tabId,
+      // Lưu để DỌN ở MỌI nhánh kết thúc (done/error/cancelled), không chỉ nhánh thành công qua
+      // handleBlobDownload — W2.3 mở rộng tập host nên rò rỉ khi lỗi sẽ nặng hơn nếu không dọn.
+      spoofHosts,
     });
     await ensureOffscreen();
     // KHÔNG await: job chạy dài, offscreen báo tiến trình qua storage chứ không qua response.
@@ -729,7 +762,7 @@ async function handleHlsDownload(
         filename,
         mediaUrl,
         tabId,
-        spoofHosts: spoofHosts.filter((h): h is string => h !== null),
+        spoofHosts,
         // Offscreen không đọc được settings (không có chrome.storage) -> đọc hộ rồi truyền vào.
         concurrency: await getConcurrency(),
       })
@@ -812,6 +845,10 @@ async function ensureOffscreen(): Promise<void> {
     if (!/single offscreen document/i.test(describeError(e))) throw e;
   }
 }
+
+// Trần số host được spoof cho một job (VDH cap tổng ~750 rule; ở đây một job hiếm khi quá vài host,
+// đặt trần để một manifest dị dạng không sinh hàng trăm rule).
+const MAX_SPOOF_HOSTS = 64;
 
 // Áp session rule DNR spoof Referer/Origin cho host của media (vượt hotlink/403 non-DRM).
 async function applySpoof(targetUrl: string, pageUrl?: string): Promise<void> {

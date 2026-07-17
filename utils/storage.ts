@@ -237,6 +237,12 @@ export interface HlsJob {
   bytesTotal?: number;
   /** tiến trình ghép/remux 0..1 từ sự kiện progress ffmpeg. */
   muxProgress?: number;
+  /**
+   * W2.3 — mọi host đã áp session rule spoof cho job này (hình + tiếng + segment/key/init khác host).
+   * Lưu để DỌN ở MỌI nhánh kết thúc (done/error/cancelled): rule DNR session sống hết phiên (§2.10),
+   * sót lại là Referer/Origin bị ghi đè cho mọi tab. Nhánh thành công còn dọn thêm ở handleBlobDownload.
+   */
+  spoofHosts?: string[];
 }
 
 export async function getHlsJobs(): Promise<Record<string, HlsJob>> {

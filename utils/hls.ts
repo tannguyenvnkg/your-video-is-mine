@@ -219,6 +219,35 @@ export interface HlsSegmentsResult {
   hasInit: boolean;
 }
 
+/**
+ * W2.3 — MỘT url đại diện cho MỖI host xuất hiện trong danh sách segment (segment.uri, keyUri,
+ * initUri). Background dùng để bật spoof Referer/Origin cho MỌI host TRƯỚC khi tải.
+ *
+ * Vì sao cần: §2.4 — segment rất hay ở CDN khác host với playlist, và key AES gần như LUÔN ở host
+ * khác, lại là thứ hay kiểm Referer nhất. Chỉ spoof host playlist thì job tới 'fetching' rồi mọi
+ * segment/key 403 -> "Tải segment lỗi sau 4 lần thử: HTTP 403". Trả một url/host (không phải cả
+ * host trần) để applySpoof dựng được Referer, và để không nở rule theo số segment.
+ */
+export function spoofTargetsFromSegments(segments: HlsSegment[]): string[] {
+  const byHost = new Map<string, string>();
+  const add = (url?: string): void => {
+    if (!url) return;
+    let host: string;
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      return;
+    }
+    if (!byHost.has(host)) byHost.set(host, url);
+  };
+  for (const s of segments) {
+    add(s.uri);
+    add(s.keyUri);
+    add(s.initUri);
+  }
+  return [...byHost.values()];
+}
+
 /** Chuyển IV kiểu Uint32Array (m3u8-parser, 4 x uint32 big-endian) sang 16 byte. */
 function ivToBytes(iv?: Uint32Array): Uint8Array | undefined {
   if (!iv || iv.length < 4) return undefined;
