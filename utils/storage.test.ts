@@ -2,12 +2,14 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { fakeBrowser } from 'wxt/testing';
 import {
   addTabMedia,
+  allocateSpoofRuleId,
   clearTabMedia,
   getPreferredHeight,
   getTabMedia,
   resetTab,
   setPreferredHeight,
 } from './storage';
+import { SPOOF_RULE_ID_MIN, SPOOF_RULE_ID_SPAN } from './dnr';
 import type { MediaItem } from './types';
 
 function item(url: string, extra: Partial<MediaItem> = {}): MediaItem {
@@ -79,5 +81,38 @@ describe('cài đặt preferredHeight (local)', () => {
     expect(await getPreferredHeight()).toBeNull();
     await setPreferredHeight(720);
     expect(await getPreferredHeight()).toBe(720);
+  });
+});
+
+describe('allocateSpoofRuleId (id rule DNR theo từng download — W2.4)', () => {
+  beforeEach(() => {
+    fakeBrowser.reset();
+  });
+
+  it('mỗi lần cấp một id KHÁC NHAU, đều >= ngưỡng dải spoof', async () => {
+    // §2.10: id cũ = hash(host) nên hai download cùng CDN trùng id -> giật rule của nhau. Nay mỗi
+    // lần cấp một id mới => hai download không bao giờ đụng nhau.
+    const ids = [
+      await allocateSpoofRuleId(),
+      await allocateSpoofRuleId(),
+      await allocateSpoofRuleId(),
+    ];
+    expect(new Set(ids).size).toBe(3);
+    for (const id of ids) expect(id).toBeGreaterThanOrEqual(SPOOF_RULE_ID_MIN);
+  });
+
+  it('bộ đếm nằm trong storage.session (sống qua SW hồi sinh, không phải biến toàn cục)', async () => {
+    const first = await allocateSpoofRuleId();
+    // Đọc thẳng storage.session: bộ đếm PHẢI được ghi lại (SW MV3 ephemeral, biến toàn cục bốc hơi).
+    const raw = await browser.storage.session.get('settings:dnrRuleCounter');
+    expect(typeof raw['settings:dnrRuleCounter']).toBe('number');
+    const second = await allocateSpoofRuleId();
+    expect(second).toBe(first + 1);
+  });
+
+  it('id luôn nằm trong dải [MIN, MIN+SPAN) — không tràn sang dải rule khác', async () => {
+    const id = await allocateSpoofRuleId();
+    expect(id).toBeGreaterThanOrEqual(SPOOF_RULE_ID_MIN);
+    expect(id).toBeLessThan(SPOOF_RULE_ID_MIN + SPOOF_RULE_ID_SPAN);
   });
 });

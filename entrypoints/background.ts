@@ -9,11 +9,14 @@ import { buildDownloadFilename } from '@/utils/filename';
 import {
   addChildUrls,
   addTabMedia,
+  allocateSpoofRuleId,
   claimMasterParse,
   clearTabMedia,
   getConcurrency,
   getDownloadById,
   getDownloadFolder,
+  getDownloads,
+  getHlsJobs,
   getTabMedia,
   getTabState,
   putDownload,
@@ -24,6 +27,7 @@ import {
   type DownloadEntry,
   type DownloadState,
   type HlsJob,
+  type HlsPhase,
 } from '@/utils/storage';
 import {
   childUrlsOfMaster,
@@ -36,7 +40,7 @@ import {
   buildRefererSpoofRule,
   hostFromUrl,
   originFromUrl,
-  spoofRuleId,
+  staleSpoofRuleIds,
 } from '@/utils/dnr';
 import type { MediaItem } from '@/utils/types';
 import type {
@@ -49,6 +53,9 @@ import type {
   RuntimeMessage,
   VariantsResponse,
 } from '@/utils/messages';
+
+// Phase kết thúc của job HLS (done/error/cancelled) — dùng cho cả badge lẫn đối soát rule spoof.
+const TERMINAL_PHASES = new Set<HlsPhase>(['done', 'error', 'cancelled']);
 
 export default defineBackground(() => {
   // Serialize ghi storage để tránh race read-modify-write giữa nhiều event.
@@ -332,7 +339,7 @@ export default defineBackground(() => {
           message.mediaUrl,
           message.tabId,
           message.jobId,
-          message.spoofHosts,
+          message.spoofRuleIds,
         );
         return undefined;
       }
@@ -415,8 +422,9 @@ export default defineBackground(() => {
             url: entry.blobUrl,
           });
         }
-        // Xoá session rule spoof Referer/Origin cho host này (không để tồn suốt phiên).
-        if (entry?.spoofHost) void removeSpoof(entry.spoofHost);
+        // Xoá session rule spoof cho lượt tải này (không để tồn suốt phiên). W2.4: theo id riêng.
+        if (entry?.spoofRuleIds?.length)
+          void removeSpoofRules(entry.spoofRuleIds);
       }
     })();
   });
@@ -460,7 +468,6 @@ export default defineBackground(() => {
   }
 
   const ACTIVE_PHASES = new Set(['fetching', 'muxing', 'saving']);
-  const DONE_PHASES = new Set(['done', 'error', 'cancelled']);
 
   browser.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'session' || !changes.hlsjobs) return;
@@ -470,12 +477,12 @@ export default defineBackground(() => {
       for (const [id, job] of Object.entries(newJobs)) {
         const prevPhase = oldJobs[id]?.phase;
         const justFinished =
-          DONE_PHASES.has(job.phase) && prevPhase !== job.phase;
-        // W2.3: dọn MỌI rule spoof của job ở nhánh kết thúc (done/error/cancelled) — KHÔNG phụ
+          TERMINAL_PHASES.has(job.phase) && prevPhase !== job.phase;
+        // W2.3/W2.4: dọn MỌI rule spoof của job ở nhánh kết thúc (done/error/cancelled) — KHÔNG phụ
         // thuộc tabId (badge cần tabId, gỡ rule thì không). Nhánh thành công còn dọn thêm ở
         // handleBlobDownload; trùng nhau vô hại (removeRuleIds bỏ qua id không tồn tại).
-        if (justFinished) {
-          for (const h of job.spoofHosts ?? []) void removeSpoof(h);
+        if (justFinished && job.spoofRuleIds?.length) {
+          void removeSpoofRules(job.spoofRuleIds);
         }
         if (job.tabId == null) continue;
         if (ACTIVE_PHASES.has(job.phase)) {
@@ -498,6 +505,14 @@ export default defineBackground(() => {
   browser.tabs.onRemoved.addListener((tabId) => {
     void clearTabMedia(tabId);
   });
+
+  // W2.4 — đối soát rule spoof rò rỉ. `onStartup` bắn khi mở lại trình duyệt; lời gọi top-level
+  // bắn mỗi lần SW cold-start giữa phiên (bắt rule của job đã chết trước đó mà chưa kịp dọn). Job
+  // còn sống thì id của nó nằm trong tập "còn sống" nên KHÔNG bị quét nhầm.
+  browser.runtime.onStartup.addListener(() => {
+    void sweepStaleSpoofRules();
+  });
+  void sweepStaleSpoofRules();
 });
 
 /**
@@ -511,20 +526,20 @@ export default defineBackground(() => {
  * thường kiểm Referer khớp domain site, không phải domain CDN. Thiếu pageUrl thì applySpoof tự lùi
  * về dùng chính targetUrl (đủ qua cổng "thiếu Referer", nhưng kém khớp trên site kiểm domain).
  *
- * ⚠️ Giới hạn ĐÃ BIẾT (để W2.4 xử): rule keyed theo host, nên nếu một download khác đang chạy trên
- * CÙNG host thì `removeSpoof` ở đây gỡ nhầm rule của nó. W2.4 cấp id riêng mỗi download để hết đụng.
+ * W2.4: cấp id RIÊNG cho mỗi cú fetch (allocateSpoofRuleId) rồi gỡ đúng id đó -> hai lượt tải/ước
+ * lượng trên CÙNG host không còn giật rule của nhau (giới hạn W2.2 cũ đã hết).
  */
 async function withSpoofedFetch<T>(
   targetUrl: string,
   pageUrl: string | undefined,
   fn: () => Promise<T>,
 ): Promise<T> {
-  await applySpoof(targetUrl, pageUrl);
+  const ruleId = await allocateSpoofRuleId();
+  await applySpoof(ruleId, targetUrl, pageUrl);
   try {
     return await fn();
   } finally {
-    const host = hostFromUrl(targetUrl);
-    if (host) await removeSpoof(host);
+    await removeSpoofRules([ruleId]);
   }
 }
 
@@ -580,10 +595,15 @@ async function handleDownload(
   url: string,
   tabId: number,
 ): Promise<DownloadStartResponse> {
+  // Hoist ra ngoài try để nhánh catch còn dọn được: rule đã áp TRƯỚC downloads.download(); nếu cú
+  // đó ném (Chrome từ chối tên/URL, policy chặn, hết đĩa) thì putDownload không chạy -> id không
+  // được lưu vào download nào -> chỉ sweep cold-start mới dọn. Gỡ ngay ở catch để không rò rỉ phiên.
+  let ruleId: number | undefined;
   try {
     const media = (await getTabMedia(tabId)).find((m) => m.url === url);
-    // Spoof Referer/Origin để vượt hotlink-protection/403 (non-DRM).
-    await applySpoof(url, media?.pageUrl);
+    // Spoof Referer/Origin để vượt hotlink-protection/403 (non-DRM). Id riêng cho lượt tải này (W2.4).
+    ruleId = await allocateSpoofRuleId();
+    await applySpoof(ruleId, url, media?.pageUrl);
     const folder = await getDownloadFolder();
     const filename = buildDownloadFilename({
       url,
@@ -603,10 +623,12 @@ async function handleDownload(
       mediaUrl: url,
       filename,
       state: 'in_progress',
-      spoofHost: hostFromUrl(url) ?? undefined,
+      spoofRuleIds: [ruleId],
     });
     return { ok: true, downloadId };
   } catch {
+    // Dọn rule đã áp nhưng chưa kịp gán chủ (id chưa vào download nào) — tránh rò rỉ nguyên phiên.
+    if (ruleId !== undefined) await removeSpoofRules([ruleId]);
     return {
       ok: false,
       error: 'Không bắt đầu tải được (URL có thể hết hạn/403 hoặc bị chặn).',
@@ -693,17 +715,30 @@ async function handleHlsDownload(
   height?: number,
   audioUrl?: string,
 ): Promise<HlsDownloadResponse> {
+  // Hoist ra ngoài try để catch còn dọn được: nếu throw xảy ra TRƯỚC putHlsJob thì id chưa lưu ở
+  // đâu; nếu ensureOffscreen ném SAU putHlsJob thì job kẹt 'queued' (storage.onChanged không có
+  // nhánh terminal để dọn) -> gỡ thẳng theo id đang giữ là chắc chắn nhất.
+  const spoofRuleIds: number[] = [];
   try {
     const media = (await getTabMedia(tabId)).find((m) => m.url === mediaUrl);
     const pageUrl = media?.pageUrl;
-    // Mọi host đã spoof PHẢI được theo dõi để còn DỌN: rule DNR session sống hết phiên trình duyệt
-    // (§2.10) -> sót một cái là Referer/Origin bị ghi đè cho MỌI tab tới lúc đóng trình duyệt.
-    const spoofed = new Set<string>();
+    // Mọi rule đã spoof PHẢI được theo dõi để còn DỌN: rule DNR session sống hết phiên trình duyệt
+    // (§2.10) -> sót một cái là rác tới lúc đóng trình duyệt. W2.4: mỗi host một id RIÊNG (không
+    // suy từ host) nên hai download cùng host không giật rule của nhau. `spoofedHosts` chỉ để DEDUPE
+    // (một host một rule cho job này), còn `spoofRuleIds` là thứ đem đi dọn.
+    const spoofedHosts = new Set<string>();
     const spoof = async (url: string): Promise<void> => {
       const host = hostFromUrl(url);
-      if (!host || spoofed.has(host) || spoofed.size >= MAX_SPOOF_HOSTS) return;
-      await applySpoof(url, pageUrl);
-      spoofed.add(host);
+      if (
+        !host ||
+        spoofedHosts.has(host) ||
+        spoofedHosts.size >= MAX_SPOOF_HOSTS
+      )
+        return;
+      const ruleId = await allocateSpoofRuleId();
+      await applySpoof(ruleId, url, pageUrl);
+      spoofedHosts.add(host);
+      spoofRuleIds.push(ruleId);
     };
     // Spoof host playlist hình + tiếng (tiếng có thể ở CDN riêng — W1.1).
     await spoof(variantUrl);
@@ -724,7 +759,6 @@ async function handleHlsDownload(
         // best-effort — không được để việc dò host làm hỏng đường tải.
       }
     }
-    const spoofHosts = [...spoofed];
     const folder = await getDownloadFolder();
     const filename = buildDownloadFilename({
       url: variantUrl,
@@ -746,7 +780,7 @@ async function handleHlsDownload(
       tabId,
       // Lưu để DỌN ở MỌI nhánh kết thúc (done/error/cancelled), không chỉ nhánh thành công qua
       // handleBlobDownload — W2.3 mở rộng tập host nên rò rỉ khi lỗi sẽ nặng hơn nếu không dọn.
-      spoofHosts,
+      spoofRuleIds,
     });
     await ensureOffscreen();
     // KHÔNG await: job chạy dài, offscreen báo tiến trình qua storage chứ không qua response.
@@ -762,7 +796,7 @@ async function handleHlsDownload(
         filename,
         mediaUrl,
         tabId,
-        spoofHosts,
+        spoofRuleIds,
         // Offscreen không đọc được settings (không có chrome.storage) -> đọc hộ rồi truyền vào.
         concurrency: await getConcurrency(),
       })
@@ -774,6 +808,9 @@ async function handleHlsDownload(
       });
     return { ok: true, jobId };
   } catch (e) {
+    // Dọn mọi rule đã áp trước khi throw (xem chú thích hoist ở đầu hàm) — nếu không, id mồ côi
+    // chỉ được sweep cold-start dọn.
+    if (spoofRuleIds.length) await removeSpoofRules(spoofRuleIds);
     return {
       ok: false,
       error: e instanceof Error ? e.message : 'Không khởi tạo được tải HLS.',
@@ -787,10 +824,10 @@ async function handleBlobDownload(
   mediaUrl: string,
   _tabId: number,
   jobId: string,
-  spoofHosts?: string[],
+  spoofRuleIds?: number[],
 ): Promise<void> {
-  // Segment đã fetch xong -> xoá rule spoof cho MỌI host của job (hình + tiếng nếu khác host).
-  for (const h of spoofHosts ?? []) void removeSpoof(h);
+  // Segment đã fetch xong -> xoá rule spoof của MỌI host của job (hình + tiếng nếu khác host).
+  if (spoofRuleIds?.length) void removeSpoofRules(spoofRuleIds);
   try {
     const downloadId = await browser.downloads.download({
       url: blobUrl,
@@ -851,14 +888,20 @@ async function ensureOffscreen(): Promise<void> {
 const MAX_SPOOF_HOSTS = 64;
 
 // Áp session rule DNR spoof Referer/Origin cho host của media (vượt hotlink/403 non-DRM).
-async function applySpoof(targetUrl: string, pageUrl?: string): Promise<void> {
+// W2.4: `ruleId` do caller cấp (allocateSpoofRuleId) — id riêng mỗi (download, host) nên hai lượt
+// tải cùng host không giật rule của nhau.
+async function applySpoof(
+  ruleId: number,
+  targetUrl: string,
+  pageUrl?: string,
+): Promise<void> {
   const host = hostFromUrl(targetUrl);
   if (!host) return;
   const refererBase =
     pageUrl && pageUrl.startsWith('http') ? pageUrl : targetUrl;
   const origin = originFromUrl(refererBase);
   if (!origin) return;
-  const rule = buildRefererSpoofRule(host, refererBase, origin);
+  const rule = buildRefererSpoofRule(ruleId, host, refererBase, origin);
   try {
     // Cast: DnrRule (string literals) tương thích cấu trúc với kiểu Rule của API.
     await browser.declarativeNetRequest.updateSessionRules({
@@ -872,16 +915,54 @@ async function applySpoof(targetUrl: string, pageUrl?: string): Promise<void> {
   }
 }
 
-// Xoá session rule spoof Referer/Origin của một host.
-async function removeSpoof(host: string): Promise<void> {
+// Xoá session rule spoof theo id (W2.4: id riêng mỗi download). removeRuleIds bỏ qua id không tồn
+// tại nên gọi trùng vô hại.
+async function removeSpoofRules(ids: number[]): Promise<void> {
+  if (ids.length === 0) return;
   try {
     await browser.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: [spoofRuleId(host)],
+      removeRuleIds: ids,
     } as unknown as Parameters<
       typeof browser.declarativeNetRequest.updateSessionRules
     >[0]);
   } catch {
     // ignore
+  }
+}
+
+/**
+ * W2.4 — đối soát & dọn rule spoof rò rỉ: xoá mọi session rule trong dải spoof mà KHÔNG còn
+ * job/download nào sống dùng tới.
+ *
+ * Vì sao BẮT BUỘC: id theo bộ đếm mất tính "re-add cùng host thay thế rule cũ" mà hash-host từng
+ * cho, nên rule của một job chết (SW bị giết giữa chừng, không kịp dọn) sẽ nằm lại tới lúc restart
+ * trình duyệt. Gọi lúc `onStartup` (mở lại trình duyệt) và mỗi lần SW cold-start giữa phiên.
+ *
+ * An toàn với job đang chạy: job còn sống nằm trong storage ở phase chưa kết thúc -> id của nó vào
+ * tập "còn sống" -> KHÔNG bị quét. (SW có thể chết trong khi offscreen vẫn tải; khi SW hồi sinh,
+ * job vẫn ở 'fetching' trong storage nên rule của nó được giữ.)
+ */
+async function sweepStaleSpoofRules(): Promise<void> {
+  try {
+    const rules = await browser.declarativeNetRequest.getSessionRules();
+    const sessionIds = rules.map((r) => r.id);
+    const alive = new Set<number>();
+    const jobs = await getHlsJobs();
+    for (const job of Object.values(jobs)) {
+      if (!TERMINAL_PHASES.has(job.phase)) {
+        for (const id of job.spoofRuleIds ?? []) alive.add(id);
+      }
+    }
+    const downloads = await getDownloads();
+    for (const d of Object.values(downloads)) {
+      if (d.state === 'in_progress') {
+        for (const id of d.spoofRuleIds ?? []) alive.add(id);
+      }
+    }
+    const stale = staleSpoofRuleIds(sessionIds, alive);
+    if (stale.length > 0) await removeSpoofRules(stale);
+  } catch {
+    // best-effort — sweep là dọn rác, không được để nó làm hỏng gì.
   }
 }
 

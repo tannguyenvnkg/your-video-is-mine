@@ -7,6 +7,7 @@
 
 import type { MediaItem, MediaType } from './types';
 import { markChildren, upsertMedia, visibleMedia } from './detect';
+import { SPOOF_RULE_ID_MIN, SPOOF_RULE_ID_SPAN } from './dnr';
 
 const MEDIA_KEY_PREFIX = 'media:';
 const DOWNLOADS_KEY = 'downloads';
@@ -17,6 +18,7 @@ const SIZE_WARN_KEY = 'settings:sizeWarnBytes';
 const CONCURRENCY_KEY = 'settings:concurrency';
 const ENABLED_TYPES_KEY = 'settings:enabledTypes';
 const UPDATE_CHECK_KEY = 'settings:updateCheck';
+const DNR_RULE_COUNTER_KEY = 'settings:dnrRuleCounter';
 
 // Tuần tự hoá ghi storage (downloads/hlsjobs) trong 1 context để tránh race read-modify-write.
 let writeChain: Promise<unknown> = Promise.resolve();
@@ -157,8 +159,11 @@ export interface DownloadEntry {
   error?: string;
   /** blob URL (nếu tải file ghép từ offscreen) -> thu hồi khi tải xong. */
   blobUrl?: string;
-  /** host đã áp session rule spoof Referer/Origin -> xoá rule khi tải xong. */
-  spoofHost?: string;
+  /**
+   * W2.4 — id session rule spoof đã áp cho lượt tải này (id RIÊNG mỗi download, không suy từ host).
+   * Lưu để xoá ĐÚNG rule của mình khi tải xong, không giật rule của download khác cùng host.
+   */
+  spoofRuleIds?: number[];
 }
 
 export async function getDownloads(): Promise<Record<string, DownloadEntry>> {
@@ -238,11 +243,12 @@ export interface HlsJob {
   /** tiến trình ghép/remux 0..1 từ sự kiện progress ffmpeg. */
   muxProgress?: number;
   /**
-   * W2.3 — mọi host đã áp session rule spoof cho job này (hình + tiếng + segment/key/init khác host).
-   * Lưu để DỌN ở MỌI nhánh kết thúc (done/error/cancelled): rule DNR session sống hết phiên (§2.10),
-   * sót lại là Referer/Origin bị ghi đè cho mọi tab. Nhánh thành công còn dọn thêm ở handleBlobDownload.
+   * W2.4 — id mọi session rule spoof đã áp cho job này (một id riêng cho mỗi host: hình + tiếng +
+   * segment/key/init khác host). Lưu để DỌN ở MỌI nhánh kết thúc (done/error/cancelled): rule DNR
+   * session sống hết phiên (§2.10), sót lại là rác. Nhánh thành công còn dọn thêm ở handleBlobDownload.
+   * (Trước W2.4 lưu `spoofHosts: string[]` rồi hash lại thành id — nay id là nguồn sự thật trực tiếp.)
    */
-  spoofHosts?: string[];
+  spoofRuleIds?: number[];
 }
 
 export async function getHlsJobs(): Promise<Record<string, HlsJob>> {
@@ -269,6 +275,31 @@ export async function updateHlsJob(
     if (!cur) return;
     all[id] = { ...cur, ...patch };
     await browser.storage.session.set({ [HLS_JOBS_KEY]: all });
+  });
+}
+
+// --- Id rule DNR spoof (session), cấp theo bộ đếm — W2.4 ---
+
+/**
+ * Cấp một id rule DNR MỚI cho mỗi lần spoof (một id cho mỗi cặp download×host).
+ *
+ * Vì sao KHÔNG dùng hash(host) như trước: hai download cùng CDN sẽ trùng id -> cái nào xong trước
+ * xoá rule của cái đang chạy -> 403 giữa chừng (§2.10). Bộ đếm cho id KHÁC NHAU mỗi lần nên không
+ * bao giờ đụng.
+ *
+ * Bộ đếm nằm trong `chrome.storage.session` (KHÔNG phải biến toàn cục): SW MV3 ephemeral, biến toàn
+ * cục bốc hơi giữa chừng -> id sẽ cấp lại từ 0 và trùng. Session storage sống qua SW hồi sinh nhưng
+ * reset khi restart trình duyệt (đúng lúc rule session cũng bị xoá) -> id bắt đầu lại sạch.
+ * Đi qua serializeWrite để read-modify-write bộ đếm không bị race giữa nhiều lần cấp song song.
+ */
+export async function allocateSpoofRuleId(): Promise<number> {
+  return serializeWrite(async () => {
+    const res = await browser.storage.session.get(DNR_RULE_COUNTER_KEY);
+    const raw = res[DNR_RULE_COUNTER_KEY];
+    const cur = typeof raw === 'number' && raw >= 0 ? raw : 0;
+    const next = (cur + 1) % SPOOF_RULE_ID_SPAN;
+    await browser.storage.session.set({ [DNR_RULE_COUNTER_KEY]: next });
+    return SPOOF_RULE_ID_MIN + cur;
   });
 }
 

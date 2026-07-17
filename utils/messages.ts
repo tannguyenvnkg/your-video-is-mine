@@ -92,11 +92,11 @@ export type RuntimeMessage =
       tabId: number;
       jobId: string;
       /**
-       * MỌI host đã được spoof cho job này (hình + tiếng nếu khác host). Phải là DANH SÁCH:
-       * W1.1 có thể spoof 2 host, mà rule DNR session sống hết phiên -> sót một cái là Referer/
-       * Origin bị ghi đè cho mọi tab tới hết phiên trình duyệt.
+       * W2.4 — id MỌI session rule spoof đã áp cho job này (một id cho mỗi host: hình + tiếng +
+       * segment/key/init khác host). Offscreen chỉ mang hộ để gửi ngược cho background DỌN đúng
+       * những rule đó — offscreen KHÔNG có chrome.declarativeNetRequest nên tự nó không xoá được.
        */
-      spoofHosts?: string[];
+      spoofRuleIds?: number[];
     }
   | { kind: 'hls/cancel'; jobId: string }
   | { kind: 'download/cancel'; downloadId: number };
@@ -112,8 +112,8 @@ export type OffscreenRequest =
       filename: string;
       mediaUrl: string;
       tabId: number;
-      /** Mọi host đã spoof cho job này -> offscreen gửi ngược lại để background dọn rule. */
-      spoofHosts?: string[];
+      /** W2.4 — id mọi rule spoof của job -> offscreen gửi ngược lại để background dọn đúng rule. */
+      spoofRuleIds?: number[];
       /** W1.1: playlist tiếng tách rời. Có -> offscreen tải 2 bộ segment rồi ghép 2 input. */
       audioUrl?: string;
       /**

@@ -359,8 +359,15 @@ async function downloadTrack(o: {
 async function runHlsJob(
   req: Extract<OffscreenRequest, { kind: 'hls/run' }>,
 ): Promise<void> {
-  const { jobId, variantUrl, audioUrl, filename, mediaUrl, tabId, spoofHosts } =
-    req;
+  const {
+    jobId,
+    variantUrl,
+    audioUrl,
+    filename,
+    mediaUrl,
+    tabId,
+    spoofRuleIds,
+  } = req;
   const throwIfCancelled = () => {
     if (cancelledJobs.has(jobId)) throw new CancelledError();
   };
@@ -525,7 +532,7 @@ async function runHlsJob(
       mediaUrl,
       tabId,
       jobId,
-      spoofHosts,
+      spoofRuleIds,
     });
     await updateHlsJob(jobId, {
       phase: 'done',

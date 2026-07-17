@@ -3,7 +3,8 @@ import {
   buildRefererSpoofRule,
   hostFromUrl,
   originFromUrl,
-  spoofRuleId,
+  SPOOF_RULE_ID_MIN,
+  staleSpoofRuleIds,
 } from './dnr';
 
 describe('hostFromUrl / originFromUrl', () => {
@@ -21,23 +22,19 @@ describe('hostFromUrl / originFromUrl', () => {
   });
 });
 
-describe('spoofRuleId', () => {
-  it('ổn định & >= 2000', () => {
-    const a = spoofRuleId('cdn.example.com');
-    expect(a).toBe(spoofRuleId('cdn.example.com'));
-    expect(a).toBeGreaterThanOrEqual(2000);
-  });
-  it('host khác -> id khác', () => {
-    expect(spoofRuleId('a.com')).not.toBe(spoofRuleId('b.com'));
-  });
-});
-
 describe('buildRefererSpoofRule', () => {
   const rule = buildRefererSpoofRule(
+    2345,
     'cdn.example.com',
     'https://page.example.com/watch',
     'https://page.example.com',
   );
+
+  it('nhận id TƯỜNG MINH (W2.4: id theo từng download, không suy từ host)', () => {
+    // Trước W2.4 id = hash(host) -> hai download cùng CDN giật rule của nhau (§2.10). Nay caller
+    // cấp id riêng cho mỗi (download, host) nên builder chỉ việc dùng nguyên id truyền vào.
+    expect(rule.id).toBe(2345);
+  });
 
   it('modifyHeaders set Referer + Origin', () => {
     expect(rule.action.type).toBe('modifyHeaders');
@@ -52,13 +49,49 @@ describe('buildRefererSpoofRule', () => {
     ]);
   });
 
-  it('condition giới hạn theo host + resourceTypes', () => {
+  it('condition giới hạn theo host + resourceTypes của EXTENSION', () => {
     expect(rule.condition.requestDomains).toEqual(['cdn.example.com']);
     expect(rule.condition.resourceTypes).toContain('xmlhttprequest');
-    expect(rule.condition.resourceTypes).toContain('media');
+    expect(rule.condition.resourceTypes).toContain('other');
   });
 
-  it('id khớp spoofRuleId(host)', () => {
-    expect(rule.id).toBe(spoofRuleId('cdn.example.com'));
+  it('W2.4: KHÔNG spoof loại request của PLAYER TRANG (media/sub_frame/object)', () => {
+    // §2.10: rule cũ phủ media/sub_frame/object -> ghi đè Referer/Origin lên chính traffic của
+    // trang (player, iframe) -> user thấy player hỏng / API 403 / bị đăng xuất. Bỏ hẳn 3 loại này.
+    expect(rule.condition.resourceTypes).not.toContain('media');
+    expect(rule.condition.resourceTypes).not.toContain('sub_frame');
+    expect(rule.condition.resourceTypes).not.toContain('object');
+  });
+
+  it('W2.4: tabIds:[-1] -> CHỈ khớp request do extension phát, không đụng traffic trang', () => {
+    // -1 = request không gắn với tab nào (do SW/offscreen của extension phát). Một dòng này biến
+    // lỗ hổng từ "gây hại cho duyệt web" thành "chỉ ảnh hưởng fetch của chính extension".
+    expect(rule.condition.tabIds).toEqual([-1]);
+  });
+});
+
+describe('staleSpoofRuleIds (đối soát rule rò rỉ — W2.4 sweep)', () => {
+  it('xoá id spoof KHÔNG còn job sống, GIỮ id còn sống', () => {
+    const session = [
+      SPOOF_RULE_ID_MIN,
+      SPOOF_RULE_ID_MIN + 1,
+      SPOOF_RULE_ID_MIN + 2,
+    ];
+    const alive = [SPOOF_RULE_ID_MIN + 1];
+    expect(staleSpoofRuleIds(session, alive)).toEqual([
+      SPOOF_RULE_ID_MIN,
+      SPOOF_RULE_ID_MIN + 2,
+    ]);
+  });
+
+  it('KHÔNG bao giờ đụng rule id < ngưỡng (rule của người khác / dải khác)', () => {
+    // Sweep chỉ được phép dọn trong dải rule spoof của ta (>= MIN). Rule id nhỏ hơn là của cơ chế
+    // khác -> tuyệt đối không xoá dù không có trong tập "còn sống".
+    const session = [1, 42, 1999, SPOOF_RULE_ID_MIN];
+    expect(staleSpoofRuleIds(session, [])).toEqual([SPOOF_RULE_ID_MIN]);
+  });
+
+  it('tập sống rỗng + không rule spoof nào -> không xoá gì', () => {
+    expect(staleSpoofRuleIds([1, 2, 3], [])).toEqual([]);
   });
 });

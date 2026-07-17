@@ -42,6 +42,15 @@ bản này bị CÂM** — tải xong, báo "Đã tải xong ✓", mở ra thì 
   danh sách mảnh, rồi bật vượt-chặn cho **mọi máy chủ** liên quan trước khi tải.
 - **Dọn sạch dấu vết vượt-chặn** khi tải xong/lỗi/huỷ (trước chỉ dọn khi tải xong), tránh ảnh hưởng
   các trang khác bạn duyệt trong cùng phiên.
+- **Không còn đụng tới việc duyệt web bình thường của bạn**: cơ chế vượt-chặn trước đây có thể ghi
+  đè thông tin "đến từ đâu" lên **chính traffic của trang** (trình phát, khung nhúng) khi bạn đang
+  tải từ domain đó — hệ quả xấu nhất là player của trang hỏng, hoặc bạn bị đăng xuất. Nay nó chỉ áp
+  cho **đúng các yêu cầu do extension phát ra**, tuyệt đối không chạm vào yêu cầu của trang.
+- **Tải hai video cùng lúc từ cùng một máy chủ không còn phá nhau**: trước đây hai lượt tải trên cùng
+  một máy chủ dùng chung một "dấu", cái xong trước gỡ mất dấu của cái đang chạy khiến nó kẹt giữa
+  chừng. Nay mỗi lượt tải có dấu riêng.
+- **Tự dọn dấu vết còn sót**: nếu một lượt tải chết bất thường, dấu vết vượt-chặn còn lại sẽ được
+  đối soát và xoá khi mở lại trình duyệt (và mỗi lần dịch vụ nền khởi động lại).
 
 ### Cải thiện — MỖI VIDEO CHỈ CÒN MỘT DÒNG TRONG DANH SÁCH
 
