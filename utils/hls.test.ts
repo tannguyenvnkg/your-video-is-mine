@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { Parser } from 'm3u8-parser';
 import {
   parseHlsManifest,
   parseHlsSegments,
@@ -140,5 +141,431 @@ b.ts
     expect(p.encryption).toBe('none');
     expect(p.isProtected).toBe(false);
     expect(p.segments[0]!.seq).toBe(0);
+  });
+});
+
+// ===========================================================================
+// W0.4 — FIXTURE CA KHÓ. Fixture cũ ở trên chỉ mã hoá ca DỄ (master muxed,
+// segment không byterange, không discontinuity) — đúng dạng duy nhất mà các
+// lỗi Đợt 1 là vô hại. Đó là lý do test xanh trong khi sản phẩm câm.
+//
+// Ba lớp test dưới đây, đọc kèm nhau:
+//
+//  1. "hợp đồng thư viện" — XANH ngay. Chứng minh dữ liệu CÓ SẴN trong
+//     m3u8-parser và ta đang vứt đi. Nếu lớp này đỏ => parser đổi shape,
+//     KHÔNG phải lỗi của ta => đọc lại trước khi sửa code mình.
+//
+//  2. it.fails(...) — lỗi THẬT, ĐỎ hôm nay. Vitest coi "đỏ" là ĐẠT nên cả
+//     suite vẫn xanh (cổng §1.2). Khi Đợt 1 sửa xong, test chuyển sang xanh
+//     => it.fails FAIL NGƯỢC => buộc phải đổi lại thành it(). Chốt tự bật,
+//     không phải TODO chết.
+//     ⚠️ it.fails đạt khi test ném BẤT KỲ lỗi gì => nó KHÔNG phân biệt được
+//     "đỏ vì thiếu tính năng" với "đỏ vì làm sai". Vì vậy mỗi it.fails chỉ
+//     mang ĐÚNG MỘT khẳng định, và luôn có test canh (lớp 3) đi kèm.
+//
+//  3. test canh — XANH ngay (vì hiện chưa có tiếng nên đúng một cách rỗng),
+//     XANH sau khi sửa ĐÚNG, và ĐỎ nếu sửa SAI. Đây là thứ bắt bản sửa ngây thơ.
+// ===========================================================================
+
+/** Manifest thô từ m3u8-parser (để test hợp đồng thư viện). */
+function rawManifest(text: string) {
+  const p = new Parser();
+  p.push(text);
+  p.end();
+  return p.manifest;
+}
+
+/** Shape mediaGroups.AUDIO đã ĐO THẬT ở m3u8-parser@7.2.0 (không phải suy đoán). */
+interface AudioRendition {
+  default: boolean;
+  autoselect: boolean;
+  language?: string;
+  /** VẮNG HẲN (không phải undefined) khi #EXT-X-MEDIA không có URI. */
+  uri?: string;
+}
+type AudioGroups = Record<string, Record<string, AudioRendition>>;
+
+function audioGroups(text: string): AudioGroups {
+  const mg = rawManifest(text).mediaGroups as
+    { AUDIO?: AudioGroups } | undefined;
+  return mg?.AUDIO ?? {};
+}
+
+/**
+ * URL luồng tiếng mà variant THẬT SỰ DÙNG (chuỗi rỗng nếu chưa chọn gì).
+ *
+ * Đọc được cả hai hình dạng đang được cân nhắc cho W1.1, vì lộ trình còn
+ * MÂU THUẪN với chính nó (xem §2b): NGHIEN-CUU-VDH.md W1.1 bước 2 bảo thêm
+ * `audioUri?: string`, còn PROMPT-THUC-THI §3.2 + W4.4 bảo mang CẢ DANH SÁCH
+ * rendition. Helper này trung lập với cả hai để test canh không ép thiết kế.
+ *
+ * 🔧 W1.1: nếu chọn hình dạng THỨ BA, phải cập nhật hàm này — nếu không nó
+ * trả '' vĩnh viễn và mọi test canh dùng nó sẽ xanh RỖNG một cách vô dụng.
+ */
+function selectedAudioUri(variant: unknown): string {
+  const v = variant as {
+    audioUri?: string;
+    audioRenditions?: { uri?: string; selected?: boolean }[];
+  };
+  return (
+    v.audioUri ?? v.audioRenditions?.find((x) => x.selected)?.uri ?? ''
+  );
+}
+
+// --- Fixture: Twitter/X. Dạng gây câm phổ biến nhất ---------------------
+// Bẫy riêng của X, cả ba đều đã kiểm chứng trên manifest thật:
+//  - NAME đứng TRƯỚC TYPE  -> regex neo vào "#EXT-X-MEDIA:TYPE=" trượt sạch.
+//  - KHÔNG có DEFAULT      -> heuristic "chọn rendition DEFAULT" trả về RỖNG.
+//  - Mỗi tier hình một group tiếng riêng -> BẮT BUỘC tra qua AUDIO= của
+//    variant đã chọn; lấy #EXT-X-MEDIA đầu tiên sẽ ghép tiếng 128k vào 480x270.
+const X_MASTER = `#EXTM3U
+#EXT-X-MEDIA:NAME="Audio",AUTOSELECT=YES,TYPE=AUDIO,GROUP-ID="audio-128000",URI="/aud/128/pl.m3u8"
+#EXT-X-MEDIA:NAME="Audio",AUTOSELECT=YES,TYPE=AUDIO,GROUP-ID="audio-64000",URI="/aud/64/pl.m3u8"
+#EXT-X-MEDIA:NAME="Audio",AUTOSELECT=YES,TYPE=AUDIO,GROUP-ID="audio-32000",URI="/aud/32/pl.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2176000,RESOLUTION=1280x720,CODECS="avc1.4d001f,mp4a.40.2",AUDIO="audio-128000"
+/vid/720/pl.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=832000,RESOLUTION=640x360,CODECS="avc1.4d001e,mp4a.40.2",AUDIO="audio-64000"
+/vid/360/pl.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=288000,RESOLUTION=480x270,CODECS="avc1.4d0015,mp4a.40.2",AUDIO="audio-32000"
+/vid/270/pl.m3u8`;
+const X_BASE = 'https://video.twimg.com/ext_tw_video/1/pu/pl/master.m3u8';
+
+describe('W0.4 hợp đồng m3u8-parser: dữ liệu tiếng NẰM SẴN, ta đang vứt đi', () => {
+  const groups = audioGroups(X_MASTER);
+
+  it('mediaGroups.AUDIO có đủ 3 group, key trong group là NAME', () => {
+    expect(Object.keys(groups)).toEqual([
+      'audio-128000',
+      'audio-64000',
+      'audio-32000',
+    ]);
+    expect(groups['audio-128000']!.Audio!.uri).toBe('/aud/128/pl.m3u8');
+  });
+
+  it('NAME trước TYPE vẫn parse đúng (regex neo "TYPE=" mới là thứ trượt)', () => {
+    expect(groups['audio-32000']!.Audio!.uri).toBe('/aud/32/pl.m3u8');
+  });
+
+  it('X không khai DEFAULT -> default=false ở MỌI rendition', () => {
+    // => heuristic "ưu tiên default===true" trả về RỖNG trên X. Phải fallback.
+    const defaults = Object.values(groups).map(
+      (g) => Object.values(g)[0]!.default,
+    );
+    expect(defaults).toEqual([false, false, false]);
+  });
+
+  it('parser KHÔNG resolve uri — nguyên văn manifest, ta phải tự resolveUri', () => {
+    expect(rawManifest(X_MASTER).playlists![0]!.uri).toBe('/vid/720/pl.m3u8');
+  });
+
+  it('variant mang AUDIO= trỏ group tiếng của ĐÚNG tier mình', () => {
+    const pls = rawManifest(X_MASTER).playlists!;
+    expect(pls.map((p) => p.attributes!.AUDIO)).toEqual([
+      'audio-128000',
+      'audio-64000',
+      'audio-32000',
+    ]);
+  });
+});
+
+describe('W0.4/W1.1 master tách tiếng (Twitter/X) -> file tải về BỊ CÂM', () => {
+  const r = parseHlsManifest(X_MASTER, X_BASE);
+
+  it('3 variant, sắp xếp giảm dần 720/360/270', () => {
+    expect(r.variants.map((v) => v.height)).toEqual([720, 360, 270]);
+  });
+
+  // ĐỎ hôm nay: parseHlsManifest không hề đọc mediaGroups -> tiếng bốc hơi.
+  it.fails(
+    '720p phải mang playlist tiếng 128k (hiện: mất tiếng -> CÂM)',
+    () => {
+      expect(JSON.stringify(r.variants[0])).toContain(
+        'https://video.twimg.com/aud/128/pl.m3u8',
+      );
+    },
+  );
+
+  // ĐỎ hôm nay: cùng lỗi, nhưng ghim thêm việc phải tra ĐÚNG group của tier.
+  it.fails('270p phải mang tiếng 32k của chính tier mình', () => {
+    expect(JSON.stringify(r.variants[2])).toContain(
+      'https://video.twimg.com/aud/32/pl.m3u8',
+    );
+  });
+
+  // CANH: xanh RỖNG hôm nay (chưa có tiếng để mà chọn sai), XANH khi sửa
+  // ĐÚNG, ĐỎ khi sửa NGÂY THƠ ("lấy #EXT-X-MEDIA đầu tiên" -> nhét tiếng
+  // 128k vào hình 480x270).
+  //
+  // Assert trên ĐÚNG rendition ĐƯỢC CHỌN, KHÔNG grep cả object variant.
+  // Lý do (đã đo bằng cách cấy 4 thiết kế W1.1 rồi chạy thật): PROMPT-THUC-THI
+  // §3.2 khuyến nghị variant mang CẢ DANH SÁCH rendition. Thiết kế đó ghép cặp
+  // ĐÚNG nhưng vẫn CHỞ chuỗi '/aud/128/' trong danh sách -> một guard grep
+  // JSON.stringify(variant) sẽ ĐỎ OAN đúng bản sửa mà lộ trình khuyên làm.
+  // "CHỞ" khác "DÙNG" — chỉ "DÙNG" mới là thứ quyết định file có câm hay không.
+  it('nếu 270p đã chọn tiếng thì phải là 32k, không phải 128k', () => {
+    const used = selectedAudioUri(r.variants[2]);
+    if (used === '') return; // hôm nay: chưa có tiếng -> xanh rỗng, đúng thiết kế
+    expect(used).toContain('/aud/32/');
+    expect(used).not.toContain('/aud/128/');
+  });
+
+  // ⚠️ ĐÃ GỠ BỎ: guard "không được bịa URL tiếng ngoài danh sách manifest".
+  // Nó BẤT KHẢ THI trên fixture X, không phải chỉ viết chưa khéo — đã chứng
+  // minh bằng cách chạy: một bản sửa KHÔNG hề đọc rendition.uri mà tự nặn
+  // `/aud/${kbps}/pl.m3u8` từ GROUP-ID sẽ sinh ra chuỗi TRÙNG KHÍT URL thật,
+  // nên KHÔNG assert nào nhìn vào output phân biệt nổi "đọc từ manifest" với
+  // "dựng lại y hệt". Guard cũ còn ĐỎ OAN khi variant mang `id` hợp lệ có
+  // chứa URL. Một test không bắt nổi đúng thứ nó mang tên = niềm tin giả —
+  // chính căn bệnh W0.4 sinh ra để chữa. Ca "bịa" QUAN SÁT ĐƯỢC nằm ở fixture
+  // AUDIO_NO_URI ngay dưới: ở đó URL bịa KHÔNG THỂ đến từ manifest.
+});
+
+// --- Fixture: RFC 8216 §4.3.4.2.1 — #EXT-X-MEDIA KHÔNG có URI ------------
+// "clients MUST assume that the audio data ... is present in every video
+// Rendition" => tiếng ĐÃ nằm trong variant => giữ nguyên đường MỘT input.
+// Ca này không có trong manifest thật nào tải được -> buộc phải tự chế.
+const AUDIO_NO_URI = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="grp",NAME="Main",DEFAULT=YES,LANGUAGE="en"
+#EXT-X-STREAM-INF:BANDWIDTH=1280000,RESOLUTION=640x360,CODECS="avc1.42c01e,mp4a.40.2",AUDIO="grp"
+muxed/index.m3u8`;
+
+describe('W0.4/W1.1 #EXT-X-MEDIA không URI -> tiếng đã nằm trong variant', () => {
+  it('hợp đồng: key "uri" VẮNG HẲN, không phải undefined', () => {
+    const main = audioGroups(AUDIO_NO_URI).grp!.Main!;
+    expect('uri' in main).toBe(false);
+    expect(main.default).toBe(true);
+  });
+
+  // CANH: xanh hôm nay, phải XANH LẠI sau W1.1. Đây là ca "bịa" DUY NHẤT
+  // quan sát được: rendition không có URI, nên mọi URL tiếng hiện ra đều
+  // KHÔNG THỂ đến từ manifest.
+  //
+  // ĐỘ PHỦ THẬT (đã đo bằng cách cấy 5 bản sửa rồi chạy, đừng tin quá lời):
+  // chỉ bắt được bản `resolveUri(rend.uri ?? '')` -> nặn ra master.m3u8.
+  // BỎ LỌT: (a) lấy chính uri hình làm input tiếng thứ hai (new Set nuốt trùng),
+  // (b) `String(undefined)` -> .../undefined (không đuôi .m3u8 nên regex mù),
+  // (c) bịa 'grp/audio.m4a' (mọi đuôi khác .m3u8 đều vô hình).
+  // Ba lỗ này chỉ bịt được khi đã biết hình dạng thật -> việc của W1.1.
+  it('không sinh thêm URL nào ngoài chính variant (giữ đường một-input)', () => {
+    const r = parseHlsManifest(AUDIO_NO_URI, 'https://ex.com/dir/master.m3u8');
+    const urls = JSON.stringify(r).match(/https?:[^"]+\.m3u8/g) ?? [];
+    expect(new Set(urls)).toEqual(
+      new Set(['https://ex.com/dir/muxed/index.m3u8']),
+    );
+  });
+});
+
+// --- Fixture: Vimeo — tiếng và hình TRÙNG PATH, chỉ khác query -----------
+// Parser nào dedupe theo path hoặc bỏ query sẽ GỘP HAI TRACK LÀM MỘT.
+// URI dùng ../../../ -> bắt buộc resolve thật.
+const VIMEO_MASTER = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-grp",NAME="Audio",DEFAULT=YES,URI="../../../parcel/v2/pl.m3u8?st=audio&tk=abc"
+#EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720,CODECS="avc1.4d401f,mp4a.40.2",AUDIO="audio-grp"
+../../../parcel/v2/pl.m3u8?st=video&tk=abc`;
+const VIMEO_BASE = 'https://vod.vimeocdn.com/a/b/c/sep/master.m3u8';
+
+describe('W0.4/W1.1 Vimeo: tiếng/hình trùng path, chỉ khác query', () => {
+  it('hợp đồng: hai uri chỉ khác query st=audio / st=video', () => {
+    const g = audioGroups(VIMEO_MASTER)['audio-grp']!.Audio!;
+    expect(g.uri).toBe('../../../parcel/v2/pl.m3u8?st=audio&tk=abc');
+    expect(rawManifest(VIMEO_MASTER).playlists![0]!.uri).toBe(
+      '../../../parcel/v2/pl.m3u8?st=video&tk=abc',
+    );
+  });
+
+  // ../../../ tính từ THƯ MỤC của base (/a/b/c/sep/) -> lùi 3 mức = /a/,
+  // KHÔNG phải về gốc domain. Kỳ vọng sai chỗ này là bẫy dễ dẫm.
+  it('hình resolve đúng qua ../../../ và GIỮ NGUYÊN query', () => {
+    const r = parseHlsManifest(VIMEO_MASTER, VIMEO_BASE);
+    expect(r.variants[0]!.uri).toBe(
+      'https://vod.vimeocdn.com/a/parcel/v2/pl.m3u8?st=video&tk=abc',
+    );
+  });
+
+  // ĐỎ hôm nay: tiếng bị vứt.
+  it.fails(
+    'variant phải mang playlist tiếng (st=audio), resolve tuyệt đối',
+    () => {
+      const r = parseHlsManifest(VIMEO_MASTER, VIMEO_BASE);
+      expect(JSON.stringify(r.variants[0])).toContain(
+        'https://vod.vimeocdn.com/a/parcel/v2/pl.m3u8?st=audio&tk=abc',
+      );
+    },
+  );
+});
+
+// --- Fixture: Apple fMP4 — CÙNG uri variant dưới 3 group tiếng -----------
+// Ghim lý do W1.5 cần `id` bắt buộc: key/dedupe theo uri sẽ mất ac-3/ec-3.
+const APPLE_MASTER = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="a1/prog.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="ac3",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="a2/prog.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="ec3",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="a3/prog.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720,CODECS="avc1.4d401f,mp4a.40.2",AUDIO="aac"
+v/prog.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2600000,RESOLUTION=1280x720,CODECS="avc1.4d401f,ac-3",AUDIO="ac3"
+v/prog.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2700000,RESOLUTION=1280x720,CODECS="avc1.4d401f,ec-3",AUDIO="ec3"
+v/prog.m3u8`;
+
+describe('W0.4/W1.5 Apple: 3 variant DÙNG CHUNG một uri hình', () => {
+  const r = parseHlsManifest(APPLE_MASTER, 'https://ex.com/dir/master.m3u8');
+
+  it('giữ đủ 3 variant dù uri trùng nhau (không được dedupe theo uri)', () => {
+    expect(r.variants).toHaveLength(3);
+    expect(new Set(r.variants.map((v) => v.uri)).size).toBe(1);
+  });
+
+  // ĐỎ hôm nay: VariantInfo chưa có `id` -> popup key theo uri -> bấm 1 dòng
+  // sáng cả 3. W1.5 yêu cầu `id: string` bắt buộc.
+  it.fails('mỗi variant phải có `id` riêng để phân biệt', () => {
+    const ids = r.variants.map((v) => (v as unknown as { id?: string }).id);
+    expect(new Set(ids).size).toBe(3);
+  });
+});
+
+// --- Fixture: EXT-X-BYTERANGE -------------------------------------------
+// Mọi #EXTINF trỏ CÙNG một URL, chỉ khác byte range. Vứt byterange => thấy
+// 3 segment trùng URL => tải nguyên file 3 lần, không header Range.
+const BYTERANGE = `#EXTM3U
+#EXT-X-VERSION:4
+#EXT-X-TARGETDURATION:10
+#EXT-X-MAP:URI="all.ts",BYTERANGE="1000@0"
+#EXTINF:9.0,
+#EXT-X-BYTERANGE:75232@1000
+all.ts
+#EXTINF:9.0,
+#EXT-X-BYTERANGE:82112
+all.ts
+#EXTINF:9.0,
+#EXT-X-BYTERANGE:69864@200000
+all.ts
+#EXT-X-ENDLIST`;
+
+describe('W0.4/W1.3 EXT-X-BYTERANGE', () => {
+  const raw = rawManifest(BYTERANGE);
+  const r = parseHlsSegments(BYTERANGE, 'https://cdn.example.com/dir/x.m3u8');
+
+  it('hợp đồng: offset ĐÃ cộng dồn thành TUYỆT ĐỐI — đừng cộng lần nữa', () => {
+    // segment 2 khai "82112" KHÔNG có @offset -> parser tự tính 1000+75232.
+    expect(raw.segments![0]!.byterange).toEqual({
+      length: 75232,
+      offset: 1000,
+    });
+    expect(raw.segments![1]!.byterange).toEqual({
+      length: 82112,
+      offset: 76232,
+    });
+    expect(raw.segments![2]!.byterange).toEqual({
+      length: 69864,
+      offset: 200000,
+    });
+  });
+
+  it('hợp đồng: segment.map là MỘT object DÙNG CHUNG — đừng sửa tại chỗ', () => {
+    expect(raw.segments![0]!.map).toBe(raw.segments![1]!.map);
+  });
+
+  it('hiện trạng: 3 segment trùng hệt uri -> sẽ tải cùng file 3 lần', () => {
+    expect(new Set(r.segments.map((s) => s.uri)).size).toBe(1);
+  });
+
+  // ĐỎ hôm nay: HlsSegment chưa có byterange -> tầng fetch không diễn đạt nổi Range.
+  it.fails('segment phải mang byterange', () => {
+    expect(r.segments[0]).toHaveProperty('byterange');
+  });
+
+  // ĐỎ hôm nay + ghim bẫy cộng dồn hai lần (76232, KHÔNG phải 152464).
+  it.fails('byterange.offset giữ nguyên giá trị tuyệt đối của parser', () => {
+    expect(r.segments[1]).toHaveProperty('byterange.offset', 76232);
+    expect(r.segments[1]).toHaveProperty('byterange.length', 82112);
+  });
+
+  // ĐỎ hôm nay: hls.ts:153 chỉ lấy s.map?.uri -> init segment ranged sẽ hỏng.
+  it.fails('init segment (#EXT-X-MAP) phải mang byterange riêng', () => {
+    expect(r.segments[0]).toHaveProperty('initByterange.length', 1000);
+    expect(r.segments[0]).toHaveProperty('initByterange.offset', 0);
+  });
+});
+
+// --- Fixture: #EXT-X-MAP BYTERANGE THIẾU @offset -------------------------
+// map.byterange KHÁC segment.byterange: KHÔNG cộng dồn, và thiếu @offset thì
+// key `offset` VẮNG HẲN (không mặc định 0). Ca này không có trong manifest
+// thật nào tải được -> tự chế theo RFC 8216 §4.3.2.5.
+const MAP_BYTERANGE_NO_OFFSET = `#EXTM3U
+#EXT-X-VERSION:4
+#EXT-X-MAP:URI="init.mp4",BYTERANGE="800"
+#EXTINF:9.0,
+#EXT-X-BYTERANGE:5000@800
+all.m4s
+#EXT-X-ENDLIST`;
+
+describe('W0.4/W1.3 #EXT-X-MAP BYTERANGE thiếu @offset', () => {
+  it('hợp đồng: key `offset` VẮNG HẲN ở map.byterange (không mặc định 0)', () => {
+    const raw = rawManifest(MAP_BYTERANGE_NO_OFFSET);
+    const mapBr = raw.segments![0]!.map!.byterange!;
+    expect(mapBr.length).toBe(800);
+    expect('offset' in mapBr).toBe(false);
+  });
+
+  // ĐỎ hôm nay. Ghim luôn: thiếu @offset ở MAP nghĩa là bắt đầu từ byte 0,
+  // KHÔNG phải "nối tiếp segment trước" như luật của EXT-X-BYTERANGE.
+  it.fails('thiếu @offset ở MAP -> phải hiểu là offset 0', () => {
+    const r = parseHlsSegments(
+      MAP_BYTERANGE_NO_OFFSET,
+      'https://cdn.example.com/dir/x.m3u8',
+    );
+    expect(r.segments[0]).toHaveProperty('initByterange.offset', 0);
+  });
+});
+
+// --- Fixture: EXT-X-DISCONTINUITY ---------------------------------------
+// Stream chèn quảng cáo reset timestamp. Byte-concat + -c copy => DTS không
+// đơn điệu => file chạy đoạn đầu rồi lệch tiếng/đứng hình, mà log
+// 'Non-monotonous DTS' chỉ đi vào console.debug => user nhận "Đã tải xong ✓".
+const DISCONTINUITY = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-TARGETDURATION:10
+#EXTINF:10.0,
+a0.ts
+#EXTINF:10.0,
+a1.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:6.0,
+ad0.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:10.0,
+b0.ts
+#EXT-X-ENDLIST`;
+
+describe('W0.4/W1.4 EXT-X-DISCONTINUITY', () => {
+  const raw = rawManifest(DISCONTINUITY);
+  const r = parseHlsSegments(
+    DISCONTINUITY,
+    'https://cdn.example.com/dir/x.m3u8',
+  );
+
+  it('hợp đồng: discontinuityStarts là CHỈ SỐ MẢNG, không phải media sequence', () => {
+    expect(raw.discontinuityStarts).toEqual([2, 3]);
+  });
+
+  it('hợp đồng: cờ `discontinuity` CHỈ có mặt khi = true', () => {
+    expect('discontinuity' in raw.segments![0]!).toBe(false);
+    expect(raw.segments![2]!.discontinuity).toBe(true);
+  });
+
+  it('hợp đồng: `timeline` tăng theo mỗi discontinuity (cách gom nhóm sạch hơn)', () => {
+    expect(raw.segments!.map((s) => s.timeline)).toEqual([0, 0, 1, 2]);
+  });
+
+  it('hiện trạng: parse trót lọt, không một tín hiệu nào về discontinuity', () => {
+    expect(r.segments).toHaveLength(4);
+    expect(r.totalDuration).toBeCloseTo(36);
+  });
+
+  // ĐỎ hôm nay: HlsSegmentsResult chưa có discontinuityCount -> không cách nào
+  // cảnh báo trước khi tải.
+  it.fails('kết quả phải đếm discontinuity để còn cảnh báo', () => {
+    expect(r).toHaveProperty('discontinuityCount', 2);
   });
 });
