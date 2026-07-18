@@ -851,6 +851,9 @@ async function handleHlsEstimate(
       protected: true,
       segmentCount: 0,
       durationSec: 0,
+      // Chưa fetch playlist nào (DRM chặn trước) -> chưa biết gì về chỗ nối. Popup dừng ở nhánh
+      // `protected` trước khi đọc tới đây, nên 0 ở đây là "không có tin", không phải "đã đo là sạch".
+      discontinuityCount: 0,
     };
   }
   // W2.2: spoof Referer/Origin quanh cú fetch ước lượng — cùng lý do §2.3 như handleVariants.
@@ -934,6 +937,13 @@ async function estimateFromPlaylists(
     segmentCount: parsed.segments.length + (audio?.segments.length ?? 0),
     durationSec,
     estBytes,
+    // W1.4 — MAX chứ KHÔNG cộng: hình và tiếng là hai góc nhìn của CÙNG một dòng thời gian, nên
+    // cùng một chỗ chèn quảng cáo hiện ra ở CẢ HAI playlist. Cộng vào là đếm đôi. Lấy max để
+    // playlist nào khai đầy đủ hơn thì thắng — bỏ sót chỗ nối mới là cái hỏng im lặng.
+    discontinuityCount: Math.max(
+      parsed.discontinuityCount,
+      audio?.discontinuityCount ?? 0,
+    ),
   };
 }
 

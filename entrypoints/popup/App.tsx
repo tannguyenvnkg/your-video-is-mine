@@ -290,15 +290,33 @@ function MediaRow({
         setDlError('Không hỗ trợ nội dung được bảo vệ (DRM/SAMPLE-AES).');
         return;
       }
+      // Gộp MỌI cảnh báo vào ĐÚNG MỘT hộp thoại: hai confirm liên tiếp thì user bấm OK theo quán
+      // tính và lời cảnh báo thứ hai coi như không tồn tại.
+      const warnings: string[] = [];
       if (est.estBytes != null) {
         const threshold = await getSizeWarnBytes();
         if (est.estBytes > threshold) {
-          const ok = window.confirm(
-            `Video ước tính ~${formatBytes(est.estBytes)} (${est.segmentCount} segment).\n` +
-              'Tải & ghép trong bộ nhớ có thể tốn nhiều RAM. Tiếp tục?',
+          warnings.push(
+            `Video ước tính ~${formatBytes(est.estBytes)} (${est.segmentCount} segment). ` +
+              'Tải & ghép trong bộ nhớ có thể tốn nhiều RAM.',
           );
-          if (!ok) return;
         }
+      }
+      // W1.4 — "chỗ nối" = timestamp bị reset giữa chừng (thường do chèn quảng cáo). Ta nối byte
+      // rồi remux `-c copy`, nên ffmpeg nhận một dòng DTS KHÔNG đơn điệu: file chạy được đoạn đầu
+      // rồi lệch tiếng/đứng hình/sai thời lượng — mà log 'Non-monotonous DTS' chỉ rơi vào
+      // console.debug nên job vẫn báo "Đã tải xong ✓". Nói TRƯỚC còn hơn giao file hỏng kèm dấu tích.
+      if (est.discontinuityCount > 0) {
+        warnings.push(
+          `Video có ${est.discontinuityCount} chỗ nối giữa chừng (thường do chèn quảng cáo). ` +
+            'File ghép ra có thể lệch tiếng, đứng hình hoặc sai thời lượng.',
+        );
+      }
+      if (
+        warnings.length > 0 &&
+        !window.confirm(`${warnings.join('\n\n')}\n\nVẫn tải?`)
+      ) {
+        return;
       }
       const res = await requestHlsDownload(
         variant.uri,

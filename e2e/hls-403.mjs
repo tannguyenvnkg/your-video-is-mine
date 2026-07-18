@@ -804,6 +804,72 @@ async function runDashDownload() {
   }
 }
 
+/**
+ * W1.4 — chỗ nối (EXT-X-DISCONTINUITY) phải ĐẾM ĐƯỢC qua đúng đường popup dùng (`hls/estimate`),
+ * và phải đếm ĐÚNG HAI CHIỀU.
+ *
+ * Vì sao cần cả chiều "sạch -> 0": cảnh báo oan làm user bỏ một lượt tải hoàn toàn khoẻ mạnh, mà
+ * ca đó KHÔNG có triệu chứng nào để ai đi tìm. ĐO THẬT (m3u8-parser@7.2.0) cho thấy cách đếm hiển
+ * nhiên `discontinuityStarts.length` sai cả hai chiều — nên chiều âm ở đây không phải thủ tục.
+ *
+ * Popup dựng câu cảnh báo từ ĐÚNG con số này; bản thân hộp thoại confirm thì e2e không với tới
+ * (dự án chưa có test component React) — khoảng hở đó ghi rõ ở PROMPT-SESSION-MOI.md.
+ */
+async function runDiscontinuityCounted() {
+  const srv = await startFixtureServer({ gate: 'none' });
+  try {
+    return await withBrowser(async ({ page }) => {
+      const estimate = (url) =>
+        page.evaluate(
+          (u) =>
+            chrome.runtime.sendMessage({
+              kind: 'hls/estimate',
+              variantUrl: u,
+              mediaType: 'hls',
+              tabId: -1,
+            }),
+          url,
+        );
+
+      const dirty = await estimate(srv.discontinuityUrl);
+      if (!dirty?.ok)
+        return {
+          ok: false,
+          detail: `hls/estimate lỗi trên playlist có chỗ nối: ${JSON.stringify(dirty)}`,
+        };
+      if (dirty.discontinuityCount !== 2) {
+        return {
+          ok: false,
+          detail:
+            `playlist có 2 chỗ nối nhưng estimate trả ${JSON.stringify(dirty.discontinuityCount)} ` +
+            '-> popup KHÔNG cảnh báo được, user nhận file lệch tiếng kèm dấu tích xanh',
+        };
+      }
+
+      const clean = await estimate(srv.mediaUrl);
+      if (!clean?.ok)
+        return {
+          ok: false,
+          detail: `hls/estimate lỗi trên playlist sạch: ${JSON.stringify(clean)}`,
+        };
+      if (clean.discontinuityCount !== 0) {
+        return {
+          ok: false,
+          detail:
+            `playlist SẠCH mà estimate trả ${JSON.stringify(clean.discontinuityCount)} chỗ nối ` +
+            '-> cảnh báo OAN, user bỏ một lượt tải hoàn toàn khoẻ',
+        };
+      }
+      return {
+        ok: true,
+        detail: `có chỗ nối -> ${dirty.discontinuityCount}; playlist sạch -> ${clean.discontinuityCount}`,
+      };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
 const SCENARIOS = [
   {
     id: 'happy',
@@ -888,6 +954,16 @@ const SCENARIOS = [
     expect: 'pass',
     pins: '§2.8/W1.5 (DASH ngõ cụt + định danh track bằng URL -> file câm)',
     run: () => runDashDownload(),
+  },
+  {
+    id: 'discontinuity-counted',
+    title:
+      'Playlist chèn quảng cáo -> đếm đúng 2 chỗ nối để popup cảnh báo; playlist sạch -> 0 (không doạ oan)',
+    // Trước W1.4: HlsSegmentsResult không có trường nào về discontinuity -> ffmpeg nhận DTS không
+    // đơn điệu, file lệch tiếng/sai thời lượng, mà job vẫn báo "Đã tải xong ✓".
+    expect: 'pass',
+    pins: '§2.?/W1.4 (discontinuity ghép mù -> file hỏng im lặng)',
+    run: () => runDiscontinuityCounted(),
   },
   {
     id: 'drm-refused',

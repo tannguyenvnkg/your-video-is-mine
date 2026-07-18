@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Parser } from 'm3u8-parser';
 import {
   childUrlsOfMaster,
+  countDiscontinuities,
   parseHlsManifest,
   parseHlsSegments,
   resolveUri,
@@ -736,10 +737,91 @@ describe('W0.4/W1.4 EXT-X-DISCONTINUITY', () => {
     expect(r.totalDuration).toBeCloseTo(36);
   });
 
-  // ĐỎ hôm nay: HlsSegmentsResult chưa có discontinuityCount -> không cách nào
-  // cảnh báo trước khi tải.
-  it.fails('kết quả phải đếm discontinuity để còn cảnh báo', () => {
+  it('kết quả phải đếm discontinuity để còn cảnh báo', () => {
     expect(r).toHaveProperty('discontinuityCount', 2);
+  });
+});
+
+// --- W1.4: ba ca biên BÁC BỎ cách đếm hiển nhiên ------------------------
+// 🔬 ĐO THẬT (m3u8-parser@7.2.0, probe 2026-07-19) trước khi viết một dòng code: dùng thẳng
+// `discontinuityStarts.length` SAI CẢ HAI CHIỀU. Ba ca dưới ghim đúng chỗ nó sai — bỏ chúng đi
+// thì bản sửa ngây thơ vẫn xanh, và người dùng nhận cảnh báo oan (hoặc số đếm gấp đôi).
+describe('W1.4 đếm discontinuity: chỉ tính CHỖ NỐI THẬT bên trong file ghép', () => {
+  it('playlist sạch -> 0 (KHÔNG cảnh báo oan)', () => {
+    const r = parseHlsSegments(
+      `#EXTM3U\n#EXTINF:9,\na.ts\n#EXTINF:9,\nb.ts\n#EXT-X-ENDLIST`,
+      'https://a.com/i.m3u8',
+    );
+    expect(r.discontinuityCount).toBe(0);
+  });
+
+  // ĐO: tag đứng TRƯỚC segment đầu -> discontinuityStarts = [0]. Đó là mốc reset so với đoạn ta
+  // KHÔNG tải; bên trong file ghép ra không có chỗ nối nào. Đếm nó = doạ user vô cớ.
+  it('tag TRƯỚC segment đầu tiên -> 0 chỗ nối (starts=[0] nhưng không có gì phía trước để nối)', () => {
+    const text = `#EXTM3U
+#EXT-X-DISCONTINUITY
+#EXTINF:9,
+a.ts
+#EXTINF:9,
+b.ts
+#EXT-X-ENDLIST`;
+    expect(rawManifest(text).discontinuityStarts).toEqual([0]); // hợp đồng thư viện
+    expect(
+      parseHlsSegments(text, 'https://a.com/i.m3u8').discontinuityCount,
+    ).toBe(0);
+  });
+
+  // ĐO: hai tag liền nhau -> discontinuityStarts = [1,1] (chỉ số LẶP) trong khi chỉ có MỘT chỗ nối.
+  it('hai tag LIỀN NHAU -> 1 chỗ nối, không phải 2 (starts lặp chỉ số)', () => {
+    const text = `#EXTM3U
+#EXTINF:9,
+a.ts
+#EXT-X-DISCONTINUITY
+#EXT-X-DISCONTINUITY
+#EXTINF:9,
+b.ts
+#EXT-X-ENDLIST`;
+    expect(rawManifest(text).discontinuityStarts).toEqual([1, 1]); // hợp đồng thư viện
+    expect(
+      parseHlsSegments(text, 'https://a.com/i.m3u8').discontinuityCount,
+    ).toBe(1);
+  });
+
+  // ĐO: DISCONTINUITY-SEQUENCE nói "trước cửa sổ này đã có 3 lần đứt", KHÔNG phải đứt bên trong.
+  // 🔴 Ghim RIÊNG từng nửa của phép hợp trong countDiscontinuities. Qua đường parse thật, hai
+  // nguồn (mảng `discontinuityStarts` và cờ trên segment) LUÔN khai giống nhau, nên xoá nửa nào
+  // suite cũng vẫn xanh -> một hôm ai đó dọn "code thừa" là mất lưới mà không ai hay. Gọi thẳng
+  // hàm thuần với đúng MỘT nguồn là cách duy nhất chứng minh cả hai nửa đều đang gánh việc.
+  it('chỉ có mảng starts (không cờ segment) -> vẫn đếm được', () => {
+    expect(countDiscontinuities([{}, {}, {}, {}], [2, 3])).toBe(2);
+  });
+
+  it('chỉ có cờ trên segment (không mảng starts) -> vẫn đếm được', () => {
+    expect(
+      countDiscontinuities([{}, {}, { discontinuity: true }, {}], undefined),
+    ).toBe(1);
+  });
+
+  // Chỉ số vượt ngoài mảng segment không phải chỗ nối nào cả — bỏ, đừng đếm bừa.
+  it('chỉ số nằm ngoài phạm vi segment -> bỏ qua', () => {
+    expect(countDiscontinuities([{}, {}], [1, 5, -1])).toBe(1);
+  });
+
+  it('DISCONTINUITY-SEQUENCE mà không có tag nào -> 0', () => {
+    const text = `#EXTM3U
+#EXT-X-DISCONTINUITY-SEQUENCE:3
+#EXT-X-MEDIA-SEQUENCE:100
+#EXTINF:9,
+a.ts
+#EXTINF:9,
+b.ts
+#EXT-X-ENDLIST`;
+    const raw = rawManifest(text);
+    expect(raw.discontinuityStarts).toEqual([]);
+    expect(raw.discontinuitySequence).toBe(3); // có mặt, nhưng KHÔNG được dùng để đếm
+    expect(
+      parseHlsSegments(text, 'https://a.com/i.m3u8').discontinuityCount,
+    ).toBe(0);
   });
 });
 

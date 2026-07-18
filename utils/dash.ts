@@ -9,6 +9,7 @@ import {
 } from 'mpd-parser';
 import type { RenditionInfo, VariantInfo } from './types';
 import {
+  countDiscontinuities,
   parseHlsSegments,
   sortVariantsDesc,
   uniqueVariantId,
@@ -233,6 +234,7 @@ export function parseDashSegments(
     isProtected: drmSystems.length > 0,
     totalDuration: 0,
     hasInit: false,
+    discontinuityCount: 0,
   };
   if (!track) {
     return {
@@ -285,6 +287,12 @@ export function parseDashSegments(
     isProtected: drmSystems.length > 0,
     totalDuration,
     hasInit: inits.size > 0,
+    // W1.4 — điền cho ĐỦ hợp đồng. Với DASH con số này chỉ để BÁO CÁO: ranh giới Period bị guard
+    // ngay bên dưới TỪ CHỐI thẳng, chứ không hạ xuống mức cảnh báo như HLS.
+    discontinuityCount: countDiscontinuities(
+      track.playlist.segments ?? [],
+      periodStarts,
+    ),
   };
   if (periodStarts.length > 0 || inits.size > 1) {
     return {

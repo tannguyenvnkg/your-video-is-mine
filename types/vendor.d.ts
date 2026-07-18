@@ -76,6 +76,8 @@ declare module 'm3u8-parser' {
     key?: M3u8Key;
     map?: M3u8Map;
     byterange?: M3u8ByteRange;
+    /** W1.4 — CHỈ có mặt khi = true (parser không ghi `false`). */
+    discontinuity?: boolean;
     [key: string]: unknown;
   }
 
@@ -92,6 +94,13 @@ declare module 'm3u8-parser' {
     mediaSequence?: number;
     targetDuration?: number;
     endList?: boolean;
+    /**
+     * W1.4 — CHỈ SỐ MẢNG `segments` (không phải media sequence). ĐO THẬT: chỉ số có thể LẶP khi
+     * hai tag DISCONTINUITY đứng liền nhau, và có thể là 0 khi tag đứng trước segment đầu.
+     */
+    discontinuityStarts?: number[];
+    /** Số lần đứt TRƯỚC cửa sổ playlist này — KHÔNG phải số chỗ nối bên trong nó. */
+    discontinuitySequence?: number;
     [key: string]: unknown;
   }
 

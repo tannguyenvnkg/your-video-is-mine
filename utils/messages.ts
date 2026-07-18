@@ -35,6 +35,12 @@ export type HlsEstimateResponse =
       durationSec: number;
       /** dung lượng ước tính (byte) nếu biết bitrate. */
       estBytes?: number;
+      /**
+       * W1.4 — số chỗ nối (timestamp reset, thường do chèn quảng cáo) bên trong luồng sắp tải.
+       * > 0 -> popup PHẢI cảnh báo trước khi tải: ta ghép byte rồi `-c copy`, ffmpeg gặp DTS
+       * không đơn điệu sẽ cho ra file lệch tiếng/sai thời lượng mà vẫn báo "Đã tải xong ✓".
+       */
+      discontinuityCount: number;
     }
   | { ok: false; error: string };
 

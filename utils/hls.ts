@@ -258,6 +258,45 @@ export interface HlsSegmentsResult {
    * representation chỉ là một .mp4 + indexRange). Tầng trên định tuyến sang luồng progressive.
    */
   directUrl?: string;
+  /**
+   * W1.4 — số CHỖ NỐI (timestamp reset) nằm BÊN TRONG danh sách segment sắp ghép, thường do chèn
+   * quảng cáo giữa chừng. > 0 nghĩa là byte-concat + `-c copy` sẽ đưa cho ffmpeg một dòng DTS
+   * KHÔNG đơn điệu -> file chạy được đoạn đầu rồi lệch tiếng/đứng hình/sai thời lượng, mà cảnh
+   * báo 'Non-monotonous DTS' chỉ rơi vào `console.debug` -> user vẫn nhận "Đã tải xong ✓".
+   *
+   * BẮT BUỘC (không phải optional) là CỐ Ý: để trường này vắng được thì mọi tầng trên so
+   * `undefined > 0` ra false và cảnh báo biến mất KHÔNG một tiếng động — đúng lớp lỗi §2.1.
+   */
+  discontinuityCount: number;
+}
+
+/**
+ * W1.4 — đếm CHỖ NỐI THẬT bên trong danh sách segment ta sắp ghép.
+ *
+ * 🔬 ĐO THẬT (m3u8-parser@7.2.0, probe 2026-07-19) — **`discontinuityStarts.length` SAI CẢ HAI
+ * CHIỀU**, đừng "đơn giản hoá" về lại nó:
+ *  - Tag đứng TRƯỚC segment đầu tiên -> `[0]`. Đó là mốc reset so với đoạn ta KHÔNG tải; bên trong
+ *    file ghép ra **không có chỗ nối nào**. Đếm nó = doạ user vô cớ (giết oan lượt tải khoẻ).
+ *  - Hai tag LIỀN NHAU -> `[1,1]`: chỉ số **LẶP**, mà chỗ nối chỉ có MỘT -> đếm gấp đôi.
+ *  - `#EXT-X-DISCONTINUITY-SEQUENCE:3` không kèm tag nào -> `[]` (đúng 0): nó đếm các lần đứt
+ *    TRƯỚC cửa sổ này, không phải bên trong. Đừng dùng nó để đếm.
+ *
+ * Vậy luật là: **chỉ số PHÂN BIỆT và LỚN HƠN 0**. Gộp cả hai nguồn (mảng `discontinuityStarts` và
+ * cờ trên từng segment) vì chúng là hai góc nhìn của cùng một thứ — lệch nhau thì lấy hợp là phía
+ * an toàn: bỏ sót một chỗ nối thì file hỏng im lặng, còn `Set` đã chặn sẵn đường đếm trùng.
+ */
+export function countDiscontinuities(
+  segments: readonly { discontinuity?: boolean }[],
+  discontinuityStarts?: readonly number[],
+): number {
+  const seams = new Set<number>();
+  for (const i of discontinuityStarts ?? []) {
+    if (Number.isInteger(i) && i > 0 && i < segments.length) seams.add(i);
+  }
+  segments.forEach((s, i) => {
+    if (i > 0 && s.discontinuity === true) seams.add(i);
+  });
+  return seams.size;
 }
 
 /**
@@ -356,5 +395,6 @@ export function parseHlsSegments(
     isProtected: encryption === 'sample-aes' || encryption === 'other',
     totalDuration: segments.reduce((sum, s) => sum + s.duration, 0),
     hasInit: segments.some((s) => s.initUri !== undefined),
+    discontinuityCount: countDiscontinuities(raw, manifest.discontinuityStarts),
   };
 }

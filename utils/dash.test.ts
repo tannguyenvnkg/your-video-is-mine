@@ -292,6 +292,13 @@ describe('W1.5 parseDashSegments — hình', () => {
     expect(r.totalDuration).toBe(60);
   });
 
+  // W1.4 — `discontinuityCount` là trường BẮT BUỘC của HlsSegmentsResult, nên DASH phải điền nó
+  // luôn (một Period = không chỗ nối nào). Thiếu -> tầng trên đọc `undefined` rồi so sánh `> 0`
+  // ra false: im lặng đúng kiểu §2.1 chứ không phải lỗi ồn ào.
+  it('một Period -> discontinuityCount = 0 (không cảnh báo oan)', () => {
+    expect(r.discontinuityCount).toBe(0);
+  });
+
   // Chọn ĐÚNG representation, không phải cái đầu tiên gặp.
   it('chọn v360 thì ra segment của v360', () => {
     const r360 = parseDashSegments(MPD_TEMPLATE, TPL_BASE, 'v360');
@@ -399,6 +406,13 @@ describe('W1.5 đa Period phải bị chặn kể cả khi init GIỐNG nhau', (
   it('phải nêu lý do không hỗ trợ, KHÔNG được ghép ra file lặp nội dung', () => {
     expect(r.unsupportedReason).toBeTruthy();
     expect(r.unsupportedReason).toContain('Period');
+  });
+
+  // W1.4 — ca "một Period -> 0" ở trên được thoả mãn bởi một số 0 CỨNG, nên tự nó không chứng
+  // minh parseDashSegments có thật sự gọi countDiscontinuities. Ranh giới Period là chỗ nối THẬT,
+  // nên đây là ca duy nhất buộc con số phải đến từ manifest.
+  it('ranh giới Period là chỗ nối thật -> đếm ra 1 (không phải số 0 cứng)', () => {
+    expect(r.discontinuityCount).toBe(1);
   });
 });
 

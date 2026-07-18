@@ -100,6 +100,17 @@ export async function startFixtureServer({
       send(200, text, 'application/vnd.apple.mpegurl');
       return;
     }
+    // W1.4 — CÙNG 10 segment như media.m3u8 nhưng chèn tag #EXT-X-DISCONTINUITY (đúng hình dạng
+    // stream cắm quảng cáo giữa chừng). Giữ nguyên số segment là CỐ Ý: hai playlist chỉ khác nhau
+    // đúng ở chỗ có/không tag, nên chênh lệch quan sát được KHÔNG thể đến từ thứ gì khác.
+    //
+    // 🔴 Cụm thứ hai cố ý là HAI TAG LIỀN NHAU (splicer phát ra khi pod quảng cáo rỗng — dạng có
+    // thật). Nhờ vậy ca e2e ghim được CẢ LUẬT ĐẾM chứ không chỉ đường ống: 3 tag / 2 chỗ nối, nên
+    // bản đếm ngây thơ `discontinuityStarts.length` (ĐO THẬT: trả [4,7,7]) ra 3 và bị bắt tại chỗ.
+    if (path === '/hls/media-disc.m3u8') {
+      send(200, readFixture('media-disc.m3u8'), 'application/vnd.apple.mpegurl');
+      return;
+    }
     // W2.6 — treo tuyệt đối: nhận request rồi im, không header, không byte, không đóng socket.
     if (stallSegments && isSegment(path)) {
       requests.push({ url: path, referer, status: 0 });
@@ -199,6 +210,8 @@ export async function startFixtureServer({
     drmPageUrl: `http://127.0.0.1:${port}/drm.html`,
     masterUrl: `http://127.0.0.1:${port}/hls/master.m3u8`,
     mediaUrl: `http://127.0.0.1:${port}/hls/media.m3u8`,
+    /** W1.4 — playlist y hệt mediaUrl nhưng có 2 chỗ nối (stream chèn quảng cáo). */
+    discontinuityUrl: `http://127.0.0.1:${port}/hls/media-disc.m3u8`,
     /** W2.5 — URL mp4 progressive (host 127.0.0.1). */
     progressiveUrl: `http://127.0.0.1:${port}/prog/sample.mp4`,
     /** W2.7 — URL mp4 CÂM (server nhận rồi im) để giữ lượt tải đứng yên mà giết offscreen. */
