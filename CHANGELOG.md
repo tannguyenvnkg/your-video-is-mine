@@ -58,6 +58,21 @@ bản này bị CÂM** — tải xong, báo "Đã tải xong ✓", mở ra thì 
   được như HLS. Kèm theo: báo tiến trình theo dung lượng, tự dừng với thông báo rõ nếu máy chủ treo
   quá lâu, và chặn file quá lớn (trên ~2GB) bằng thông báo thay vì làm treo âm thầm.
 
+### Sửa lỗi — KHÔNG CÒN "QUAY MÃI KHÔNG BIẾT ĐANG CHỜ GÌ"
+
+- **Mất mạng giữa chừng nay BÁO LỖI, không treo vĩnh viễn.** Trước bản này, nếu máy chủ nhận yêu
+  cầu rồi im lặng (rớt mạng, CDN treo, wifi chập chờn), việc tải **đứng im mãi mãi** — không lỗi,
+  không thông báo, bấm Huỷ cũng không ăn thua, và **mọi video xếp hàng phía sau chết theo**. Nay
+  extension tự phát hiện và báo lỗi trong khoảng một phút (đo thật: 63,7 giây).
+- **Bấm Huỷ nay dừng NGAY.** Trước đây nút Huỷ chỉ được đọc *giữa* hai bước, nên khi đang chờ mạng
+  thì bấm không có tác dụng gì: popup báo "đã huỷ" trong khi máy vẫn âm thầm tải tiếp. Nay lệnh huỷ
+  ngắt thẳng kết nối đang chạy.
+- **Không "cắt oan" mạng chậm.** Đồng hồ đếm theo *sự im lặng* chứ không theo tổng thời gian: video
+  nặng tải 5 phút trên mạng yếu vẫn chạy bình thường, chỉ khi thực sự **đứng im** mới bị ngắt.
+- **Thôi thử lại vô ích.** Link hết hạn hoặc bị chặn hẳn (403/404…) trước đây bị thử lại 4 lần liên
+  tiếp trong tích tắc — vừa vô nghĩa vừa dễ khiến máy chủ coi là tấn công rồi chặn IP. Nay dừng
+  ngay lần đầu, còn lỗi tạm thời thì thử lại có giãn cách tăng dần.
+
 ### Cải thiện — MỖI VIDEO CHỈ CÒN MỘT DÒNG TRONG DANH SÁCH
 
 - **Ẩn playlist con**: một video HLS tách tiếng trước đây hiện lên **ba dòng "HLS" giống nhau**

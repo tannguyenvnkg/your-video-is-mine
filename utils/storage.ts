@@ -248,6 +248,11 @@ export interface HlsJob {
   segmentsTotal: number;
   segmentsDone: number;
   error?: string;
+  /**
+   * W2.6 — ghi chú TẠM THỜI hiện dưới thanh tiến trình ("đang thử lại lần 2/4…").
+   * KHÔNG phải lỗi: job vẫn đang chạy. Có nó thì một phút chờ retry không còn trông như treo.
+   */
+  note?: string;
   filename?: string;
   // MỚI (tiến trình chi tiết):
   /** tab phát hiện media -> background đặt badge % đúng tab. */

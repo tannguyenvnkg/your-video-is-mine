@@ -8,7 +8,8 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { decryptAes128Cbc, hlsSegmentIv } from '@/utils/crypto';
 import { describeError } from '@/utils/errors';
-import { parseHlsSegments, type HlsByteRange } from '@/utils/hls';
+import { parseHlsSegments } from '@/utils/hls';
+import { CancelledError, fetchWithRetry, timeoutSignal } from '@/utils/retry';
 import {
   CHUNK_THRESHOLD_BYTES,
   DEFAULT_CHUNK_BYTES,
@@ -50,7 +51,12 @@ let loading: Promise<FFmpeg> | null = null;
 // Xếp hàng job HLS TUẦN TỰ: chỉ có 1 instance ffmpeg -> KHÔNG chạy 2 job song song
 // (tránh đụng độ tên file trong FS ảo dùng chung).
 let jobChain: Promise<void> = Promise.resolve();
-const cancelledJobs = new Set<string>();
+
+// W2.6 — mỗi job một AbortController. TRƯỚC W2.6 đây là `Set<string>` cờ huỷ, mà cờ thì chỉ đọc
+// được GIỮA hai bước: worker đang kẹt trong `await fetch` không bao giờ nhìn thấy nó, nên "Huỷ"
+// không giật nổi request đang bay -> popup báo đã huỷ trong khi mạng vẫn chạy. Controller thì
+// abort thẳng vào request.
+const jobAborts = new Map<string, AbortController>();
 
 // Job đang mux hiện tại (để nối sự kiện progress của ffmpeg vào đúng job). Job chạy tuần tự
 // nên chỉ có 1 mux tại một thời điểm.
@@ -78,8 +84,6 @@ function recentFfmpegLog(): string {
   const tail = ffmpegLog.slice(-6).filter((l) => l.trim() !== '');
   return tail.length ? ` Log ffmpeg: ${tail.join(' | ')}` : '';
 }
-
-class CancelledError extends Error {}
 
 async function ensureFfmpeg(): Promise<FFmpeg> {
   if (ffmpeg) return ffmpeg;
@@ -114,52 +118,9 @@ async function ensureFfmpeg(): Promise<FFmpeg> {
   return loading;
 }
 
-/** Lỗi KHÔNG thử lại được — thử lại chỉ tốn băng thông mà kết quả y hệt. */
-class FatalFetchError extends Error {}
-
-/**
- * Tải một segment. `range` có mặt (W1.3) -> gửi header `Range` thay vì tải nguyên file.
- */
-async function fetchWithRetry(
-  url: string,
-  retries = 3,
-  range?: HlsByteRange,
-): Promise<ArrayBuffer> {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const res = await fetch(url, {
-        credentials: 'include',
-        ...(range
-          ? {
-              // HTTP Range là ĐÓNG hai đầu: byte cuối = offset + length - 1.
-              headers: {
-                Range: `bytes=${range.offset}-${range.offset + range.length - 1}`,
-              },
-            }
-          : {}),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      // ⚠️ BẪY W1.3: server PHỚT LỜ Range trả 200 + TOÀN BỘ file. Ghi cả file vào chỗ của một
-      // segment = file ra hỏng mà im lặng. Và vì playlist byterange cho cả trăm segment trỏ CÙNG
-      // một file, âm thầm chấp nhận còn nghĩa là tải nguyên file đó cả trăm lần (đo thật trên
-      // Apple fMP4: 27MB x 101 = ~2.8GB). Thà FAIL LỚN TIẾNG.
-      if (range && res.status !== 206) {
-        throw new FatalFetchError(
-          `máy chủ không hỗ trợ tải theo đoạn (Range): trả HTTP ${res.status} thay vì 206`,
-        );
-      }
-      return await res.arrayBuffer();
-    } catch (e) {
-      // Thử lại vô nghĩa: server sẽ lại phớt lờ Range, và mỗi lần thử kéo về NGUYÊN file lớn.
-      if (e instanceof FatalFetchError) throw e;
-      lastErr = e;
-    }
-  }
-  throw new Error(
-    `Tải segment lỗi sau ${retries + 1} lần thử: ${describeError(lastErr)}`,
-  );
-}
+// W2.6: vòng retry (timeout mỗi lượt + backoff mũ huỷ được + fail-fast + huỷ giật request đang
+// bay) nay nằm ở `utils/retry.ts` — thuần, tiêm được fetch, CÓ TEST. Trước W2.6 nó nằm inline ở
+// đây nên không một test nào chạm tới được (file này import ffmpeg.wasm).
 
 async function runFfmpegDemo(): Promise<FfmpegDemoResponse> {
   try {
@@ -198,21 +159,30 @@ async function runFfmpegDemo(): Promise<FfmpegDemoResponse> {
 async function loadPlaylist(
   url: string,
   label: string,
+  jobSignal?: AbortSignal,
 ): Promise<ReturnType<typeof parseHlsSegments>> {
   let text: string;
+  // W2.6: ghép timeout với signal huỷ của job -> bấm Huỷ trong lúc đang tải playlist cũng đứt ngay
+  // (trước đây chỉ có timeout: huỷ phải chờ hết 30s mới có tác dụng).
+  const { signal, dispose } = timeoutSignal(PLAYLIST_TIMEOUT_MS, jobSignal);
   try {
     // Playlist PHẢI có timeout + kiểm status. Không timeout thì một request treo = job treo VĨNH
     // VIỄN ở 'loading', không lỗi, không cách nào biết.
     const res = await fetch(url, {
       credentials: 'include',
-      signal: AbortSignal.timeout(PLAYLIST_TIMEOUT_MS),
+      signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     text = await res.text();
   } catch (e) {
+    // Huỷ KHÔNG phải lỗi tải: bọc nó thành "Không tải được playlist" sẽ báo cho user một thông
+    // báo lỗi đỏ trong khi thứ vừa xảy ra là chính họ bấm Huỷ.
+    if (jobSignal?.aborted) throw new CancelledError('Đã huỷ');
     throw new Error(`Không tải được playlist ${label}: ${describeError(e)}`, {
       cause: e,
     });
+  } finally {
+    dispose();
   }
   return parseHlsSegments(text, url);
 }
@@ -239,10 +209,22 @@ async function downloadTrack(o: {
   concurrency: number;
   writtenFiles: Set<string>;
   throwIfCancelled: () => void;
+  /** W2.6 — signal huỷ của JOB: abort giật mọi request đang bay ra ngay, không chờ vòng lặp. */
+  signal: AbortSignal;
   /** Báo 1 segment vừa fetch xong (byte thô, trước giải mã) -> gộp tiến trình mọi track. */
   onSegment: (bytes: number) => Promise<void>;
+  /** W2.6 — báo "đang thử lại" để popup không đứng hình câm suốt cả phút. */
+  onRetry?: (info: { attempt: number; total: number; reason: string }) => void;
 }): Promise<TrackFiles> {
-  const { ff, parsed, prefix, concurrency, writtenFiles, throwIfCancelled } = o;
+  const {
+    ff,
+    parsed,
+    prefix,
+    concurrency,
+    writtenFiles,
+    throwIfCancelled,
+    signal,
+  } = o;
   const total = parsed.segments.length;
   const ext = parsed.hasInit ? 'm4s' : 'ts';
 
@@ -252,7 +234,11 @@ async function downloadTrack(o: {
   const getKey = async (keyUri: string): Promise<ArrayBuffer> => {
     const cached = keyCache.get(keyUri);
     if (cached) return cached;
-    const kb = await fetchWithRetry(keyUri);
+    const kb = await fetchWithRetry(keyUri, {
+      signal,
+      label: 'khoá giải mã (AES-128)',
+      onRetry: o.onRetry,
+    });
     keyCache.set(keyUri, kb);
     return kb;
   };
@@ -266,7 +252,12 @@ async function downloadTrack(o: {
       throw new Error(`Segment dùng mã hoá không hỗ trợ: ${method}`);
     }
     // W1.3: có byterange -> chỉ kéo đúng đoạn của segment này, KHÔNG kéo cả file.
-    let buf = await fetchWithRetry(seg.uri, 3, seg.byterange);
+    let buf = await fetchWithRetry(seg.uri, {
+      signal,
+      label: `${prefix === 'a' ? 'segment tiếng' : 'segment'} #${i + 1}/${total}`,
+      onRetry: o.onRetry,
+      ...(seg.byterange ? { range: seg.byterange } : {}),
+    });
     const raw = buf.byteLength;
     if (method === 'AES-128' && seg.keyUri) {
       const key = await getKey(seg.keyUri);
@@ -283,9 +274,14 @@ async function downloadTrack(o: {
   // rác làm "header" -> ffmpeg "error reading header".
   const firstInitSeg = parsed.segments.find((s) => s.initUri);
   const initPromise: Promise<Uint8Array | null> = firstInitSeg?.initUri
-    ? fetchWithRetry(firstInitSeg.initUri, 3, firstInitSeg.initByterange).then(
-        (b) => new Uint8Array(b),
-      )
+    ? fetchWithRetry(firstInitSeg.initUri, {
+        signal,
+        label: 'phần đầu tệp (init)',
+        onRetry: o.onRetry,
+        ...(firstInitSeg.initByterange
+          ? { range: firstInitSeg.initByterange }
+          : {}),
+      }).then((b) => new Uint8Array(b))
     : Promise.resolve(null);
 
   // Prefetch CÓ TRẦN RAM: tối đa MAX_BUFFERED segment chưa-ghi nằm trong bộ nhớ (backpressure).
@@ -347,7 +343,17 @@ async function downloadTrack(o: {
     }
   };
 
-  const workerCount = Math.min(Math.max(1, concurrency), total);
+  // W2.6 — TRẦN 6 worker: Chrome chỉ mở tối đa 6 kết nối đồng thời tới MỘT host, request thứ 7
+  // trở đi nằm XẾP HÀNG trong pool. Mà đồng hồ chờ-header của ta bấm giờ từ lúc GỌI fetch, nên
+  // thời gian nằm xếp hàng bị tính oan -> mạng chậm + concurrency cao (cho phép tới 16) = segment
+  // bị giết dù server hoàn toàn khoẻ. Trên >6 cũng KHÔNG nhanh hơn thật (Chrome vẫn xếp hàng),
+  // nên trần này không mất tốc độ, chỉ bỏ đi phần chờ vô hình.
+  const MAX_INFLIGHT_PER_HOST = 6;
+  const workerCount = Math.min(
+    Math.max(1, concurrency),
+    total,
+    MAX_INFLIGHT_PER_HOST,
+  );
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
   if (failed !== null) throw failed;
   await writeReady(); // ghi nốt phần còn lại
@@ -379,8 +385,13 @@ async function runHlsJob(
     tabId,
     spoofRuleIds,
   } = req;
+  // W2.6 — controller của job này. `hls/cancel` gọi .abort() -> request đang bay đứt NGAY, và
+  // `abortableSleep` trong backoff cũng thức dậy ngay thay vì ngồi hết 8 giây.
+  // Huỷ có thể tới TRƯỚC khi job rời hàng đợi (job xếp tuần tự): giữ lại controller đã có sẵn.
+  const ac = jobAborts.get(jobId) ?? new AbortController();
+  jobAborts.set(jobId, ac);
   const throwIfCancelled = () => {
-    if (cancelledJobs.has(jobId)) throw new CancelledError();
+    if (ac.signal.aborted) throw new CancelledError('Đã huỷ');
   };
   // Theo dõi mọi file đã ghi vào FS ảo để DỌN trong finally (cả khi lỗi/huỷ).
   const writtenFiles = new Set<string>();
@@ -395,8 +406,10 @@ async function runHlsJob(
 
     // W1.1: tải SONG SONG playlist hình và playlist tiếng (nếu master khai tiếng tách rời).
     const [parsed, parsedAudio] = await Promise.all([
-      loadPlaylist(variantUrl, 'hình'),
-      audioUrl ? loadPlaylist(audioUrl, 'tiếng') : Promise.resolve(null),
+      loadPlaylist(variantUrl, 'hình', ac.signal),
+      audioUrl
+        ? loadPlaylist(audioUrl, 'tiếng', ac.signal)
+        : Promise.resolve(null),
     ]);
 
     // Ranh giới cứng: SAMPLE-AES/EME -> DỪNG. Phải kiểm CẢ HAI playlist: tiếng có thể được bảo vệ
@@ -457,7 +470,14 @@ async function runHlsJob(
       concurrency,
       writtenFiles,
       throwIfCancelled,
+      signal: ac.signal,
       onSegment,
+      // Không await: đây chỉ là ghi chú hiển thị, không được chặn vòng tải.
+      onRetry: (info: { attempt: number; total: number; reason: string }) => {
+        void updateHlsJob(jobId, {
+          note: `Mạng trục trặc (${info.reason}) — đang thử lại lần ${info.attempt}/${info.total}…`,
+        });
+      },
     };
     // Tuần tự hình rồi tiếng: dùng lại đúng vòng tải đã chứng minh chạy được, và tiếng nhẹ hơn
     // hình cả chục lần nên phần thêm vào không đáng kể.
@@ -471,7 +491,8 @@ async function runHlsJob(
       : null;
 
     // Ghép: concat: protocol nối byte các segment (+ init) rồi remux sang mp4 (-c copy).
-    await updateHlsJob(jobId, { phase: 'muxing', muxProgress: 0 });
+    // Xoá ghi chú "đang thử lại": đã qua khâu tải, để lại thì user tưởng vẫn đang trục trặc.
+    await updateHlsJob(jobId, { phase: 'muxing', muxProgress: 0, note: '' });
     const listOf = (t: TrackFiles) =>
       `concat:${(t.initName ? [t.initName, ...t.names] : t.names).join('|')}`;
     const outName = 'output.mp4';
@@ -566,7 +587,7 @@ async function runHlsJob(
         }
       }
     }
-    cancelledJobs.delete(jobId);
+    jobAborts.delete(jobId);
   }
 }
 
@@ -876,7 +897,23 @@ browser.runtime.onMessage.addListener(
         enqueueHlsJob(req);
         return undefined;
       case 'hls/cancel':
-        cancelledJobs.add(req.jobId);
+        // Huỷ có thể tới TRƯỚC khi job rời hàng đợi (jobChain tuần tự) -> tạo sẵn controller đã
+        // abort để runHlsJob nhặt lên và thoát ngay, thay vì tải xong rồi mới biết mình bị huỷ.
+        {
+          const existing = jobAborts.get(req.jobId);
+          if (existing) existing.abort();
+          else {
+            const pre = new AbortController();
+            pre.abort();
+            jobAborts.set(req.jobId, pre);
+            // Huỷ một job đã kết thúc (hoặc chưa từng tồn tại) sẽ để lại entry này VĨNH VIỄN —
+            // offscreen là trang bền nên Map chỉ phình lên. Hẹn giờ dọn: nếu job có thật thì nó
+            // đã nhặt controller lên và runHlsJob tự xoá trong finally, xoá lại là vô hại.
+            setTimeout(() => {
+              if (jobAborts.get(req.jobId) === pre) jobAborts.delete(req.jobId);
+            }, 60_000);
+          }
+        }
         return undefined;
       case 'revoke':
         revokeBlob(req.url);

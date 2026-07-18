@@ -143,6 +143,9 @@ function HlsProgress({ job, now }: { job: HlsJob; now: number }) {
         <div className="progress-bar">
           <div className="progress-fill" style={{ width: `${s.pct}%` }} />
         </div>
+        {/* W2.6: mạng trục trặc -> thanh tiến trình đứng im cả phút. Không nói gì thì user tưởng
+            treo và tự tắt. Đây là ghi chú tạm, KHÔNG phải lỗi — job vẫn đang chạy. */}
+        {job.note ? <span className="hls-note">{job.note}</span> : null}
       </div>
     );
   }

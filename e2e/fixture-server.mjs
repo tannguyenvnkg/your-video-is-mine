@@ -41,10 +41,14 @@ function readFixture(name) {
  * @param {'none'|'manifest'|'segments'|'all'} [opts.gate] path nào đòi Referer (thiếu -> 403).
  * @param {string|null} [opts.segmentHost] nếu set, media.m3u8 trả URI segment TUYỆT ĐỐI trỏ host
  *   này (dựng ca segment khác host với manifest). Null -> URI tương đối như manifest thật.
+ * @param {boolean} [opts.stallSegments] W2.6 — segment KHÔNG BAO GIỜ trả lời (giữ socket mở, câm
+ *   tuyệt đối). Mô phỏng "mất mạng giữa chừng"/server treo: đây là ca mà trước W2.6 làm job kẹt
+ *   'fetching' VĨNH VIỄN, không lỗi, không huỷ nổi, và jobChain tắc kéo mọi job sau chết theo.
  */
 export async function startFixtureServer({
   gate = 'none',
   segmentHost = null,
+  stallSegments = false,
 } = {}) {
   /** @type {{url:string, referer:string|undefined, status:number}[]} */
   const requests = [];
@@ -89,6 +93,12 @@ export async function startFixtureServer({
       }
       send(200, text, 'application/vnd.apple.mpegurl');
       return;
+    }
+    // W2.6 — treo tuyệt đối: nhận request rồi im, không header, không byte, không đóng socket.
+    if (stallSegments && isSegment(path)) {
+      requests.push({ url: path, referer, status: 0 });
+      req.socket.setKeepAlive(true);
+      return; // KHÔNG res.end() -> client phải tự có đồng hồ mới thoát được
     }
     if (isSegment(path)) {
       // URL là .ts (đuôi HLS thật) nhưng file trên đĩa là .bin — CỐ Ý, đừng "sửa lại cho khớp":

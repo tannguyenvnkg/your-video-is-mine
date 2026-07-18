@@ -112,6 +112,53 @@ async function runDownload({ gate, segmentHost }) {
 }
 
 /**
+ * W2.6 — server NHẬN request segment rồi câm tuyệt đối (mô phỏng mất mạng giữa chừng).
+ *
+ * Tiêu chí: job phải kết thúc bằng `error` TRONG THỜI GIAN CÓ HẠN. Trước W2.6, `fetch` không có
+ * signal nào -> promise không bao giờ settle -> job kẹt 'fetching' vĩnh viễn (§2.9 hậu quả 1) và
+ * ca này TREO hết JOB_TIMEOUT_MS. Số học sau W2.6: 4 lượt x 15s + backoff 3.5s = ~63s.
+ */
+async function runSegmentStall() {
+  const srv = await startFixtureServer({ gate: 'none', stallSegments: true });
+  const budgetMs = 100_000;
+  try {
+    return await withBrowser(async ({ page }) => {
+      const start = await page.evaluate(
+        ([variantUrl, mediaUrl]) =>
+          chrome.runtime.sendMessage({
+            kind: 'hls/download',
+            variantUrl,
+            mediaUrl,
+            tabId: -1,
+          }),
+        [srv.mediaUrl, srv.masterUrl],
+      );
+      if (!start?.ok) {
+        return { ok: false, detail: `hls/download bị từ chối: ${JSON.stringify(start)}` };
+      }
+      const t0 = Date.now();
+      const job = await waitJob(page, start.jobId, budgetMs);
+      const secs = ((Date.now() - t0) / 1000).toFixed(1);
+      if (!job) {
+        return {
+          ok: false,
+          detail: `job TREO >${budgetMs / 1000}s trên server câm — đúng bệnh §2.9 (không timeout)`,
+        };
+      }
+      if (job.phase !== 'error') {
+        return { ok: false, detail: `mong đợi phase 'error', nhận '${job.phase}' sau ${secs}s` };
+      }
+      return {
+        ok: true,
+        detail: `job báo lỗi sau ${secs}s (không treo): "${job.error ?? '?'}"`,
+      };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
+/**
  * W2.5 — tải progressive .mp4 qua `download/progressive` rồi kiểm file trên đĩa.
  *
  * Tín hiệu ĐỘC LẬP VỚI ĐƯỜNG (cũ trực tiếp vs mới qua offscreen): SERVER có 403 lần nào không +
@@ -245,6 +292,15 @@ const SCENARIOS = [
     expect: 'pass',
     pins: '§2.5/W2.5 (progressive qua offscreen)',
     run: () => runProgressive({ gate: 'progressive' }),
+  },
+  {
+    id: 'segment-stall',
+    title: 'Server câm giữa chừng: job phải BÁO LỖI có hạn (W2.6), không kẹt fetching vĩnh viễn',
+    // W2.6 (2026-07-18): fetchWithRetry nay có đồng hồ chờ-header + đồng hồ im-lặng, ghép với
+    // signal huỷ của job. Trước W2.6 ca này treo hết budget vì fetch không có signal nào.
+    expect: 'pass',
+    pins: '§2.9/W2.6 (retry không timeout/không huỷ được)',
+    run: () => runSegmentStall(),
   },
 ];
 
