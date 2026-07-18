@@ -6,8 +6,46 @@ import {
   parseHlsSegments,
   resolveUri,
   spoofTargetsFromSegments,
+  uniqueVariantId,
   variantLabel,
 } from './hls';
+
+describe('W1.5 uniqueVariantId — danh tính variant không được đụng nhau', () => {
+  it('dùng tên tự nhiên khi có, chỉ số khi không', () => {
+    const used = new Set<string>();
+    expect(uniqueVariantId('v720', 0, used)).toBe('v720');
+    expect(uniqueVariantId(undefined, 1, used)).toBe('v1');
+    // Chuỗi rỗng/khoảng trắng KHÔNG phải danh tính -> phải rơi về chỉ số.
+    expect(uniqueVariantId('   ', 2, used)).toBe('v2');
+  });
+
+  // DASH chỉ đòi Representation@id duy nhất TRONG một AdaptationSet -> hai AdaptationSet
+  // vẫn có thể cùng khai id="1". Đụng nhau mà giữ nguyên là tái lập đúng con bug đang sửa.
+  it('đụng tên thì tách ra bằng chỉ số, không bao giờ trả trùng', () => {
+    const used = new Set<string>();
+    const ids = ['1', '1', '1'].map((n, i) => uniqueVariantId(n, i, used));
+    expect(ids).toEqual(['1', '1#1', '1#2']);
+    expect(new Set(ids).size).toBe(3);
+  });
+
+  // Review đối kháng W1.5 bắt được: nhánh né trùng `${base}#${index}` trước đây KHÔNG tự soi lại
+  // `used`, nên một Representation@id có sẵn dấu '#' đúng dạng đó vẫn nặn ra id TRÙNG.
+  // ISO 23009-1 §5.3.5.2 chỉ cấm khoảng trắng trong @id -> '#' là hợp lệ, không phải input bịa.
+  // Đây là bất biến của cả gói W1.5, không phải chi tiết cài đặt: trùng id = trùng key React =
+  // đúng con bug "bấm một dòng sáng cả cụm" mà gói này sinh ra để diệt.
+  it('tên có sẵn dạng "base#index" cũng KHÔNG được đụng id sinh ra', () => {
+    const used = new Set<string>();
+    const ids = ['a#2', 'a', 'a'].map((n, i) => uniqueVariantId(n, i, used));
+    expect(new Set(ids).size).toBe(3);
+  });
+
+  it('kẹt nhiều tầng vẫn phải ra id duy nhất', () => {
+    const used = new Set<string>();
+    const names = ['x#1', 'x#1#2', 'x', 'x', 'x'];
+    const ids = names.map((n, i) => uniqueVariantId(n, i, used));
+    expect(new Set(ids).size).toBe(names.length);
+  });
+});
 
 const MASTER = `#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=1280000,RESOLUTION=640x360,CODECS="avc1.42c01e,mp4a.40.2"
@@ -552,10 +590,9 @@ describe('W0.4/W1.5 Apple: 3 variant DÙNG CHUNG một uri hình', () => {
     expect(new Set(r.variants.map((v) => v.uri)).size).toBe(1);
   });
 
-  // ĐỎ hôm nay: VariantInfo chưa có `id` -> popup key theo uri -> bấm 1 dòng
-  // sáng cả 3. W1.5 yêu cầu `id: string` bắt buộc.
-  it.fails('mỗi variant phải có `id` riêng để phân biệt', () => {
-    const ids = r.variants.map((v) => (v as unknown as { id?: string }).id);
+  // W1.5 XONG: `id` bắt buộc, key/chọn theo id -> bấm 1 dòng chỉ sáng 1 dòng.
+  it('mỗi variant phải có `id` riêng để phân biệt', () => {
+    const ids = r.variants.map((v) => v.id);
     expect(new Set(ids).size).toBe(3);
   });
 });

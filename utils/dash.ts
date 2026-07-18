@@ -3,7 +3,7 @@
 
 import { parse } from 'mpd-parser';
 import type { VariantInfo } from './types';
-import { sortVariantsDesc, variantLabel } from './hls';
+import { sortVariantsDesc, uniqueVariantId, variantLabel } from './hls';
 import { drmSystemsInMpd } from './drm';
 
 export interface DashParseResult {
@@ -25,11 +25,15 @@ export function parseDashManifest(
   const manifest = parse(text, { manifestUri: manifestUrl });
   const playlists = manifest.playlists ?? [];
 
+  const usedIds = new Set<string>();
   const variants: VariantInfo[] = playlists.map((p, index) => {
     const attr = p.attributes ?? {};
     const res = attr.RESOLUTION;
     const base = variantLabel(res?.height, attr.BANDWIDTH);
     return {
+      // Danh tính THẬT của DASH là Representation@id — mpd-parser để ở attributes.NAME.
+      // Với SegmentTemplate thì `uri` của mọi representation đều là chính file .mpd nên vô dụng.
+      id: uniqueVariantId(attr.NAME, index, usedIds),
       // resolvedUri đã tuyệt đối; fallback uri rồi manifestUrl.
       uri: p.resolvedUri ?? p.uri ?? manifestUrl,
       // Không có độ phân giải thì thêm số thứ tự để phân biệt.

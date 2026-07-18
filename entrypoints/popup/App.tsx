@@ -223,7 +223,9 @@ function MediaRow({
   const [loading, setLoading] = useState(false);
   const [variants, setVariants] = useState<VariantInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selectedUri, setSelectedUri] = useState<string | null>(null);
+  // Chọn theo `id`, KHÔNG theo `uri`: Apple master và DASH SegmentTemplate cho mọi variant chung
+  // một uri -> so theo uri thì bấm một dòng sáng cả cụm.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [dlError, setDlError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
 
@@ -231,6 +233,7 @@ function MediaRow({
   const isProgressive = media.type === 'progressive';
   const isHls = media.type === 'hls';
   const isBlob = media.type === 'blob';
+  const isDash = media.type === 'dash';
   const jobBusy =
     hlsJob?.phase === 'queued' ||
     hlsJob?.phase === 'loading' ||
@@ -332,11 +335,11 @@ function MediaRow({
       preferred != null
         ? nearestByHeight(res.variants, preferred)
         : res.variants[0];
-    if (pick) setSelectedUri(pick.uri);
+    if (pick) setSelectedId(pick.id);
   }, [open, variants, loading, media.type, media.url, tabId]);
 
   const chooseVariant = useCallback(async (v: VariantInfo) => {
-    setSelectedUri(v.uri);
+    setSelectedId(v.id);
     if (v.height) await setPreferredHeight(v.height);
   }, []);
 
@@ -404,6 +407,17 @@ function MediaRow({
         </p>
       )}
 
+      {/*
+        W1.5: DASH xem được chất lượng nhưng KHÔNG có nút tải -> user bấm xong rồi hết đường.
+        Ngõ cụt im lặng trông y hệt bug, nên nói thẳng ra thay vì để user tự đoán.
+      */}
+      {isDash && (
+        <p className="hint">
+          DASH (.mpd) — phát hiện được và xem được chất lượng, nhưng chưa hỗ trợ
+          tải.
+        </p>
+      )}
+
       {hlsJob && (
         <div className={`dl-hls-${hlsJob.phase}`}>
           <HlsProgress job={hlsJob} now={now} />
@@ -428,10 +442,10 @@ function MediaRow({
           {variants && variants.length > 0 && (
             <ul className="variant-list">
               {variants.map((v) => (
-                <li key={v.uri} className="variant-row">
+                <li key={v.id} className="variant-row">
                   <button
                     type="button"
-                    className={`variant-btn${selectedUri === v.uri ? ' selected' : ''}`}
+                    className={`variant-btn${selectedId === v.id ? ' selected' : ''}`}
                     onClick={() => void chooseVariant(v)}
                   >
                     <span className="variant-name">{v.name}</span>

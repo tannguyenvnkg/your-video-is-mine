@@ -120,10 +120,9 @@ describe('W0.4/W1.5 DASH SegmentTemplate -> variant không phân biệt nổi + 
     expect(r.variants[0]!.uri).toBe(TPL_BASE);
   });
 
-  // ĐỎ hôm nay: VariantInfo chưa có `id` -> popup key theo uri -> React cảnh báo
-  // trùng key, bấm "720p" thì mọi dòng cùng sáng.
-  it.fails('variant phải có `id` riêng (lấy từ attributes.NAME)', () => {
-    const ids = r.variants.map((v) => (v as unknown as { id?: string }).id);
+  // W1.5 XONG: `id` lấy từ Representation@id (attributes.NAME) -> phân biệt được dù uri trùng.
+  it('variant phải có `id` riêng (lấy từ attributes.NAME)', () => {
+    const ids = r.variants.map((v) => v.id);
     expect(ids).toEqual(['v720', 'v360']);
   });
 
@@ -212,5 +211,43 @@ describe('W7.1 — DASH khai DRM trong manifest thì phải DỪNG (ranh giới 
     const r = parseDashManifest(mpd, 'https://x/m.mpd');
     expect(r.isProtected).toBe(false);
     expect(r.drmSystems).toEqual([]);
+  });
+});
+
+// --- W1.5: id đụng nhau THẬT trên đường parse, không chỉ ở mức hàm ---------
+// mpd-parser gom representation theo BaseURL rồi mới gộp theo id, nên hai AdaptationSet khai
+// TRÙNG @id mà khác BaseURL thì sống sót thành hai playlist riêng. DASH cho phép điều này: @id
+// chỉ cần duy nhất trong MỘT AdaptationSet. Thêm một @id đã mang sẵn dấu '#' đúng dạng ta sinh ra.
+const MPD_DUP_IDS = `<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT30S" minBufferTime="PT2S">
+ <Period>
+  <AdaptationSet mimeType="video/mp4">
+   <BaseURL>vidA/</BaseURL>
+   <Representation id="a#2" bandwidth="2400000" width="1280" height="720" codecs="avc1.4d401f">
+    <SegmentBase indexRange="0-100"/>
+   </Representation>
+  </AdaptationSet>
+  <AdaptationSet mimeType="video/mp4">
+   <BaseURL>vidB/</BaseURL>
+   <Representation id="a" bandwidth="1200000" width="854" height="480" codecs="avc1.42c01e">
+    <SegmentBase indexRange="0-100"/>
+   </Representation>
+  </AdaptationSet>
+  <AdaptationSet mimeType="video/mp4">
+   <BaseURL>vidC/</BaseURL>
+   <Representation id="a" bandwidth="600000" width="640" height="360" codecs="avc1.42c01e">
+    <SegmentBase indexRange="0-100"/>
+   </Representation>
+  </AdaptationSet>
+ </Period>
+</MPD>`;
+
+describe('W1.5 DASH: @id trùng nhau giữa các AdaptationSet vẫn phải ra id duy nhất', () => {
+  const r = parseDashManifest(MPD_DUP_IDS, 'https://ex.com/x/manifest.mpd');
+
+  // Ghim ĐÚNG hậu quả người dùng thấy: trùng id = trùng key React = bấm một dòng sáng cả cụm.
+  it('mọi variant có id riêng dù manifest khai @id trùng', () => {
+    expect(r.variants).toHaveLength(3);
+    expect(new Set(r.variants.map((v) => v.id)).size).toBe(3);
   });
 });

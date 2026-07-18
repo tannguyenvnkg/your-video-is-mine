@@ -82,6 +82,14 @@ export interface RenditionInfo {
 
 /** Một mức chất lượng (variant HLS / representation DASH) để user chọn (G2). */
 export interface VariantInfo {
+  /**
+   * Danh tính DUY NHẤT trong một manifest. BẮT BUỘC — không được suy ra từ `uri`.
+   *
+   * Nhiều master cho MỌI variant chung một `uri`: Apple master trỏ 3 variant vào cùng playlist,
+   * còn DASH SegmentTemplate thì `resolvedUri` của mọi Representation đều là chính file .mpd.
+   * Key/chọn theo `uri` ở popup vì thế sinh trùng key React và bấm "720p" thì MỌI dòng cùng sáng.
+   */
+  id: string;
   /** URL tuyệt đối của media playlist / representation. */
   uri: string;
   /** nhãn hiển thị, vd "720p" hoặc "800 kbps". */

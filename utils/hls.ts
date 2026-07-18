@@ -37,6 +37,31 @@ export function sortVariantsDesc(variants: VariantInfo[]): void {
   );
 }
 
+/**
+ * Chốt một `VariantInfo.id` duy nhất.
+ *
+ * `preferred` là danh tính tự nhiên của định dạng (DASH: `Representation@id` qua `attributes.NAME`).
+ * Nó KHÔNG chắc duy nhất — DASH chỉ đòi id duy nhất trong một AdaptationSet, nên hai AdaptationSet
+ * vẫn có thể cùng khai `id="1"`. Đụng nhau thì chốt bằng chỉ số.
+ *
+ * ⚠️ Phải soi lại BẰNG VÒNG LẶP, không phải một phép thử: `@id` do người đóng gói đặt và ISO
+ * 23009-1 §5.3.5.2 chỉ cấm khoảng trắng, nên một representation hoàn toàn có thể tên sẵn là
+ * `"a#2"` — đúng dạng ta sinh ra. Thử một lần rồi tin là đủ sẽ trả về id TRÙNG, tái lập đúng con
+ * bug "bấm một dòng sáng cả cụm" mà gói này sinh ra để diệt. Vòng lặp luôn dừng: mỗi lượt nối
+ * thêm một '#' nên chuỗi dài ra, không thể quay lại giá trị đã có trong `used`.
+ */
+export function uniqueVariantId(
+  preferred: string | undefined,
+  index: number,
+  used: Set<string>,
+): string {
+  const base = preferred?.trim() ? preferred.trim() : `v${index}`;
+  let id = base;
+  while (used.has(id)) id = `${id}#${index}`;
+  used.add(id);
+  return id;
+}
+
 /** METHOD mã hoá đầu tiên khác 'NONE' trong danh sách segment. */
 function firstKeyMethod(segments: M3u8Segment[]): string | undefined {
   for (const s of segments) {
@@ -120,13 +145,16 @@ export function parseHlsManifest(
       manifestUrl,
     );
 
-    const variants: VariantInfo[] = playlists.map((p) => {
+    const usedIds = new Set<string>();
+    const variants: VariantInfo[] = playlists.map((p, index) => {
       const attr = p.attributes ?? {};
       const res = attr.RESOLUTION;
       const bandwidth = attr.BANDWIDTH ?? attr['AVERAGE-BANDWIDTH'];
       const uri = resolveUri(p.uri, manifestUrl);
       const audioRenditions = renditionsForVariant(allAudio, attr.AUDIO, uri);
       return {
+        // Master HLS không có danh tính tự nhiên -> chỉ số là thứ duy nhất chắc chắn phân biệt được.
+        id: uniqueVariantId(undefined, index, usedIds),
         uri,
         name: variantLabel(res?.height, bandwidth),
         bandwidth,
@@ -144,7 +172,7 @@ export function parseHlsManifest(
   const keyMethod = firstKeyMethod(segments);
   return {
     isMaster: false,
-    variants: [{ uri: manifestUrl, name: 'Gốc' }],
+    variants: [{ id: 'v0', uri: manifestUrl, name: 'Gốc' }],
     segmentCount: segments.length,
     keyMethod,
     isProtected: keyMethod === 'SAMPLE-AES',
