@@ -2,7 +2,7 @@
 
 Mọi thay đổi đáng chú ý được ghi ở đây. Định dạng theo [Keep a Changelog], phiên bản theo [SemVer].
 
-## [Chưa phát hành]
+## [0.7.0] - 2026-07-18
 
 ### Sửa lỗi — VIDEO TẢI VỀ NAY ĐÃ CÓ TIẾNG
 
