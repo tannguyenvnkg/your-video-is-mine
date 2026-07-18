@@ -70,15 +70,27 @@ export default defineContentScript({
 
     // Nhận tín hiệu MSE từ mse-hook (MAIN world) qua window.postMessage.
     window.addEventListener('message', (e: MessageEvent) => {
+      // Bỏ qua chính cái ping của mình (xem handshake bên dưới) — nếu không sẽ tự xử lý tin của
+      // mình và, tệ hơn, vòng lặp postMessage.
+      if ((e.data as { kind?: string } | null)?.kind === 'isolated-ready') return;
       const data = e.data as {
         __yvim?: string;
         kind?: string;
         url?: string;
         mediaType?: string;
+        keySystem?: string;
+        source?: string;
       } | null;
       if (!data || data.__yvim !== 'yvim-mse') return;
       if (data.kind === 'mse-detected' && typeof data.url === 'string') {
         void sendRuntimeMessage({ kind: 'media/mse', url: data.url });
+      }
+      // W7.1 — trang xin DRM/EME -> báo background gắn cờ cho tab này (ranh giới cứng §7).
+      if (data.kind === 'drm-detected') {
+        void sendRuntimeMessage({
+          kind: 'media/drm',
+          keySystem: typeof data.keySystem === 'string' ? data.keySystem : '',
+        });
       }
       // Manifest HLS/DASH bị nguỵ trang (mse-hook đã sniff từ body) -> forward tới background.
       if (
@@ -93,5 +105,14 @@ export default defineContentScript({
         });
       }
     });
+
+    // 🔴 BẮT TAY VỚI MAIN WORLD — phải làm SAU khi listener trên đã đăng ký.
+    // Lý do (đã đo): file này chạy ở `document_idle`, còn trang gọi EME từ lúc PARSE. Mọi tín hiệu
+    // DRM bắn trước thời điểm này đã rơi vào khoảng trống. Ping một cái để MAIN phát lại hàng đợi.
+    try {
+      window.postMessage({ __yvim: 'yvim-mse', kind: 'isolated-ready' }, '*');
+    } catch {
+      // ignore
+    }
   },
 });

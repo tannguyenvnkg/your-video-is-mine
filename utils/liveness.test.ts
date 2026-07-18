@@ -27,7 +27,13 @@ function job(id: string, patch: Partial<HlsJob> = {}): HlsJob {
 
 describe('isActiveHlsPhase', () => {
   it('phase đang chạy = còn sống, phải có nhịp tim', () => {
-    for (const p of ['queued', 'loading', 'fetching', 'muxing', 'saving'] as const)
+    for (const p of [
+      'queued',
+      'loading',
+      'fetching',
+      'muxing',
+      'saving',
+    ] as const)
       expect(isActiveHlsPhase(p)).toBe(true);
   });
 
@@ -54,8 +60,14 @@ describe('findDeadHlsJobs', () => {
 
   it('job ĐÃ kết thúc thì im bao lâu cũng mặc kệ', () => {
     const jobs = {
-      d: job('d', { phase: 'done', lastSeenAt: NOW - 10 * HEARTBEAT_TIMEOUT_MS }),
-      e: job('e', { phase: 'error', lastSeenAt: NOW - 10 * HEARTBEAT_TIMEOUT_MS }),
+      d: job('d', {
+        phase: 'done',
+        lastSeenAt: NOW - 10 * HEARTBEAT_TIMEOUT_MS,
+      }),
+      e: job('e', {
+        phase: 'error',
+        lastSeenAt: NOW - 10 * HEARTBEAT_TIMEOUT_MS,
+      }),
       c: job('c', {
         phase: 'cancelled',
         lastSeenAt: NOW - 10 * HEARTBEAT_TIMEOUT_MS,
@@ -100,7 +112,10 @@ describe('findDeadHlsJobs', () => {
 describe('findDeadDownloads (W2.5 khiến progressive cũng phụ thuộc offscreen)', () => {
   const NOW = 1_000_000;
 
-  function entry(key: string, patch: Partial<DownloadEntry> = {}): DownloadEntry {
+  function entry(
+    key: string,
+    patch: Partial<DownloadEntry> = {},
+  ): DownloadEntry {
     return {
       key,
       mediaUrl: `https://x/${key}.mp4`,

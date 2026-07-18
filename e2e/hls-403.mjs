@@ -242,6 +242,105 @@ async function runOffscreenDeath() {
 }
 
 /**
+ * W7.1 — RANH GIỚI CỨNG §7: trang xin DRM/EME thì extension phải TỪ CHỐI TẢI, và nói rõ vì sao.
+ *
+ * Vì sao ca này bắt được thứ cổng tĩnh mù: trước W7.1 `CLAUDE.md` TUYÊN BỐ ranh giới này mà grep
+ * `requestMediaKeySystemAccess` ra 0 hit — tức là lời tuyên bố không có gì thi hành nó. Không một
+ * test thuần nào phát hiện được "một tính năng đã hứa mà không tồn tại"; chỉ chạy thật mới thấy.
+ *
+ * 🔴 Ca này KHÔNG tải nội dung DRM nào. Nó chỉ mở một trang GỌI API EME rồi kiểm tra extension có
+ * từ chối hay không — đo cái KHÓA, không phải đo cách mở khoá.
+ */
+async function runDrmRefused() {
+  const srv = await startFixtureServer({ gate: 'none' });
+  try {
+    return await withBrowser(async ({ page }) => {
+      // Mở trang DRM trong một tab THẬT (cần tabId thật thì cờ DRM mới gắn đúng chỗ).
+      const tabId = await page.evaluate(async (url) => {
+        const t = await chrome.tabs.create({ url, active: false });
+        return t.id;
+      }, srv.drmPageUrl);
+      if (typeof tabId !== 'number') {
+        return { ok: false, detail: 'không mở được tab trang DRM' };
+      }
+
+      // Chờ content script bắt được lời gọi EME rồi báo về background.
+      let systems = [];
+      for (let i = 0; i < 40; i++) {
+        systems = await page.evaluate(async (id) => {
+          const all = await chrome.storage.session.get(`media:${id}`);
+          return all[`media:${id}`]?.drmSystems ?? [];
+        }, tabId);
+        if (systems.length > 0) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (systems.length === 0) {
+        return {
+          ok: false,
+          detail: 'KHÔNG phát hiện được DRM — ranh giới §7 vẫn chỉ là lời tuyên bố suông',
+        };
+      }
+      if (!systems.includes('Widevine')) {
+        return { ok: false, detail: `phát hiện DRM nhưng sai tên: ${JSON.stringify(systems)}` };
+      }
+
+      // Cửa 1: HLS. Phải bị từ chối, kèm lý do đọc được.
+      const hls = await page.evaluate(
+        ([v, m, id]) =>
+          chrome.runtime.sendMessage({
+            kind: 'hls/download',
+            variantUrl: v,
+            mediaUrl: m,
+            tabId: id,
+          }),
+        [srv.mediaUrl, srv.masterUrl, tabId],
+      );
+      if (hls?.ok !== false) {
+        return { ok: false, detail: `hls/download KHÔNG bị chặn trên tab DRM: ${JSON.stringify(hls)}` };
+      }
+      if (!/DRM/i.test(hls.error ?? '')) {
+        return { ok: false, detail: `bị chặn nhưng lý do không nói tới DRM: "${hls.error}"` };
+      }
+
+      // Cửa 2: progressive. Cùng ranh giới, phải bịt luôn — không để hở đường vòng.
+      const prog = await page.evaluate(
+        ([url, id]) =>
+          chrome.runtime.sendMessage({ kind: 'download/progressive', url, tabId: id }),
+        [srv.progressiveUrl, tabId],
+      );
+      if (prog?.ok !== false) {
+        return {
+          ok: false,
+          detail: `download/progressive KHÔNG bị chặn — ranh giới hở đường vòng: ${JSON.stringify(prog)}`,
+        };
+      }
+
+      // Cửa 3: tab SẠCH vẫn phải tải được — chặn oan còn tệ hơn bỏ sót.
+      const clean = await page.evaluate(
+        ([v, m]) =>
+          chrome.runtime.sendMessage({
+            kind: 'hls/download',
+            variantUrl: v,
+            mediaUrl: m,
+            tabId: -1,
+          }),
+        [srv.mediaUrl, srv.masterUrl],
+      );
+      if (clean?.ok !== true) {
+        return { ok: false, detail: `tab SẠCH bị chặn OAN: ${JSON.stringify(clean)}` };
+      }
+
+      return {
+        ok: true,
+        detail: `phát hiện ${systems.join(', ')}; chặn cả HLS lẫn progressive, tab sạch vẫn tải được — "${hls.error}"`,
+      };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
+/**
  * W2.7 — tải PROGRESSIVE (.mp4) cũng phải có lưới liveness, không chỉ HLS.
  *
  * W2.5 định tuyến .mp4 qua offscreen để mang được Referer spoof. Hệ quả ít ai để ý: từ đó lượt tải
@@ -537,6 +636,14 @@ const SCENARIOS = [
     expect: 'pass',
     pins: 'W2.7 (W2.5 khiến progressive phụ thuộc offscreen — lưới liveness phải phủ cả đường này)',
     run: () => runProgressiveOffscreenDeath(),
+  },
+  {
+    id: 'drm-refused',
+    title:
+      'Trang xin DRM/EME -> TỪ CHỐI tải và nói rõ lý do; tab sạch vẫn tải được (ranh giới cứng §7)',
+    expect: 'pass',
+    pins: 'W7.1 (§7 tuyên bố ranh giới DRM mà grep requestMediaKeySystemAccess ra 0 hit)',
+    run: () => runDrmRefused(),
   },
 ];
 

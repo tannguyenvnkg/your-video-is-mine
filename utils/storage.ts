@@ -50,6 +50,14 @@ export interface TabMediaState {
    * bốc hơi giữa chừng -> mỗi lần SW hồi sinh lại đi fetch lại toàn bộ master của tab.
    */
   parsedMasters?: string[];
+  /**
+   * W7.1 — tab này đã lộ ra là dùng DRM/EME (trang gọi `requestMediaKeySystemAccess`, hoặc luồng
+   * bắn sự kiện `'encrypted'`). Ranh giới cứng §7: gặp là DỪNG và báo rõ.
+   *
+   * Cờ đặt ở TAB chứ không ở từng media, vì tín hiệu EME đến từ `navigator`/`document` — nó không
+   * gắn với một URL nào cả. Xoá khi điều hướng (`resetTab`): trang mới thì hết hiệu lực.
+   */
+  drmSystems?: string[];
 }
 
 function mediaKey(tabId: number): string {
@@ -65,6 +73,7 @@ export async function getTabState(tabId: number): Promise<TabMediaState> {
     items: Array.isArray(val?.items) ? val.items : [],
     childUrls: val?.childUrls ?? {},
     parsedMasters: Array.isArray(val?.parsedMasters) ? val.parsedMasters : [],
+    drmSystems: Array.isArray(val?.drmSystems) ? val.drmSystems : [],
   };
 }
 
@@ -81,6 +90,23 @@ export async function resetTab(
   navStartedAt: number,
 ): Promise<void> {
   await setTabState(tabId, { navStartedAt, items: [] });
+}
+
+/**
+ * W7.1 — gắn cờ "tab này dùng DRM/EME" (ranh giới cứng §7). Trả `true` nếu đây là tin MỚI.
+ *
+ * Gộp theo tên hệ thống và KHÔNG trùng lặp: `requestMediaKeySystemAccess` bị gọi lại nhiều lần cho
+ * cùng một hãng là chuyện thường (player thử nhiều cấu hình codec).
+ */
+export async function markTabDrm(
+  tabId: number,
+  systemName: string,
+): Promise<boolean> {
+  const state = await getTabState(tabId);
+  const cur = state.drmSystems ?? [];
+  if (cur.includes(systemName)) return false;
+  await setTabState(tabId, { ...state, drmSystems: [...cur, systemName] });
+  return true;
 }
 
 export async function clearTabMedia(tabId: number): Promise<void> {

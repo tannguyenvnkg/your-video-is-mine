@@ -5,6 +5,10 @@ import {
   type BuildMediaInput,
 } from '@/utils/detect';
 import { describeError } from '@/utils/errors';
+import {
+  DRM_UNSUPPORTED_ERROR,
+  drmNameFromKeySystem,
+} from '@/utils/drm';
 import { buildDownloadFilename } from '@/utils/filename';
 import {
   DEAD_OFFSCREEN_ERROR,
@@ -26,6 +30,7 @@ import {
   getHlsJobs,
   getTabMedia,
   getTabState,
+  markTabDrm,
   putDownload,
   putHlsJob,
   resetTab,
@@ -382,7 +387,10 @@ export default defineBackground(() => {
         // đúng nghĩa nói dối người dùng. NAY: chỉ chốt sau khi offscreen xác nhận đã nhận.
         const jobId = message.jobId;
         void (async () => {
-          const delivered = await sendToOffscreen({ kind: 'hls/cancel', jobId });
+          const delivered = await sendToOffscreen({
+            kind: 'hls/cancel',
+            jobId,
+          });
           if (delivered) {
             await updateHlsJob(jobId, { phase: 'cancelled', error: 'Đã huỷ' });
             return;
@@ -419,6 +427,14 @@ export default defineBackground(() => {
             detectSource: 'dom',
           });
         }
+      }
+      // W7.1 — trang xin DRM/EME -> gắn cờ cho tab (ranh giới cứng §7). KHÔNG chặn trang phát video:
+      // ta chỉ từ chối TẢI, không phá trải nghiệm xem.
+      if (message.kind === 'media/drm') {
+        const name = drmNameFromKeySystem(message.keySystem) ?? 'DRM không rõ';
+        void markTabDrm(tabId, name).then((isNew) => {
+          if (isNew) console.warn(`[bg] W7.1: tab ${tabId} dùng DRM (${name})`);
+        });
       }
       if (message.kind === 'media/mse') {
         void recordBlobMedia({
@@ -624,7 +640,9 @@ async function reapDeadDownloads(): Promise<void> {
       const ids = entries[key]?.spoofRuleIds;
       if (ids?.length) await removeSpoofRules(ids);
     }
-    console.warn(`[bg] W2.7: chốt lỗi ${dead.length} lượt tải do offscreen đã chết`);
+    console.warn(
+      `[bg] W2.7: chốt lỗi ${dead.length} lượt tải do offscreen đã chết`,
+    );
   } catch (e) {
     console.warn('[bg] tick dò lượt tải chết lỗi:', describeError(e));
   }
@@ -710,6 +728,9 @@ async function handleDownload(
   url: string,
   tabId: number,
 ): Promise<DownloadStartResponse> {
+  // W7.1 — RANH GIỚI CỨNG §7: chặn cả đường progressive, không chỉ HLS.
+  const drmBlocked = await drmBlockReason(tabId);
+  if (drmBlocked) return { ok: false, error: drmBlocked };
   // W2.5 — ĐỊNH TUYẾN QUA OFFSCREEN thay vì chrome.downloads.download({url}) thẳng.
   // ĐO 2026-07-18: cú download thẳng KHÔNG nhận rule DNR modifyHeaders (server nhận Referer:NONE ->
   // 403 trên site chống hotlink). fetch() của offscreen là xmlhttprequest tab-less -> KHỚP rule spoof
@@ -786,12 +807,47 @@ class HttpError extends Error {
   }
 }
 
+/**
+ * W7.1 — RANH GIỚI CỨNG §7. Tab đã lộ dùng DRM/EME thì mọi đường TẢI đóng lại, báo rõ lý do.
+ *
+ * Trả câu lỗi nếu phải chặn, `null` nếu sạch. Đặt ở background (không phải popup) vì popup chỉ là
+ * một trong các đường vào — chặn ở đây thì mọi đường đều bịt.
+ *
+ * 🔴 Đây là mã TỪ CHỐI, không phải mã giải mã: ta chỉ nhận diện để nói "không hỗ trợ".
+ */
+async function drmBlockReason(tabId?: number): Promise<string | null> {
+  if (tabId === undefined || tabId < 0) return null;
+  try {
+    const systems = (await getTabState(tabId)).drmSystems ?? [];
+    if (systems.length === 0) return null;
+    // Bỏ mục chung nếu đã biết đích danh hãng -> thông báo nói đúng tên thay vì "không rõ".
+    const named = systems.filter((s) => s !== 'DRM không rõ');
+    return DRM_UNSUPPORTED_ERROR(
+      named.length > 0 ? named.join(', ') : undefined,
+    );
+  } catch {
+    return null; // đọc storage hỏng -> đừng chặn oan.
+  }
+}
+
 async function handleHlsEstimate(
   variantUrl: string,
   bandwidth?: number,
   audioUrl?: string,
   tabId?: number,
 ): Promise<HlsEstimateResponse> {
+  // W7.1 — cờ DRM của TAB (EME) là tín hiệu ĐỘC LẬP với playlist: SAMPLE-AES lộ trong playlist,
+  // còn Widevine/PlayReady KHÔNG để lại dấu nào ở đó mà chỉ lộ qua EME. Biết trước thì trả lời
+  // ngay, khỏi tốn một request nào.
+  const drmBlocked = await drmBlockReason(tabId);
+  if (drmBlocked) {
+    return {
+      ok: true,
+      protected: true,
+      segmentCount: 0,
+      durationSec: 0,
+    };
+  }
   // W2.2: spoof Referer/Origin quanh cú fetch ước lượng — cùng lý do §2.3 như handleVariants.
   // Ước lượng thường trỏ cùng host với hình; host tiếng khác (nếu có) là phần W2.3 phủ đầy đủ.
   const pageUrl = await pageUrlFor(tabId, variantUrl);
@@ -858,6 +914,9 @@ async function handleHlsDownload(
   height?: number,
   audioUrl?: string,
 ): Promise<HlsDownloadResponse> {
+  // W7.1 — RANH GIỚI CỨNG §7: từ chối NGAY, trước khi áp một rule spoof hay bắn một request nào.
+  const drmBlocked = await drmBlockReason(tabId);
+  if (drmBlocked) return { ok: false, error: drmBlocked };
   // Hoist ra ngoài try để catch còn dọn được: nếu throw xảy ra TRƯỚC putHlsJob thì id chưa lưu ở
   // đâu; nếu ensureOffscreen ném SAU putHlsJob thì job kẹt 'queued' (storage.onChanged không có
   // nhánh terminal để dọn) -> gỡ thẳng theo id đang giữ là chắc chắn nhất.
@@ -1063,7 +1122,8 @@ async function handleFfmpegDemo(): Promise<FfmpegDemoResponse> {
     if (!res || typeof res !== 'object') {
       return {
         ok: false,
-        error: 'Bộ xử lý video không trả lời (có thể đã bị trình duyệt thu hồi).',
+        error:
+          'Bộ xử lý video không trả lời (có thể đã bị trình duyệt thu hồi).',
       };
     }
     return res as FfmpegDemoResponse;

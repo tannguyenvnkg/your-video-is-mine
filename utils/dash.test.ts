@@ -193,3 +193,24 @@ describe('W0.4 hợp đồng mpd-parser: đa Period', () => {
     ]);
   });
 });
+
+describe('W7.1 — DASH khai DRM trong manifest thì phải DỪNG (ranh giới cứng §7)', () => {
+  it('MPD có <ContentProtection> Widevine -> isProtected + nêu tên hãng', () => {
+    const mpd = `<?xml version="1.0"?><MPD><Period><AdaptationSet mimeType="video/mp4">
+      <ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"/>
+      <Representation id="1" bandwidth="800000" width="640" height="360"/>
+      </AdaptationSet></Period></MPD>`;
+    const r = parseDashManifest(mpd, 'https://x/m.mpd');
+    expect(r.isProtected).toBe(true);
+    expect(r.drmSystems).toContain('Widevine');
+  });
+
+  it('MPD thường -> KHÔNG protected (đừng chặn oan video sạch)', () => {
+    const mpd = `<?xml version="1.0"?><MPD><Period><AdaptationSet mimeType="video/mp4">
+      <Representation id="1" bandwidth="800000" width="640" height="360"/>
+      </AdaptationSet></Period></MPD>`;
+    const r = parseDashManifest(mpd, 'https://x/m.mpd');
+    expect(r.isProtected).toBe(false);
+    expect(r.drmSystems).toEqual([]);
+  });
+});

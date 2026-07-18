@@ -46,6 +46,78 @@ export default defineContentScript({
       // ignore
     }
 
+    // ---- W7.1: PHÁT HIỆN DRM/EME — ranh giới cứng §7 ----
+    //
+    // 🔴 ĐÂY LÀ MÃ TỪ CHỐI, KHÔNG PHẢI MÃ GIẢI MÃ. Ta CHỈ nghe xem trang có xin DRM hay không, để
+    // nói "không hỗ trợ" NGAY thay vì để user bấm tải rồi hỏng khó hiểu. Tuyệt đối không mở rộng
+    // thành đường moi khoá — đó là vượt biện pháp bảo vệ kỹ thuật, đúng thứ §7 cấm.
+    //
+    // Hai tín hiệu, bắt cả hai vì chúng bù nhau:
+    //  - `requestMediaKeySystemAccess`: trang XIN DRM (biết được ĐÍCH DANH hãng: Widevine/PlayReady/…)
+    //  - sự kiện `'encrypted'`: luồng CÓ dữ liệu khởi tạo DRM (bắt được cả khi trang xin từ trước
+    //    lúc hook kịp cài, ví dụ player nạp trong iframe/worker sớm).
+    // 🔴 PHẢI ĐỆM LẠI, KHÔNG ĐƯỢC BẮN RỒI QUÊN — đã ĐO: trang gọi EME lúc PARSE (document_start),
+    // trong khi content script isolated (bên nhận) chạy ở `document_idle`, tức MUỘN HƠN. Bắn thẳng
+    // thì `postMessage` rơi vào lúc chưa ai nghe -> tín hiệu DRM mất trắng, ranh giới §7 thủng im
+    // lặng. (Triệu chứng đo được: hook CÓ cài — thấy wrapper trong `navigator.…toString()` — mà
+    // `drmSystems` của tab vẫn rỗng.)
+    const pendingDrm: Array<{ keySystem: string; source: string }> = [];
+    const reportDrm = (keySystem: string, source: string) => {
+      pendingDrm.push({ keySystem, source });
+      post({ kind: 'drm-detected', keySystem, source });
+    };
+
+    // Bắt tay: isolated vừa khởi động thì ping sang đây, ta PHÁT LẠI mọi thứ đã bắt trước đó.
+    // Bắt tay tất định hơn hẳn mẹo canh giờ (đặt lại timer bao lâu cũng chỉ là đoán).
+    window.addEventListener('message', (e: MessageEvent) => {
+      const d = e.data as { __yvim?: string; kind?: string } | null;
+      if (!d || d.__yvim !== TAG || d.kind !== 'isolated-ready') return;
+      for (const p of pendingDrm) {
+        post({ kind: 'drm-detected', keySystem: p.keySystem, source: p.source });
+      }
+    });
+
+    try {
+      // Cast ở cuối là BẮT BUỘC: TS mô tả `requestMediaKeySystemAccess` bằng overload, nên một
+      // wrapper cùng chữ ký runtime vẫn không gán thẳng được.
+      const nav = navigator;
+      const origRMKSA = nav.requestMediaKeySystemAccess?.bind(navigator);
+      if (origRMKSA) {
+        nav.requestMediaKeySystemAccess = ((
+          keySystem: string,
+          configs: MediaKeySystemConfiguration[],
+        ) => {
+          // Báo TRƯỚC khi gọi tiếp: dù trang có bị từ chối quyền thì ý định vẫn đã rõ.
+          try {
+            reportDrm(String(keySystem), 'requestMediaKeySystemAccess');
+          } catch {
+            // ignore
+          }
+          // KHÔNG chặn, KHÔNG sửa kết quả: trang vẫn phát video bình thường như không có extension.
+          // Ta chỉ từ chối TẢI, không phá trải nghiệm xem của user.
+          return origRMKSA(keySystem, configs);
+        }) as typeof navigator.requestMediaKeySystemAccess;
+      }
+    } catch {
+      // ignore
+    }
+
+    // Sự kiện 'encrypted' bắn trên chính phần tử media khi luồng có PSSH/init data.
+    try {
+      document.addEventListener(
+        'encrypted',
+        (e: Event) => {
+          const ks = (e as Event & { initDataType?: string }).initDataType;
+          // Không có tên hệ thống ở đây (chỉ có initDataType như 'cenc'/'keyids'/'webm') -> báo
+          // chuỗi rỗng, phía nhận sẽ hiểu là "DRM không rõ hãng".
+          reportDrm('', `encrypted:${ks ?? '?'}`);
+        },
+        true, // capture: bắt được cả khi sự kiện bắn trên <video> lồng sâu
+      );
+    } catch {
+      // ignore
+    }
+
     // ---- Sniff manifest HLS/DASH bị nguỵ trang (URL/đuôi/Content-Type giả) ----
     // MV3 webRequest KHÔNG đọc được body -> mù với manifest giả đuôi (.jpg) / Content-Type giả.
     // Nhưng player LUÔN phải fetch một playlist "#EXTM3U" (HLS) hoặc "<MPD" (DASH).

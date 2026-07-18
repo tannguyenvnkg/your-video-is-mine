@@ -151,6 +151,21 @@ export async function startFixtureServer({
       res.end(PROGRESSIVE_MP4);
       return;
     }
+    // W7.1 — trang GIẢ LẬP DRM: xin EME y như Netflix/Disney+ làm. KHÔNG có nội dung bảo vệ thật
+    // nào ở đây — chỉ một lời gọi API để chứng minh extension NHẬN RA và TỪ CHỐI.
+    if (path === '/drm.html') {
+      send(
+        200,
+        `<!doctype html><title>drm fixture</title><p>drm page<script>
+          navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
+            initDataTypes: ['cenc'],
+            videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }]
+          }]).then(() => { window.__drmOk = true; }, () => { window.__drmOk = false; });
+        </script>`,
+        'text/html',
+      );
+      return;
+    }
     if (path === '/page.html') {
       send(200, '<!doctype html><title>fixture</title><p>fixture page', 'text/html');
       return;
@@ -166,6 +181,8 @@ export async function startFixtureServer({
     requests,
     origin: `http://127.0.0.1:${port}`,
     pageUrl: `http://127.0.0.1:${port}/page.html`,
+    /** W7.1 — trang gọi requestMediaKeySystemAccess (giả lập site DRM). */
+    drmPageUrl: `http://127.0.0.1:${port}/drm.html`,
     masterUrl: `http://127.0.0.1:${port}/hls/master.m3u8`,
     mediaUrl: `http://127.0.0.1:${port}/hls/media.m3u8`,
     /** W2.5 — URL mp4 progressive (host 127.0.0.1). */
@@ -226,6 +243,21 @@ export async function startDemuxedServer() {
       );
       return;
     }
+    // W7.1 — trang GIẢ LẬP DRM: xin EME y như Netflix/Disney+ làm. KHÔNG có nội dung bảo vệ thật
+    // nào ở đây — chỉ một lời gọi API để chứng minh extension NHẬN RA và TỪ CHỐI.
+    if (path === '/drm.html') {
+      send(
+        200,
+        `<!doctype html><title>drm fixture</title><p>drm page<script>
+          navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
+            initDataTypes: ['cenc'],
+            videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }]
+          }]).then(() => { window.__drmOk = true; }, () => { window.__drmOk = false; });
+        </script>`,
+        'text/html',
+      );
+      return;
+    }
     if (path === '/page.html') {
       send(200, '<!doctype html><title>fixture tách tiếng</title><p>fixture', 'text/html');
       return;
@@ -241,6 +273,8 @@ export async function startDemuxedServer() {
     requests,
     origin: `http://127.0.0.1:${port}`,
     pageUrl: `http://127.0.0.1:${port}/page.html`,
+    /** W7.1 — trang gọi requestMediaKeySystemAccess (giả lập site DRM). */
+    drmPageUrl: `http://127.0.0.1:${port}/drm.html`,
     masterUrl: `http://127.0.0.1:${port}/hls/master.m3u8`,
     /** Playlist HÌNH — đây là thứ user chọn khi bấm 720p (nó KHÔNG chứa tiếng). */
     videoUrl: `http://127.0.0.1:${port}/hls/video.m3u8`,

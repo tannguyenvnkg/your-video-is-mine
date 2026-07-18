@@ -48,6 +48,9 @@ export type HlsProgressResponse = { ok: true };
 export type RuntimeMessage =
   | { kind: 'media/dom'; candidates: DomMediaCandidate[] }
   | { kind: 'media/mse'; url: string }
+  // W7.1 — content script báo trang xin DRM/EME. `keySystem` rỗng = biết có DRM nhưng không rõ hãng
+  // (tín hiệu đến từ sự kiện 'encrypted', chỗ đó không lộ tên hệ thống).
+  | { kind: 'media/drm'; keySystem: string }
   // content script sniff được manifest HLS/DASH bị nguỵ trang (đọc #EXTM3U/<MPD từ body).
   | { kind: 'media/manifest'; url: string; mediaType: ManifestKind }
   // W2.2: `tabId` để background tra `media.pageUrl` -> spoof Referer ÔM SÁT cú fetch manifest.

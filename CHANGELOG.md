@@ -23,6 +23,18 @@ Mọi thay đổi đáng chú ý được ghi ở đây. Định dạng theo [Ke
   ngược về "Đang tải" một lúc rồi mới dừng hẳn.
 - **Nút "Kiểm tra ffmpeg"** không còn im lìm khi bộ xử lý không trả lời — nay báo rõ lý do.
 
+### Nội dung có DRM nay được từ chối NGAY và nói rõ lý do
+
+Extension **không hỗ trợ tải nội dung được bảo vệ bằng DRM** (Netflix, Disney+, Prime Video…) — đây
+là giới hạn có chủ đích, không phải lỗi. Trước bản này extension không nhận ra DRM, nên bạn bấm tải
+rồi mới nhận một thông báo hỏng khó hiểu ở tận khâu cuối. Nay:
+
+- Nhận ra trang dùng DRM ngay khi trang yêu cầu (Widevine / PlayReady / FairPlay), và nói đúng tên.
+- Nút tải bị chặn ở **cả** video dạng HLS lẫn file .mp4 trực tiếp, kèm câu giải thích.
+- Video DASH khai báo DRM trong manifest cũng được nhận ra từ bước chọn chất lượng.
+- Trang **không** có DRM hoàn toàn không bị ảnh hưởng — và extension không can thiệp vào việc xem
+  video của bạn, chỉ từ chối tải.
+
 ## [0.7.0] - 2026-07-18
 
 ### Sửa lỗi — VIDEO TẢI VỀ NAY ĐÃ CÓ TIẾNG

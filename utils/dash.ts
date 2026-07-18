@@ -4,10 +4,18 @@
 import { parse } from 'mpd-parser';
 import type { VariantInfo } from './types';
 import { sortVariantsDesc, variantLabel } from './hls';
+import { drmSystemsInMpd } from './drm';
 
 export interface DashParseResult {
   isMaster: boolean;
   variants: VariantInfo[];
+  /**
+   * W7.1 — DASH khai DRM ngay trong manifest qua `<ContentProtection>`. Trước W7.1 ta KHÔNG đọc thẻ
+   * này, nên video DRM lọt qua bước "Chất lượng" rồi mới hỏng ở tận khâu tải — khó hiểu với user.
+   */
+  isProtected: boolean;
+  /** Tên các hệ thống DRM đã khai (để nói ĐÚNG cái gì chặn, không phải câu chung chung). */
+  drmSystems: string[];
 }
 
 export function parseDashManifest(
@@ -34,5 +42,12 @@ export function parseDashManifest(
   });
 
   sortVariantsDesc(variants);
-  return { isMaster: variants.length > 1, variants };
+  // Soi trên TEXT gốc, không qua mpd-parser: mpd-parser bỏ qua <ContentProtection> hoàn toàn.
+  const drmSystems = drmSystemsInMpd(text);
+  return {
+    isMaster: variants.length > 1,
+    variants,
+    isProtected: drmSystems.length > 0,
+    drmSystems,
+  };
 }
