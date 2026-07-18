@@ -61,8 +61,20 @@ function friendlyDownloadError(code?: string): string {
 
 function downloadStatusText(entry: DownloadEntry): string {
   switch (entry.state) {
-    case 'in_progress':
+    case 'in_progress': {
+      // W2.5 — progressive fetch trong offscreen báo byte; hiện % nếu biết tổng, không thì indeterminate.
+      if (entry.bytesTotal && entry.bytesTotal > 0) {
+        const pct = Math.min(
+          99,
+          Math.round(((entry.bytesReceived ?? 0) / entry.bytesTotal) * 100),
+        );
+        return `Đang tải… ${pct}% (${formatBytes(entry.bytesReceived ?? 0)}/${formatBytes(entry.bytesTotal)})`;
+      }
+      if (entry.bytesReceived && entry.bytesReceived > 0) {
+        return `Đang tải… ${formatBytes(entry.bytesReceived)}`;
+      }
       return 'Đang tải…';
+    }
     case 'complete':
       return 'Đã tải xong ✓';
     case 'interrupted':
@@ -357,7 +369,7 @@ function MediaRow({
                   <button
                     type="button"
                     className="ghost-btn danger"
-                    onClick={() => void requestDownloadCancel(download.id)}
+                    onClick={() => void requestDownloadCancel(download.key)}
                   >
                     Hủy
                   </button>
@@ -452,7 +464,10 @@ function buildDownloadIndex(
   const byUrl = new Map<string, DownloadEntry>();
   for (const entry of Object.values(downloads)) {
     const cur = byUrl.get(entry.mediaUrl);
-    if (!cur || entry.id > cur.id) byUrl.set(entry.mediaUrl, entry);
+    // W2.5: khoá là jobId (string) không so sánh thứ tự -> chọn entry MỚI NHẤT theo startedAt
+    // (tải lại cùng URL tạo entry mới; muốn hiện lượt gần nhất).
+    if (!cur || (entry.startedAt ?? 0) >= (cur.startedAt ?? 0))
+      byUrl.set(entry.mediaUrl, entry);
   }
   return byUrl;
 }

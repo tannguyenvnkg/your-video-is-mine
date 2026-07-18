@@ -51,6 +51,12 @@ bản này bị CÂM** — tải xong, báo "Đã tải xong ✓", mở ra thì 
   chừng. Nay mỗi lượt tải có dấu riêng.
 - **Tự dọn dấu vết còn sót**: nếu một lượt tải chết bất thường, dấu vết vượt-chặn còn lại sẽ được
   đối soát và xoá khi mở lại trình duyệt (và mỗi lần dịch vụ nền khởi động lại).
+- **Tải file .mp4 trực tiếp nay cũng vượt được 403**: trước đây nút **Tải xuống** cho video .mp4 nhờ
+  trình duyệt tự tải — nhưng cú tải đó **không mang được thông tin "đến từ đâu"**, nên trên site chống
+  hotlink nó dính 403 và **không tải được** (đã đo tận nơi). Nay extension tự tải phần dữ liệu (mang
+  đúng thông tin vượt-chặn) rồi mới giao file cho trình duyệt lưu — nên .mp4 trên các site này tải
+  được như HLS. Kèm theo: báo tiến trình theo dung lượng, tự dừng với thông báo rõ nếu máy chủ treo
+  quá lâu, và chặn file quá lớn (trên ~2GB) bằng thông báo thay vì làm treo âm thầm.
 
 ### Cải thiện — MỖI VIDEO CHỈ CÒN MỘT DÒNG TRONG DANH SÁCH
 

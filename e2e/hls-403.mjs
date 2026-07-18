@@ -111,6 +111,77 @@ async function runDownload({ gate, segmentHost }) {
   }
 }
 
+/**
+ * W2.5 — tải progressive .mp4 qua `download/progressive` rồi kiểm file trên đĩa.
+ *
+ * Tín hiệu ĐỘC LẬP VỚI ĐƯỜNG (cũ trực tiếp vs mới qua offscreen): SERVER có 403 lần nào không +
+ * có phục vụ byte mp4 không. Đường cũ (chrome.downloads.download thẳng) KHÔNG nhận Referer spoof
+ * -> server 403 -> hits=0 (đã ĐO 2026-07-18). Đường mới (offscreen fetch) mang Referer spoof vì
+ * fetch của extension là xmlhttprequest tab-less -> khớp rule DNR -> server phục vụ 200/206.
+ */
+async function runProgressive({ gate }) {
+  const srv = await startFixtureServer({ gate });
+  try {
+    return await withBrowser(async ({ page, logs }) => {
+      const start = await page.evaluate(
+        (url) =>
+          chrome.runtime.sendMessage({ kind: 'download/progressive', url, tabId: -1 }),
+        srv.progressiveUrl,
+      );
+      if (!start?.ok) {
+        return { ok: false, detail: `download/progressive bị từ chối: ${JSON.stringify(start)}` };
+      }
+      const file = await waitDownloadedFile(page, 30_000);
+      // DownloadEntry của extension (thứ popup HIỂN THỊ) PHẢI tới 'complete' — bắt cả race "blob nhỏ
+      // complete trước khi onChanged khớp entry" mà chrome.downloads state không lộ ra.
+      let entryState = null;
+      for (let i = 0; i < 20; i++) {
+        entryState = await page.evaluate(async (key) => {
+          const all = await chrome.storage.session.get('downloads');
+          return all.downloads?.[key]?.state ?? null;
+        }, start.key);
+        if (entryState && entryState !== 'in_progress') break;
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      if (entryState !== 'complete') {
+        return { ok: false, detail: `DownloadEntry kẹt ở "${entryState}" (popup sẽ hiện sai trạng thái)` };
+      }
+      const blocked = srv.blocked().length;
+      const hits = srv.progressiveHits();
+      // Cổng bật mà server chưa từng 403 và có phục vụ byte = spoof đã áp cho cú fetch tải.
+      if (blocked > 0 || hits === 0) {
+        return {
+          ok: false,
+          detail: `server chặn ${blocked} request 403 (thiếu Referer), phục vụ ${hits} lần mp4 — spoof KHÔNG áp cho đường tải`,
+        };
+      }
+      if (!file) return { ok: false, detail: 'không có file nào rơi xuống đĩa' };
+      if (file.state !== 'complete') {
+        return { ok: false, detail: `download ${file.state}: ${file.error ?? '?'}` };
+      }
+      if (!existsSync(file.filename)) {
+        return { ok: false, detail: `downloads báo complete nhưng file không tồn tại: ${file.filename}` };
+      }
+      const size = statSync(file.filename).size;
+      const probe = probeFile(file.filename);
+      if (probe.error) return { ok: false, detail: `ffprobe không đọc được file: ${probe.error}` };
+      if (!probe.codecs.includes('video')) {
+        return { ok: false, detail: `file ra KHÔNG có track hình (streams: ${probe.codecs.join(',') || 'rỗng'})` };
+      }
+      const errLog = logs.filter((l) => l.includes('error:')).slice(-3);
+      return {
+        ok: true,
+        detail:
+          `file ${size}B, ${probe.videoFrames} khung, track: ${probe.codecs.join('+')}, ` +
+          `server phục vụ ${hits} lần, 0 lần 403` +
+          `${errLog.length ? ` (log lỗi: ${errLog.join(' | ')})` : ''}`,
+      };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
 /** Chỉ bấm "Chất lượng" (manifest/variants) — đúng cú fetch ĐẦU TIÊN của flow. */
 async function runVariants({ gate }) {
   const srv = await startFixtureServer({ gate });
@@ -164,6 +235,16 @@ const SCENARIOS = [
     // segment/key/init. Ratchet đã bật đúng lúc sửa xong (known-fail -> pass), nay là lưới hồi quy.
     expect: 'pass',
     run: () => runDownload({ gate: 'segments', segmentHost: 'localhost' }),
+  },
+  {
+    id: 'progressive-403',
+    title: 'Cổng 403 mp4: tải progressive phải qua (W2.5 định tuyến qua offscreen -> fetch mang Referer)',
+    // W2.5 XONG (2026-07-18): handleDownload định tuyến fetch qua offscreen (xmlhttprequest tab-less
+    // -> khớp rule DNR). Ratchet đã bật đúng lúc sửa xong (known-fail -> pass), nay là lưới hồi quy.
+    // ĐO 2026-07-18: đường cũ chrome.downloads.download thẳng -> server nhận ref=NONE -> 403.
+    expect: 'pass',
+    pins: '§2.5/W2.5 (progressive qua offscreen)',
+    run: () => runProgressive({ gate: 'progressive' }),
   },
 ];
 

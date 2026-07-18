@@ -1,6 +1,6 @@
 // Bọc chrome.storage cho:
 // - Danh sách media theo tab (session): NGUỒN SỰ THẬT, không giữ trong biến toàn cục SW.
-// - Trạng thái tải progressive (session): map theo downloadId.
+// - Trạng thái tải progressive (session): map theo khoá ổn định (jobId), không phải chrome downloadId.
 // - Tiến trình job HLS (session): map theo jobId.
 // - Cài đặt (local): chất lượng ưa thích, thư mục tải, ngưỡng cảnh báo dung lượng.
 // - Cache kiểm tra bản mới trên GitHub Releases (local): tag + link + lúc kiểm tra.
@@ -152,13 +152,28 @@ export async function addChildUrls(
 export type DownloadState = 'in_progress' | 'complete' | 'interrupted';
 
 export interface DownloadEntry {
-  id: number;
+  /**
+   * W2.5 — KHOÁ ỔN ĐỊNH suốt vòng đời (jobId UUID), KHÔNG đổi khi chuyển fetch(offscreen)->lưu.
+   * Trước W2.5 khoá là id của chrome.downloads — nhưng id đó chỉ có SAU khi tải xong bytes; đường
+   * progressive mới fetch bytes trong offscreen TRƯỚC nên cần một khoá độc lập với chrome.downloads.
+   */
+  key: string;
   mediaUrl: string;
   filename?: string;
   state: DownloadState;
   error?: string;
-  /** blob URL (nếu tải file ghép từ offscreen) -> thu hồi khi tải xong. */
+  /** blob URL (file lấy từ offscreen: HLS ghép, hoặc progressive fetch) -> thu hồi khi tải xong. */
   blobUrl?: string;
+  /**
+   * id THẬT của chrome.downloads — CHỈ có ở phase LƯU (sau khi offscreen giao blob). downloads.onChanged
+   * tra ngược entry qua field này; popup dùng nó để huỷ lượt lưu.
+   */
+  chromeDownloadId?: number;
+  /** byte đã tải / tổng (progressive qua offscreen) -> thanh tiến trình. */
+  bytesReceived?: number;
+  bytesTotal?: number;
+  /** epoch ms lúc tạo -> popup chọn entry mới nhất cho mỗi mediaUrl (khoá string không so sánh được). */
+  startedAt?: number;
   /**
    * W2.4 — id session rule spoof đã áp cho lượt tải này (id RIÊNG mỗi download, không suy từ host).
    * Lưu để xoá ĐÚNG rule của mình khi tải xong, không giật rule của download khác cùng host.
@@ -176,34 +191,37 @@ export async function putDownload(entry: DownloadEntry): Promise<void> {
   await serializeWrite(async () => {
     const all = await getDownloads();
     // Merge (không ghi đè cứng) để không mất patch của onChanged nếu nó chạy trước.
-    all[String(entry.id)] = { ...all[String(entry.id)], ...entry };
+    all[entry.key] = { ...all[entry.key], ...entry };
     await browser.storage.session.set({ [DOWNLOADS_KEY]: all });
   });
 }
 
 export async function updateDownload(
-  id: number,
+  key: string,
   patch: Partial<DownloadEntry>,
 ): Promise<void> {
   await serializeWrite(async () => {
     const all = await getDownloads();
-    const cur = all[String(id)];
+    const cur = all[key];
     // Upsert: nếu chưa có entry (race onChanged trước putDownload) thì tạo tối thiểu,
     // tránh mất trạng thái khiến popup kẹt ở "Đang tải…".
     const base: DownloadEntry = cur ?? {
-      id,
+      key,
       mediaUrl: '',
       state: 'in_progress',
     };
-    all[String(id)] = { ...base, ...patch };
+    all[key] = { ...base, ...patch };
     await browser.storage.session.set({ [DOWNLOADS_KEY]: all });
   });
 }
 
-export async function getDownloadById(
+/** Tra ngược entry theo id chrome.downloads (dùng ở downloads.onChanged). undefined nếu chưa gắn id. */
+export async function getDownloadByChromeId(
   id: number,
 ): Promise<DownloadEntry | undefined> {
-  return (await getDownloads())[String(id)];
+  return Object.values(await getDownloads()).find(
+    (d) => d.chromeDownloadId === id,
+  );
 }
 
 // --- Tiến trình job HLS (session), keyed theo jobId ---

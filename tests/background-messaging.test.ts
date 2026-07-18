@@ -114,6 +114,14 @@ const ASYNC_KINDS: Array<{ name: string; message: Record<string, unknown> }> = [
       patch: { phase: 'fetching' },
     },
   },
+  {
+    name: 'download/progress',
+    message: {
+      kind: 'download/progress',
+      key: 'k1',
+      patch: { bytesReceived: 10 },
+    },
+  },
 ];
 
 describe('background onMessage — hợp đồng Chrome gốc (W0.1)', () => {
@@ -205,7 +213,7 @@ describe('background onMessage — hợp đồng Chrome gốc (W0.1)', () => {
     { name: 'hls/cancel', message: { kind: 'hls/cancel', jobId: 'j1' } },
     {
       name: 'download/cancel',
-      message: { kind: 'download/cancel', downloadId: 1 },
+      message: { kind: 'download/cancel', key: 'k1' },
     },
   ])(
     '$name là fire-and-forget -> trả undefined (không giữ kênh chờ)',

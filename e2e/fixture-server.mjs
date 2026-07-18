@@ -23,6 +23,13 @@ const FIXTURES_DEMUXED = resolve(
   dirname(fileURLToPath(import.meta.url)),
   'fixtures/hls-demuxed',
 );
+const FIXTURES_PROGRESSIVE = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  'fixtures/progressive',
+);
+
+/** File mp4 progressive (đọc một lần) — dùng cho ca W2.5. */
+const PROGRESSIVE_MP4 = readFileSync(join(FIXTURES_PROGRESSIVE, 'sample.mp4'));
 
 /** Nội dung fixture đọc một lần (nhỏ, 168KB). */
 function readFixture(name) {
@@ -44,10 +51,12 @@ export async function startFixtureServer({
 
   const isSegment = (p) => /\/seg\d+\.ts$/.test(p);
   const isManifest = (p) => p.endsWith('.m3u8');
+  const isProgressive = (p) => p === '/prog/sample.mp4';
   const needsReferer = (p) =>
     gate === 'all' ||
     (gate === 'manifest' && isManifest(p)) ||
-    (gate === 'segments' && isSegment(p));
+    (gate === 'segments' && isSegment(p)) ||
+    (gate === 'progressive' && isProgressive(p));
 
   const server = createServer((req, res) => {
     const path = (req.url ?? '/').split('?')[0];
@@ -89,6 +98,42 @@ export async function startFixtureServer({
       send(200, readFixture(path.slice('/hls/'.length).replace(/\.ts$/, '.bin')), 'video/mp2t');
       return;
     }
+    // W2.5 — file mp4 progressive. HỖ TRỢ Range (206) để đo đúng đường offscreen chunk theo byte;
+    // thiếu Range thì trả 200 nguyên file (đường stream body). Accept-Ranges để client biết được phép.
+    if (isProgressive(path)) {
+      const total = PROGRESSIVE_MP4.length;
+      const range = req.headers.range;
+      const m = range && /^bytes=(\d+)-(\d*)$/.exec(range);
+      if (m) {
+        const start = Number(m[1]);
+        const end = m[2] ? Math.min(Number(m[2]), total - 1) : total - 1;
+        if (start > end || start >= total) {
+          requests.push({ url: path, referer, status: 416 });
+          res.writeHead(416, { 'content-range': `bytes */${total}` });
+          res.end();
+          return;
+        }
+        requests.push({ url: path, referer, status: 206 });
+        res.writeHead(206, {
+          'content-type': 'video/mp4',
+          'content-range': `bytes ${start}-${end}/${total}`,
+          'content-length': end - start + 1,
+          'accept-ranges': 'bytes',
+          'cache-control': 'no-store',
+        });
+        res.end(PROGRESSIVE_MP4.subarray(start, end + 1));
+        return;
+      }
+      requests.push({ url: path, referer, status: 200 });
+      res.writeHead(200, {
+        'content-type': 'video/mp4',
+        'content-length': total,
+        'accept-ranges': 'bytes',
+        'cache-control': 'no-store',
+      });
+      res.end(PROGRESSIVE_MP4);
+      return;
+    }
     if (path === '/page.html') {
       send(200, '<!doctype html><title>fixture</title><p>fixture page', 'text/html');
       return;
@@ -106,6 +151,12 @@ export async function startFixtureServer({
     pageUrl: `http://127.0.0.1:${port}/page.html`,
     masterUrl: `http://127.0.0.1:${port}/hls/master.m3u8`,
     mediaUrl: `http://127.0.0.1:${port}/hls/media.m3u8`,
+    /** W2.5 — URL mp4 progressive (host 127.0.0.1). */
+    progressiveUrl: `http://127.0.0.1:${port}/prog/sample.mp4`,
+    /** Số request mp4 progressive server đã PHỤC VỤ (200/206) -> bằng chứng byte có tới. */
+    progressiveHits: () =>
+      requests.filter((r) => r.url === '/prog/sample.mp4' && r.status < 400)
+        .length,
     /** Số request bị chặn 403 -> bằng chứng cổng có bắn. */
     blocked: () => requests.filter((r) => r.status === 403),
     close: () => new Promise((r) => server.close(r)),

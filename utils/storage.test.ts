@@ -4,10 +4,14 @@ import {
   addTabMedia,
   allocateSpoofRuleId,
   clearTabMedia,
+  getDownloadByChromeId,
+  getDownloads,
   getPreferredHeight,
   getTabMedia,
+  putDownload,
   resetTab,
   setPreferredHeight,
+  updateDownload,
 } from './storage';
 import { SPOOF_RULE_ID_MIN, SPOOF_RULE_ID_SPAN } from './dnr';
 import type { MediaItem } from './types';
@@ -114,5 +118,66 @@ describe('allocateSpoofRuleId (id rule DNR theo từng download — W2.4)', () =
     const id = await allocateSpoofRuleId();
     expect(id).toBeGreaterThanOrEqual(SPOOF_RULE_ID_MIN);
     expect(id).toBeLessThan(SPOOF_RULE_ID_MIN + SPOOF_RULE_ID_SPAN);
+  });
+});
+
+describe('DownloadEntry — khoá ỔN ĐỊNH theo jobId (W2.5), chromeDownloadId có ở phase LƯU', () => {
+  beforeEach(() => {
+    fakeBrowser.reset();
+  });
+
+  it('put rồi get lại theo khoá string; KHÔNG cần chrome downloadId lúc bắt đầu (fetch trong offscreen)', async () => {
+    await putDownload({
+      key: 'job-1',
+      mediaUrl: 'https://cdn.example.com/v.mp4',
+      filename: 'v.mp4',
+      state: 'in_progress',
+      spoofRuleIds: [2000],
+    });
+    const all = await getDownloads();
+    expect(Object.keys(all)).toEqual(['job-1']);
+    expect(all['job-1']!.chromeDownloadId).toBeUndefined();
+    expect(all['job-1']!.spoofRuleIds).toEqual([2000]);
+  });
+
+  it('updateDownload theo khoá MERGE, không mất field cũ (spoofRuleIds giữ nguyên khi gắn chromeDownloadId)', async () => {
+    await putDownload({
+      key: 'job-1',
+      mediaUrl: 'https://cdn.example.com/v.mp4',
+      state: 'in_progress',
+      spoofRuleIds: [2000, 2001],
+    });
+    // Phase lưu: offscreen ghép xong -> background gắn id thật của chrome.downloads vào cùng entry.
+    await updateDownload('job-1', { chromeDownloadId: 42, blobUrl: 'blob:x' });
+    const e = (await getDownloads())['job-1']!;
+    expect(e.chromeDownloadId).toBe(42);
+    expect(e.blobUrl).toBe('blob:x');
+    expect(e.spoofRuleIds).toEqual([2000, 2001]);
+    expect(e.state).toBe('in_progress');
+  });
+
+  it('getDownloadByChromeId tra ngược từ id chrome (dùng cho downloads.onChanged)', async () => {
+    await putDownload({
+      key: 'job-1',
+      mediaUrl: 'https://cdn.example.com/v.mp4',
+      state: 'in_progress',
+    });
+    await putDownload({
+      key: 'job-2',
+      mediaUrl: 'https://cdn.example.com/w.mp4',
+      state: 'in_progress',
+      chromeDownloadId: 7,
+    });
+    const found = await getDownloadByChromeId(7);
+    expect(found?.key).toBe('job-2');
+    // Chưa gắn id thật -> không tra được (đúng: entry job-1 mới ở phase fetch).
+    expect(await getDownloadByChromeId(999)).toBeUndefined();
+  });
+
+  it('updateDownload khoá chưa tồn tại -> upsert tối thiểu (không mất trạng thái do race onChanged)', async () => {
+    await updateDownload('ghost', { state: 'complete' });
+    const e = (await getDownloads())['ghost']!;
+    expect(e.key).toBe('ghost');
+    expect(e.state).toBe('complete');
   });
 });

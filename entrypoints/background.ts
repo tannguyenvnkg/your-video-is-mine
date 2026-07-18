@@ -13,7 +13,7 @@ import {
   claimMasterParse,
   clearTabMedia,
   getConcurrency,
-  getDownloadById,
+  getDownloadByChromeId,
   getDownloadFolder,
   getDownloads,
   getHlsJobs,
@@ -44,6 +44,7 @@ import {
 } from '@/utils/dnr';
 import type { MediaItem } from '@/utils/types';
 import type {
+  DownloadProgressResponse,
   DownloadStartResponse,
   FfmpegDemoResponse,
   HlsDownloadResponse,
@@ -340,8 +341,28 @@ export default defineBackground(() => {
           message.tabId,
           message.jobId,
           message.spoofRuleIds,
+          message.downloadKey,
         );
         return undefined;
+      }
+      // W2.5 — offscreen báo tiến trình/lỗi fetch progressive; background ghi hộ (offscreen không có
+      // chrome.storage). ACK qua respond để giữ ĐÚNG THỨ TỰ cập nhật (cùng lý do hls/progress).
+      if (message.kind === 'download/progress') {
+        const { key, patch } = message;
+        return respond(
+          updateDownload(key, patch).then(
+            async (): Promise<DownloadProgressResponse> => {
+              // Fetch LỖI (403 giữa chừng/mạng) -> handleBlobDownload KHÔNG bao giờ chạy nên rule
+              // spoof của lượt này sẽ RÒ RỈ nguyên phiên nếu không gỡ ở đây (cùng lớp lỗi W2.4).
+              if (patch.state === 'interrupted') {
+                const e = (await getDownloads())[key];
+                if (e?.spoofRuleIds?.length)
+                  await removeSpoofRules(e.spoofRuleIds);
+              }
+              return { ok: true };
+            },
+          ),
+        );
       }
       if (message.kind === 'hls/cancel') {
         void browser.runtime.sendMessage({
@@ -356,9 +377,7 @@ export default defineBackground(() => {
         return undefined;
       }
       if (message.kind === 'download/cancel') {
-        void browser.downloads
-          .cancel(message.downloadId)
-          .catch(() => undefined);
+        void handleDownloadCancel(message.key);
         return undefined;
       }
 
@@ -401,21 +420,24 @@ export default defineBackground(() => {
     },
   );
 
-  // Theo dõi trạng thái tải -> cập nhật storage + thu hồi blob URL khi xong.
+  // Theo dõi trạng thái LƯU (chrome.downloads) -> cập nhật storage + thu hồi blob URL khi xong.
+  // W2.5: DownloadEntry keyed theo jobId, nên tra NGƯỢC entry qua chromeDownloadId (delta.id là id
+  // chrome, không phải khoá). Entry chỉ có chromeDownloadId ở phase LƯU nên chắc chắn tra ra ở đây.
   browser.downloads.onChanged.addListener((delta) => {
     void (async () => {
+      const entry = await getDownloadByChromeId(delta.id);
+      if (!entry) return; // download không phải của ta (hoặc chưa kịp gắn id — onChanged sớm sẽ bỏ qua).
       const patch: Partial<DownloadEntry> = {};
       if (delta.state) patch.state = delta.state.current as DownloadState;
       if (delta.error?.current) patch.error = delta.error.current;
       if (delta.filename?.current) patch.filename = delta.filename.current;
-      if (Object.keys(patch).length > 0) await updateDownload(delta.id, patch);
+      if (Object.keys(patch).length > 0) await updateDownload(entry.key, patch);
 
       const finished =
         delta.state?.current === 'complete' ||
         delta.state?.current === 'interrupted';
       if (finished) {
-        const entry = await getDownloadById(delta.id);
-        if (entry?.blobUrl) {
+        if (entry.blobUrl) {
           void browser.runtime.sendMessage({
             target: 'offscreen',
             kind: 'revoke',
@@ -423,7 +445,8 @@ export default defineBackground(() => {
           });
         }
         // Xoá session rule spoof cho lượt tải này (không để tồn suốt phiên). W2.4: theo id riêng.
-        if (entry?.spoofRuleIds?.length)
+        // (Progressive đã gỡ ở handleBlobDownload khi fetch xong; trùng nhau vô hại.)
+        if (entry.spoofRuleIds?.length)
           void removeSpoofRules(entry.spoofRuleIds);
       }
     })();
@@ -595,10 +618,15 @@ async function handleDownload(
   url: string,
   tabId: number,
 ): Promise<DownloadStartResponse> {
-  // Hoist ra ngoài try để nhánh catch còn dọn được: rule đã áp TRƯỚC downloads.download(); nếu cú
-  // đó ném (Chrome từ chối tên/URL, policy chặn, hết đĩa) thì putDownload không chạy -> id không
-  // được lưu vào download nào -> chỉ sweep cold-start mới dọn. Gỡ ngay ở catch để không rò rỉ phiên.
+  // W2.5 — ĐỊNH TUYẾN QUA OFFSCREEN thay vì chrome.downloads.download({url}) thẳng.
+  // ĐO 2026-07-18: cú download thẳng KHÔNG nhận rule DNR modifyHeaders (server nhận Referer:NONE ->
+  // 403 trên site chống hotlink). fetch() của offscreen là xmlhttprequest tab-less -> KHỚP rule spoof
+  // -> qua 403. chrome.downloads.download từ nay chỉ nhận blob: URL (bất biến VDH).
+  //
+  // Hoist ra ngoài try để catch dọn được: rule áp TRƯỚC ensureOffscreen; nếu ném trước khi putDownload
+  // thì id chưa lưu ở đâu -> chỉ sweep cold-start dọn. Gỡ ngay ở catch để không rò rỉ nguyên phiên.
   let ruleId: number | undefined;
+  const key = crypto.randomUUID();
   try {
     const media = (await getTabMedia(tabId)).find((m) => m.url === url);
     // Spoof Referer/Origin để vượt hotlink-protection/403 (non-DRM). Id riêng cho lượt tải này (W2.4).
@@ -612,23 +640,44 @@ async function handleDownload(
       contentType: media?.contentType,
       folder,
     });
-    const downloadId = await browser.downloads.download({
-      url,
-      filename,
-      saveAs: false,
-      conflictAction: 'uniquify',
-    });
+    // Entry in-flight (phase FETCH trong offscreen) — chưa có chromeDownloadId, popup hiện "Đang tải…".
     await putDownload({
-      id: downloadId,
+      key,
       mediaUrl: url,
       filename,
       state: 'in_progress',
+      startedAt: Date.now(),
       spoofRuleIds: [ruleId],
     });
-    return { ok: true, downloadId };
-  } catch {
-    // Dọn rule đã áp nhưng chưa kịp gán chủ (id chưa vào download nào) — tránh rò rỉ nguyên phiên.
+    await ensureOffscreen();
+    // KHÔNG await: offscreen fetch có thể chạy lâu, báo tiến trình qua download/progress. NHƯNG phải
+    // bắt lỗi gửi (offscreen chưa đăng ký listener) -> nếu không entry kẹt 'in_progress' vĩnh viễn.
+    void browser.runtime
+      .sendMessage({
+        target: 'offscreen',
+        kind: 'download/run',
+        key,
+        url,
+        filename,
+        mediaUrl: url,
+        tabId,
+        spoofRuleIds: [ruleId],
+      })
+      .catch(async (e: unknown) => {
+        if (ruleId !== undefined) await removeSpoofRules([ruleId]);
+        await updateDownload(key, {
+          state: 'interrupted',
+          error: `Không gửi được việc sang bộ xử lý: ${describeError(e)}`,
+        });
+      });
+    return { ok: true, key };
+  } catch (e) {
+    // Dọn rule đã áp nhưng chưa kịp giao offscreen — tránh rò rỉ nguyên phiên.
     if (ruleId !== undefined) await removeSpoofRules([ruleId]);
+    await updateDownload(key, {
+      state: 'interrupted',
+      error: e instanceof Error ? e.message : 'Không bắt đầu tải được.',
+    });
     return {
       ok: false,
       error: 'Không bắt đầu tải được (URL có thể hết hạn/403 hoặc bị chặn).',
@@ -825,9 +874,13 @@ async function handleBlobDownload(
   _tabId: number,
   jobId: string,
   spoofRuleIds?: number[],
+  downloadKey?: string,
 ): Promise<void> {
-  // Segment đã fetch xong -> xoá rule spoof của MỌI host của job (hình + tiếng nếu khác host).
+  // Bytes đã lấy xong -> xoá rule spoof của MỌI host (HLS: hình/tiếng/segment; progressive: 1 host).
   if (spoofRuleIds?.length) void removeSpoofRules(spoofRuleIds);
+  // W2.5: progressive giao qua downloadKey -> GẮN chromeDownloadId vào ĐÚNG entry đang fetch (đừng
+  // tạo mới, kẻo popup thấy 2 dòng). HLS không có downloadKey -> tạo entry keyed theo jobId.
+  const key = downloadKey ?? jobId;
   try {
     const downloadId = await browser.downloads.download({
       url: blobUrl,
@@ -835,20 +888,77 @@ async function handleBlobDownload(
       saveAs: false,
       conflictAction: 'uniquify',
     });
-    await putDownload({
-      id: downloadId,
-      mediaUrl,
-      filename,
-      state: 'in_progress',
-      blobUrl,
-    });
+    if (downloadKey) {
+      // User đã HUỶ trong lúc fetch->save (entry 'interrupted' rồi, lúc đó chưa có chromeDownloadId nên
+      // handleDownloadCancel chỉ abort offscreen — vô hại vì fetch xong) -> huỷ luôn download blob vừa
+      // tạo + thu hồi, ĐỪNG ghi 'complete' đè lên cancel của user.
+      const cur = (await getDownloads())[key];
+      if (cur?.state === 'interrupted') {
+        void browser.downloads.cancel(downloadId).catch(() => undefined);
+        void browser.runtime.sendMessage({
+          target: 'offscreen',
+          kind: 'revoke',
+          url: blobUrl,
+        });
+        return;
+      }
+      // Entry đã có (phase fetch) -> merge id thật + blobUrl; state giữ in_progress (onChanged flip).
+      await updateDownload(key, { chromeDownloadId: downloadId, blobUrl });
+      // Chống race: blob nhỏ có thể COMPLETE trước khi downloads.onChanged khớp được entry (lúc đó
+      // chromeDownloadId chưa persist -> onChanged bỏ qua -> entry kẹt 'in_progress'). Đọc lại state
+      // NGAY: nếu đã terminal thì ghi luôn + thu hồi blob (khỏi phụ thuộc timing của onChanged).
+      const [d] = await browser.downloads.search({ id: downloadId });
+      if (d && d.state !== 'in_progress') {
+        await updateDownload(key, {
+          state: d.state as DownloadState,
+          ...(d.error ? { error: d.error } : {}),
+        });
+        void browser.runtime.sendMessage({
+          target: 'offscreen',
+          kind: 'revoke',
+          url: blobUrl,
+        });
+      }
+    } else {
+      await putDownload({
+        key,
+        mediaUrl,
+        filename,
+        state: 'in_progress',
+        chromeDownloadId: downloadId,
+        blobUrl,
+      });
+    }
   } catch (e) {
-    // Không tải được -> báo job lỗi (nếu không popup kẹt ở "đang lưu về máy").
-    await updateHlsJob(jobId, {
-      phase: 'error',
-      error: e instanceof Error ? e.message : 'Không lưu được file về máy.',
-    });
+    // Không lưu được -> báo lỗi ĐÚNG nơi popup đang nhìn: progressive nhìn DownloadEntry, HLS nhìn job.
+    const msg = e instanceof Error ? e.message : 'Không lưu được file về máy.';
+    if (downloadKey) {
+      await updateDownload(key, { state: 'interrupted', error: msg });
+    } else {
+      await updateHlsJob(jobId, { phase: 'error', error: msg });
+    }
   }
+}
+
+/**
+ * W2.5 — huỷ một lượt tải progressive theo KHOÁ. Hai phase, hai cách huỷ:
+ * - đã có chromeDownloadId (đang LƯU) -> chrome.downloads.cancel;
+ * - chưa (đang FETCH trong offscreen) -> báo offscreen abort cú fetch + gỡ rule spoof + đánh dấu huỷ.
+ */
+async function handleDownloadCancel(key: string): Promise<void> {
+  const entry = (await getDownloads())[key];
+  if (!entry) return;
+  if (entry.chromeDownloadId !== undefined) {
+    void browser.downloads
+      .cancel(entry.chromeDownloadId)
+      .catch(() => undefined);
+    return;
+  }
+  void browser.runtime
+    .sendMessage({ target: 'offscreen', kind: 'download/abort', key })
+    .catch(() => undefined);
+  if (entry.spoofRuleIds?.length) void removeSpoofRules(entry.spoofRuleIds);
+  await updateDownload(key, { state: 'interrupted', error: 'Đã huỷ' });
 }
 
 async function handleFfmpegDemo(): Promise<FfmpegDemoResponse> {

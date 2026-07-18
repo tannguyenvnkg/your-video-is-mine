@@ -1,7 +1,7 @@
 // Giao thức message runtime giữa content script / popup / options / offscreen và background.
 // Discriminated union theo trường `kind` để type-safe.
 
-import type { HlsJob } from './storage';
+import type { DownloadEntry, HlsJob } from './storage';
 import type { MediaType, VariantInfo } from './types';
 
 export interface DomMediaCandidate {
@@ -16,8 +16,13 @@ export type VariantsResponse =
   | { ok: true; isMaster: boolean; variants: VariantInfo[] }
   | { ok: false; error: string };
 
+// W2.5 — progressive nay fetch bytes trong offscreen TRƯỚC khi có chrome downloadId, nên trả về
+// `key` (jobId ổn định) thay vì downloadId. Popup dùng key để tra trạng thái + huỷ.
 export type DownloadStartResponse =
-  { ok: true; downloadId: number } | { ok: false; error: string };
+  { ok: true; key: string } | { ok: false; error: string };
+
+/** ACK cho 'download/progress' — offscreen await để giữ đúng thứ tự cập nhật (như hls/progress). */
+export type DownloadProgressResponse = { ok: true };
 
 export type FfmpegDemoResponse =
   { ok: true; size: number } | { ok: false; error: string };
@@ -83,7 +88,7 @@ export type RuntimeMessage =
   // Offscreen KHÔNG ghi thẳng chrome.storage được (chỉ có chrome.runtime) -> mọi thay đổi state
   // phải đi qua đây để background ghi hộ. Đây là ràng buộc của Chrome, không phải lựa chọn.
   | { kind: 'hls/progress'; jobId: string; patch: Partial<HlsJob> }
-  // offscreen -> background: đã ghép xong, nhờ background tải blob về máy.
+  // offscreen -> background: đã có file (HLS ghép, hoặc progressive fetch xong), nhờ background LƯU.
   | {
       kind: 'download/blob';
       blobUrl: string;
@@ -97,9 +102,21 @@ export type RuntimeMessage =
        * những rule đó — offscreen KHÔNG có chrome.declarativeNetRequest nên tự nó không xoá được.
        */
       spoofRuleIds?: number[];
+      /**
+       * W2.5 — có mặt khi blob này là của một lượt PROGRESSIVE (không phải HLS). Là khoá của
+       * DownloadEntry in-flight để background gắn chromeDownloadId vào đúng entry đó (không tạo mới).
+       * Vắng = luồng HLS cũ -> background tạo DownloadEntry keyed theo jobId.
+       */
+      downloadKey?: string;
     }
+  // offscreen -> background: tiến trình fetch progressive (W2.5). Offscreen không ghi storage được
+  // (chỉ có chrome.runtime) nên báo qua đây; background updateDownload hộ. ACK để giữ đúng thứ tự.
+  | { kind: 'download/progress'; key: string; patch: Partial<DownloadEntry> }
   | { kind: 'hls/cancel'; jobId: string }
-  | { kind: 'download/cancel'; downloadId: number };
+  // W2.5 — huỷ theo KHOÁ (jobId) thay vì downloadId: lúc đang fetch trong offscreen chưa có
+  // chromeDownloadId. Background tự chọn: có chromeDownloadId -> chrome.downloads.cancel; chưa có
+  // -> báo offscreen abort cú fetch.
+  | { kind: 'download/cancel'; key: string };
 
 /** Message gửi TỪ background TỚI offscreen (có `target: 'offscreen'` để phân biệt). */
 export type OffscreenRequest =
@@ -123,7 +140,22 @@ export type OffscreenRequest =
       concurrency: number;
     }
   | { target: 'offscreen'; kind: 'revoke'; url: string }
-  | { target: 'offscreen'; kind: 'hls/cancel'; jobId: string };
+  | { target: 'offscreen'; kind: 'hls/cancel'; jobId: string }
+  // W2.5 — tải progressive qua offscreen: fetch bytes (Range chunk cho file lớn) với rule spoof đang
+  // bật, dựng Blob, gửi ngược download/blob. `chrome.downloads.download` do đó CHỈ nhận blob: URL.
+  | {
+      target: 'offscreen';
+      kind: 'download/run';
+      key: string;
+      url: string;
+      filename: string;
+      mediaUrl: string;
+      tabId: number;
+      /** id rule spoof đã áp -> mang hộ để gửi lại cho background dọn (offscreen không đụng DNR). */
+      spoofRuleIds?: number[];
+    }
+  // W2.5 — huỷ một lượt fetch progressive đang bay trong offscreen (abort AbortController).
+  | { target: 'offscreen'; kind: 'download/abort'; key: string };
 
 export async function sendRuntimeMessage(msg: RuntimeMessage): Promise<void> {
   try {
@@ -227,10 +259,10 @@ export async function requestHlsCancel(jobId: string): Promise<void> {
   }
 }
 
-/** Huỷ một lượt tải progressive đang chạy. */
-export async function requestDownloadCancel(downloadId: number): Promise<void> {
+/** Huỷ một lượt tải progressive đang chạy (theo khoá jobId — W2.5). */
+export async function requestDownloadCancel(key: string): Promise<void> {
   try {
-    await browser.runtime.sendMessage({ kind: 'download/cancel', downloadId });
+    await browser.runtime.sendMessage({ kind: 'download/cancel', key });
   } catch {
     // ignore
   }

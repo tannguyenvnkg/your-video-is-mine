@@ -9,7 +9,15 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { decryptAes128Cbc, hlsSegmentIv } from '@/utils/crypto';
 import { describeError } from '@/utils/errors';
 import { parseHlsSegments, type HlsByteRange } from '@/utils/hls';
-import type { HlsJob } from '@/utils/storage';
+import {
+  CHUNK_THRESHOLD_BYTES,
+  DEFAULT_CHUNK_BYTES,
+  MAX_PROGRESSIVE_BYTES,
+  parseContentRangeTotal,
+  planRangeChunks,
+  tooLargeMessage,
+} from '@/utils/progressive';
+import type { DownloadEntry, HlsJob } from '@/utils/storage';
 import type { FfmpegDemoResponse, OffscreenRequest } from '@/utils/messages';
 
 // RÀNG BUỘC NỀN TẢNG (đo được, không phải suy đoán): offscreen document CHỈ được cấp
@@ -52,6 +60,9 @@ let lastMuxPct = -1;
 // Các blob URL đang giữ (thu hồi khi background báo tải xong, hoặc sau timeout dự phòng).
 const activeBlobUrls = new Set<string>();
 const BLOB_TTL_MS = 10 * 60 * 1000;
+
+// W2.5 — AbortController của từng lượt fetch progressive đang bay (huỷ = .abort() giật request ngay).
+const progressiveAborts = new Map<string, AbortController>();
 
 // Trần thời gian tải playlist (manifest chỉ vài KB -> 30s là quá rộng rãi).
 const PLAYLIST_TIMEOUT_MS = 30_000;
@@ -572,6 +583,263 @@ function revokeBlob(url: string): void {
   }
 }
 
+// --- W2.5: tải progressive qua offscreen ---
+//
+// VÌ SAO (đã ĐO 2026-07-18): `chrome.downloads.download({url})` phát request KHÔNG nhận rule DNR
+// modifyHeaders -> server chống hotlink nhận `Referer: NONE` -> 403. `fetch()` của extension ở đây
+// là `xmlhttprequest` tab-less -> KHỚP rule spoof (W2.4) -> qua 403. `chrome.downloads.download` do
+// đó chỉ còn là công cụ LƯU (nhận blob: URL), đúng bất biến của VDH.
+
+/** Báo tiến trình/kết thúc một lượt fetch progressive về background. KHÔNG ném (như updateHlsJob). */
+async function updateProgressiveDownload(
+  key: string,
+  patch: Partial<DownloadEntry>,
+): Promise<void> {
+  try {
+    await browser.runtime.sendMessage({
+      kind: 'download/progress',
+      key,
+      patch,
+    });
+  } catch (e) {
+    console.warn(
+      '[offscreen] không gửi được tiến trình tải progressive:',
+      describeError(e),
+    );
+  }
+}
+
+/** Bước report byte tối thiểu (~1MB) — stream trả nhiều mảnh nhỏ, đừng spam storage mỗi mảnh. */
+const PROGRESS_REPORT_STEP = 1024 * 1024;
+
+/**
+ * Đọc trọn `res.body` (stream) thành Blob, báo tiến trình theo bước. Fallback arrayBuffer nếu không
+ * có body. `heartbeat()` gọi mỗi lần nhận byte -> reset watchdog chống treo. Chặn cứng khi vượt trần
+ * (server nói dối content-length / không gửi) để offscreen không OOM câm.
+ */
+async function readBodyToBlob(o: {
+  res: Response;
+  type: string;
+  total: number | null;
+  key: string;
+  heartbeat: () => void;
+}): Promise<Blob> {
+  const { res, type, total, key, heartbeat } = o;
+  if (!res.body) {
+    // Không đọc được stream -> ôm cả file một lần (chấp nhận, file nhỏ).
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength > MAX_PROGRESSIVE_BYTES) {
+      throw new Error(tooLargeMessage(buf.byteLength));
+    }
+    return new Blob([buf], { type });
+  }
+  const reader = res.body.getReader();
+  const parts: Uint8Array[] = [];
+  let received = 0;
+  let lastReport = 0;
+  if (total != null) {
+    await updateProgressiveDownload(key, {
+      bytesTotal: total,
+      bytesReceived: 0,
+    });
+  }
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    heartbeat();
+    received += value.byteLength;
+    // Chặn trước khi RAM phình vỡ: tổng có thể không biết trước (không content-length) nên phải
+    // canh ngay trong lúc đọc. Huỷ reader để nhả kết nối.
+    if (received > MAX_PROGRESSIVE_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error(tooLargeMessage(received));
+    }
+    parts.push(value);
+    if (received - lastReport >= PROGRESS_REPORT_STEP) {
+      lastReport = received;
+      await updateProgressiveDownload(key, { bytesReceived: received });
+    }
+  }
+  await updateProgressiveDownload(key, { bytesReceived: received });
+  return new Blob(parts as BlobPart[], { type });
+}
+
+/**
+ * Tải file theo Range chunk. Server PHẢI trả 206 ĐÚNG độ dài mỗi đoạn.
+ * ⚠️ KHÔNG bó RAM: Blob cuối vẫn ôm trọn file (xem chú thích progressive.ts). Lợi ích: tiến trình +
+ * bắt server không tôn trọng Range. `heartbeat()` reset watchdog chống treo.
+ */
+async function fetchByRangeChunks(o: {
+  url: string;
+  type: string;
+  total: number;
+  key: string;
+  signal: AbortSignal;
+  heartbeat: () => void;
+}): Promise<Blob> {
+  const { url, type, total, key, signal, heartbeat } = o;
+  const parts: Uint8Array[] = [];
+  let received = 0;
+  await updateProgressiveDownload(key, { bytesTotal: total, bytesReceived: 0 });
+  for (const c of planRangeChunks(total, DEFAULT_CHUNK_BYTES)) {
+    const r = await fetch(url, {
+      credentials: 'include',
+      headers: { Range: `bytes=${c.start}-${c.end}` },
+      signal,
+    });
+    // Server PHẢI tôn trọng Range: 200 = trả nguyên file cho mỗi đoạn -> ôm N lần cả file (đúng bẫy
+    // W1.3). Thà FAIL LỚN TIẾNG hơn là ghép byte rác.
+    if (r.status !== 206) {
+      throw new Error(
+        `Máy chủ không hỗ trợ tải theo đoạn (Range): trả HTTP ${r.status} thay vì 206.`,
+      );
+    }
+    const buf = new Uint8Array(await r.arrayBuffer());
+    heartbeat();
+    // 206 NGẮN HƠN range yêu cầu (RFC cho phép; proxy/CDN cap range) -> cộng theo kích thước KẾ HOẠCH
+    // sẽ nhảy cóc phần đuôi, ghép Blob thiếu byte mà vẫn 'complete'. Kiểm độ dài THẬT, fail lớn tiếng.
+    const want = c.end - c.start + 1;
+    if (buf.byteLength !== want) {
+      throw new Error(
+        `Máy chủ trả đoạn ngắn hơn yêu cầu (${buf.byteLength}/${want} byte) — dừng để tránh file hỏng.`,
+      );
+    }
+    parts.push(buf);
+    received += buf.byteLength;
+    await updateProgressiveDownload(key, { bytesReceived: received });
+  }
+  return new Blob(parts as BlobPart[], { type });
+}
+
+/**
+ * Không có byte mới trong ngần này = coi như server treo -> abort. Reset mỗi lần nhận byte (heartbeat)
+ * nên KHÔNG cắt oan download chậm-nhưng-đang-chạy; chỉ cắt khi đứng im. Đường HLS đã có bất biến này
+ * (PLAYLIST_TIMEOUT_MS); progressive từng đánh rơi -> job kẹt 'in_progress' mãi + rule spoof leak.
+ */
+const PROGRESSIVE_STALL_MS = 60_000;
+
+async function runProgressiveDownload(
+  req: Extract<OffscreenRequest, { kind: 'download/run' }>,
+): Promise<void> {
+  const { key, url, filename, mediaUrl, tabId, spoofRuleIds } = req;
+  const ac = new AbortController();
+  progressiveAborts.set(key, ac);
+
+  // Watchdog chống treo: không tiến triển trong PROGRESSIVE_STALL_MS -> abort. `stalled` phân biệt
+  // với user-cancel để báo lỗi đúng (treo mạng vs bấm Hủy).
+  let stalled = false;
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  const heartbeat = (): void => {
+    if (watchdog) clearTimeout(watchdog);
+    watchdog = setTimeout(() => {
+      stalled = true;
+      ac.abort();
+    }, PROGRESSIVE_STALL_MS);
+  };
+
+  try {
+    heartbeat(); // canh cả cú probe: server không trả headers trong 60s -> abort.
+    // Probe Range 1 byte: (1) đo tổng file + server có hỗ trợ Range không; (2) là cú fetch ĐẦU tiên
+    // qua rule spoof -> 403 ở đây = spoof không áp (báo lỗi rõ thay vì tải byte rác).
+    const probe = await fetch(url, {
+      credentials: 'include',
+      headers: { Range: 'bytes=0-0' },
+      signal: ac.signal,
+    });
+    heartbeat();
+    if (!probe.ok && probe.status !== 206) {
+      throw new Error(`Máy chủ trả mã ${probe.status}.`);
+    }
+    const contentType = probe.headers.get('content-type') || 'video/mp4';
+    const total =
+      probe.status === 206
+        ? parseContentRangeTotal(probe.headers.get('content-range'))
+        : Number(probe.headers.get('content-length')) || null;
+
+    // Trần cứng: file quá lớn -> BÁO LỖI RÕ, đừng để offscreen OOM-crash câm (mất cả nhánh catch dưới
+    // -> job kẹt mãi + rule leak). Bó RAM thật là Đợt 3 (OPFS). Tổng không biết -> canh mid-stream.
+    if (total != null && total > MAX_PROGRESSIVE_BYTES) {
+      throw new Error(tooLargeMessage(total));
+    }
+
+    let blob: Blob;
+    if (
+      probe.status === 206 &&
+      total != null &&
+      total > CHUNK_THRESHOLD_BYTES
+    ) {
+      // File LỚN + server hỗ trợ Range -> chunk. Bỏ body probe (1 byte).
+      await probe.body?.cancel().catch(() => undefined);
+      blob = await fetchByRangeChunks({
+        url,
+        type: contentType,
+        total,
+        key,
+        signal: ac.signal,
+        heartbeat,
+      });
+    } else if (probe.status === 200) {
+      // Server phớt Range -> body probe LÀ nguyên file, đọc luôn (không fetch lại).
+      blob = await readBodyToBlob({
+        res: probe,
+        type: contentType,
+        total,
+        key,
+        heartbeat,
+      });
+    } else {
+      // File nhỏ (206) hoặc tổng không rõ -> một GET nguyên file, stream body.
+      await probe.body?.cancel().catch(() => undefined);
+      const res = await fetch(url, {
+        credentials: 'include',
+        signal: ac.signal,
+      });
+      heartbeat();
+      if (!res.ok) throw new Error(`Máy chủ trả mã ${res.status}.`);
+      const streamTotal =
+        total ?? (Number(res.headers.get('content-length')) || null);
+      blob = await readBodyToBlob({
+        res,
+        type: contentType,
+        total: streamTotal,
+        key,
+        heartbeat,
+      });
+    }
+
+    // Giao blob về background để LƯU qua chrome.downloads (chỉ nhận blob: URL — bất biến VDH).
+    const blobUrl = URL.createObjectURL(blob);
+    activeBlobUrls.add(blobUrl);
+    setTimeout(() => revokeBlob(blobUrl), BLOB_TTL_MS);
+    await browser.runtime.sendMessage({
+      kind: 'download/blob',
+      blobUrl,
+      filename,
+      mediaUrl,
+      tabId,
+      // Không phải job HLS: dùng downloadKey để background gắn vào ĐÚNG DownloadEntry đang fetch.
+      jobId: key,
+      downloadKey: key,
+      spoofRuleIds,
+    });
+  } catch (e) {
+    const userCancelled =
+      !stalled &&
+      (ac.signal.aborted || (e instanceof Error && e.name === 'AbortError'));
+    await updateProgressiveDownload(key, {
+      state: 'interrupted',
+      error: stalled
+        ? 'Máy chủ không phản hồi (quá thời gian chờ).'
+        : userCancelled
+          ? 'Đã huỷ'
+          : describeError(e),
+    });
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+    progressiveAborts.delete(key);
+  }
+}
+
 function asOffscreenRequest(m: unknown): OffscreenRequest | null {
   if (
     typeof m === 'object' &&
@@ -612,6 +880,19 @@ browser.runtime.onMessage.addListener(
         return undefined;
       case 'revoke':
         revokeBlob(req.url);
+        return undefined;
+      case 'download/run':
+        // Progressive KHÔNG dùng ffmpeg/FS ảo -> chạy ĐỘC LẬP với jobChain (không cần tuần tự như
+        // HLS). runProgressiveDownload tự bắt lỗi + báo về background, nên chỉ cần nuốt rejection thừa.
+        void runProgressiveDownload(req).catch((e: unknown) =>
+          console.warn(
+            '[offscreen] tải progressive lỗi ngoài dự kiến:',
+            describeError(e),
+          ),
+        );
+        return undefined;
+      case 'download/abort':
+        progressiveAborts.get(req.key)?.abort();
         return undefined;
     }
   },
