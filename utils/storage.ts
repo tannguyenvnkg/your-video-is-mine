@@ -175,6 +175,12 @@ export interface DownloadEntry {
   /** epoch ms lúc tạo -> popup chọn entry mới nhất cho mỗi mediaUrl (khoá string không so sánh được). */
   startedAt?: number;
   /**
+   * W2.7 — epoch ms lần CUỐI background nghe thấy tiếng offscreen về lượt tải này (nhịp tim).
+   * CHỈ có ý nghĩa ở phase FETCH; có `chromeDownloadId` rồi thì chrome.downloads cầm lái và field
+   * này thôi được soi (xem `findDeadDownloads`).
+   */
+  lastSeenAt?: number;
+  /**
    * W2.4 — id session rule spoof đã áp cho lượt tải này (id RIÊNG mỗi download, không suy từ host).
    * Lưu để xoá ĐÚNG rule của mình khi tải xong, không giật rule của download khác cùng host.
    */
@@ -253,6 +259,14 @@ export interface HlsJob {
    * KHÔNG phải lỗi: job vẫn đang chạy. Có nó thì một phút chờ retry không còn trông như treo.
    */
   note?: string;
+  /**
+   * W2.7 — epoch ms lần CUỐI background nghe thấy tiếng offscreen về job này (nhịp tim).
+   *
+   * 🔴 BACKGROUND đóng dấu, KHÔNG phải offscreen: một đồng hồ duy nhất thì không có lệch giờ giữa
+   * hai ngữ cảnh, và offscreen chết thì dấu tự nhiên ngừng tiến — đúng thứ ta muốn đo.
+   * Thiếu field này (job tạo trước bản nâng cấp) = KHÔNG kết luận chết (xem `findDeadHlsJobs`).
+   */
+  lastSeenAt?: number;
   filename?: string;
   // MỚI (tiến trình chi tiết):
   /** tab phát hiện media -> background đặt badge % đúng tab. */
@@ -273,6 +287,9 @@ export interface HlsJob {
    */
   spoofRuleIds?: number[];
 }
+
+/** Phase KẾT THÚC — không quay ngược ra được (xem `updateHlsJob`). */
+const TERMINAL_HLS_PHASES = new Set<HlsPhase>(['done', 'error', 'cancelled']);
 
 export async function getHlsJobs(): Promise<Record<string, HlsJob>> {
   const res = await browser.storage.session.get(HLS_JOBS_KEY);
@@ -296,7 +313,19 @@ export async function updateHlsJob(
     const all = await getHlsJobs();
     const cur = all[id];
     if (!cur) return;
-    all[id] = { ...cur, ...patch };
+    const next = { ...cur, ...patch };
+    // W2.7 — PHASE KẾT THÚC LÀ CHUNG THẨM. Job đã done/error/cancelled thì không ai được kéo ngược
+    // về phase đang chạy. Hai ca thật đã bịt:
+    //   1. User bấm Huỷ -> background ghi 'cancelled', nhưng runHlsJob trong offscreen còn chạy dở
+    //      và kịp ghi 'loading' đè lên -> popup hiện job huỷ rồi lại quay tiếp.
+    //   2. Tick W2.7 chốt job chết + DỌN rule spoof; nếu job hồi sinh muộn thì nó chạy tiếp mà
+    //      không còn rule -> 403 -> user nhận LỖI THỨ HAI khó hiểu hơn lỗi đầu.
+    // Chỉ khoá `phase` + `error` (lý do đầu tiên là lý do ĐÚNG); field khác vẫn ghi bình thường.
+    if (TERMINAL_HLS_PHASES.has(cur.phase)) {
+      next.phase = cur.phase;
+      next.error = cur.error;
+    }
+    all[id] = next;
     await browser.storage.session.set({ [HLS_JOBS_KEY]: all });
   });
 }

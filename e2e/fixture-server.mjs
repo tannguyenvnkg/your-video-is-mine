@@ -108,6 +108,13 @@ export async function startFixtureServer({
       send(200, readFixture(path.slice('/hls/'.length).replace(/\.ts$/, '.bin')), 'video/mp2t');
       return;
     }
+    // W2.7 — .mp4 CÂM TUYỆT ĐỐI: nhận request rồi im (không header, không byte, không đóng socket).
+    // Dùng để giữ lượt tải progressive đứng yên đủ lâu mà giết offscreen giữa chừng.
+    if (path === '/prog/stall.mp4') {
+      requests.push({ url: path, referer, status: 0 });
+      req.socket.setKeepAlive(true);
+      return; // KHÔNG res.end()
+    }
     // W2.5 — file mp4 progressive. HỖ TRỢ Range (206) để đo đúng đường offscreen chunk theo byte;
     // thiếu Range thì trả 200 nguyên file (đường stream body). Accept-Ranges để client biết được phép.
     if (isProgressive(path)) {
@@ -163,6 +170,8 @@ export async function startFixtureServer({
     mediaUrl: `http://127.0.0.1:${port}/hls/media.m3u8`,
     /** W2.5 — URL mp4 progressive (host 127.0.0.1). */
     progressiveUrl: `http://127.0.0.1:${port}/prog/sample.mp4`,
+    /** W2.7 — URL mp4 CÂM (server nhận rồi im) để giữ lượt tải đứng yên mà giết offscreen. */
+    stallProgressiveUrl: `http://127.0.0.1:${port}/prog/stall.mp4`,
     /** Số request mp4 progressive server đã PHỤC VỤ (200/206) -> bằng chứng byte có tới. */
     progressiveHits: () =>
       requests.filter((r) => r.url === '/prog/sample.mp4' && r.status < 400)

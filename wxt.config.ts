@@ -27,6 +27,9 @@ export default defineConfig({
       'scripting',
       'tabs',
       'notifications',
+      // W2.7 — tick định kỳ dò job mà offscreen đã chết giữa chừng. Dùng alarms chứ KHÔNG setInterval:
+      // service worker MV3 ngủ bất cứ lúc nào, timer trong SW chết theo; alarm thì đánh thức SW dậy.
+      'alarms',
     ],
     host_permissions: ['<all_urls>'],
 

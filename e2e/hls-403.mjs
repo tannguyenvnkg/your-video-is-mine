@@ -159,6 +159,218 @@ async function runSegmentStall() {
 }
 
 /**
+ * W2.7 — GIẾT offscreen giữa lúc tải: job phải BÁO LỖI có hạn, không quay spinner vĩnh viễn.
+ *
+ * Vì sao ca này bắt được thứ cổng tĩnh mù: offscreen chết IM LẶNG — Chrome không bắn sự kiện nào về
+ * background. Không có tick W2.7 thì job nằm lại 'fetching' tới lúc đóng trình duyệt, và KHÔNG một
+ * test thuần nào thấy được, vì lỗi nằm ở chỗ "không ai báo" chứ không ở một hàm nào cả.
+ *
+ * Dùng `stallSegments` để job đứng yên ở 'fetching' (tất định), rồi `closeDocument()` giết offscreen
+ * — đúng thứ Task Manager của Chrome làm. Lưu ý: giết offscreen cũng giết luôn đồng hồ retry W2.6
+ * nằm trong đó, nên tick của background là thứ DUY NHẤT còn có thể cứu job.
+ *
+ * Ngân sách: ngưỡng im 60s + chu kỳ alarm tối đa 30s (Chrome không cho dày hơn) => tệ nhất ~90s.
+ */
+async function runOffscreenDeath() {
+  const srv = await startFixtureServer({ gate: 'none', stallSegments: true });
+  const budgetMs = 150_000;
+  try {
+    return await withBrowser(async ({ page }) => {
+      const start = await page.evaluate(
+        ([variantUrl, mediaUrl]) =>
+          chrome.runtime.sendMessage({
+            kind: 'hls/download',
+            variantUrl,
+            mediaUrl,
+            tabId: -1,
+          }),
+        [srv.mediaUrl, srv.masterUrl],
+      );
+      if (!start?.ok) {
+        return { ok: false, detail: `hls/download bị từ chối: ${JSON.stringify(start)}` };
+      }
+      // Chờ job thực sự vào 'fetching' rồi mới giết — giết sớm quá thì ta đo nhầm ca "chưa nhận việc".
+      let reached = false;
+      for (let i = 0; i < 40; i++) {
+        const phase = await page.evaluate(async (id) => {
+          const all = await chrome.storage.session.get('hlsjobs');
+          return all.hlsjobs?.[id]?.phase ?? null;
+        }, start.jobId);
+        if (phase === 'fetching') {
+          reached = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (!reached) return { ok: false, detail: 'job không vào được phase fetching để giết offscreen' };
+
+      const killed = await page.evaluate(async () => {
+        try {
+          await chrome.offscreen.closeDocument();
+          return true;
+        } catch (e) {
+          return String(e?.message ?? e);
+        }
+      });
+      if (killed !== true) return { ok: false, detail: `không giết được offscreen: ${killed}` };
+      console.log('      [kill] offscreen đã bị đóng — nhịp tim dừng từ đây');
+
+      const t0 = Date.now();
+      const job = await waitJob(page, start.jobId, budgetMs);
+      const secs = ((Date.now() - t0) / 1000).toFixed(1);
+      if (!job) {
+        return {
+          ok: false,
+          detail: `job TREO >${budgetMs / 1000}s sau khi offscreen chết — spinner quay vĩnh viễn (§2.14)`,
+        };
+      }
+      if (job.phase !== 'error') {
+        return { ok: false, detail: `mong đợi phase 'error', nhận '${job.phase}' sau ${secs}s` };
+      }
+      // Thông báo phải nói ĐÚNG chuyện gì xảy ra: "bộ xử lý đã dừng", không phải lỗi mạng chung chung.
+      if (!/dừng đột ngột/.test(job.error ?? '')) {
+        return {
+          ok: false,
+          detail: `báo lỗi sau ${secs}s nhưng SAI lý do: "${job.error ?? '?'}"`,
+        };
+      }
+      return { ok: true, detail: `job báo lỗi sau ${secs}s, đúng lý do: "${job.error}"` };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
+/**
+ * W2.7 — tải PROGRESSIVE (.mp4) cũng phải có lưới liveness, không chỉ HLS.
+ *
+ * W2.5 định tuyến .mp4 qua offscreen để mang được Referer spoof. Hệ quả ít ai để ý: từ đó lượt tải
+ * progressive PHỤ THUỘC vào offscreen y như HLS. Offscreen chết giữa lúc fetch ⇒ `finally` của nó
+ * không bao giờ chạy ⇒ không có `download/progress` state 'interrupted' nào được gửi ⇒ entry nằm
+ * lại `in_progress` VĨNH VIỄN, popup quay spinner. Tệ hơn: `sweepStaleSpoofRules` coi 'in_progress'
+ * là còn sống nên rule spoof của nó bị ghim nguyên phiên.
+ */
+async function runProgressiveOffscreenDeath() {
+  const srv = await startFixtureServer({ gate: 'none', stallSegments: true });
+  const budgetMs = 150_000;
+  try {
+    return await withBrowser(async ({ page }) => {
+      const start = await page.evaluate(
+        (url) =>
+          chrome.runtime.sendMessage({ kind: 'download/progressive', url, tabId: -1 }),
+        srv.stallProgressiveUrl ?? srv.progressiveUrl,
+      );
+      if (!start?.ok) {
+        return { ok: false, detail: `download/progressive bị từ chối: ${JSON.stringify(start)}` };
+      }
+      // Chờ entry thực sự vào 'in_progress' rồi mới giết offscreen.
+      let ready = false;
+      for (let i = 0; i < 40; i++) {
+        const st = await page.evaluate(async (key) => {
+          const all = await chrome.storage.session.get('downloads');
+          return all.downloads?.[key]?.state ?? null;
+        }, start.key);
+        if (st === 'in_progress') {
+          ready = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (!ready) return { ok: false, detail: 'entry không vào được in_progress để giết offscreen' };
+
+      const killed = await page.evaluate(async () => {
+        try {
+          await chrome.offscreen.closeDocument();
+          return true;
+        } catch (e) {
+          return String(e?.message ?? e);
+        }
+      });
+      if (killed !== true) return { ok: false, detail: `không giết được offscreen: ${killed}` };
+      console.log('      [kill] offscreen đã bị đóng giữa lúc fetch .mp4');
+
+      const t0 = Date.now();
+      while (Date.now() - t0 < budgetMs) {
+        const entry = await page.evaluate(async (key) => {
+          const all = await chrome.storage.session.get('downloads');
+          return all.downloads?.[key] ?? null;
+        }, start.key);
+        if (entry && entry.state !== 'in_progress') {
+          const secs = ((Date.now() - t0) / 1000).toFixed(1);
+          if (entry.state !== 'interrupted') {
+            return { ok: false, detail: `mong đợi 'interrupted', nhận '${entry.state}' sau ${secs}s` };
+          }
+          if (!/dừng đột ngột/.test(entry.error ?? '')) {
+            return { ok: false, detail: `chốt sau ${secs}s nhưng SAI lý do: "${entry.error ?? '?'}"` };
+          }
+          return { ok: true, detail: `entry chốt 'interrupted' sau ${secs}s, đúng lý do: "${entry.error}"` };
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      return {
+        ok: false,
+        detail: `entry KẸT 'in_progress' >${budgetMs / 1000}s sau khi offscreen chết — spinner vĩnh viễn`,
+      };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
+/**
+ * W2.7 — job XẾP HÀNG không được bị chốt "chết" OAN.
+ *
+ * Vì sao ca này tồn tại: job HLS chạy TUẦN TỰ (một instance ffmpeg). Job #2 nằm im trong hàng đợi
+ * suốt thời gian job #1 tải — mà job #1 chạy vài phút là chuyện thường. Nếu nhịp tim chỉ đập lúc
+ * job ĐANG CHẠY thì job #2 im >60s và bị tick W2.7 giết oan, dù offscreen hoàn toàn khoẻ.
+ *
+ * 👉 Giết oan một lượt tải khoẻ còn TỆ HƠN cái treo mà W2.7 sinh ra để chữa. Đây là ca canh đúng
+ * ranh giới đó: job #1 stall 63s (đủ lâu để vượt ngưỡng 60s), job #2 phải sống qua được.
+ */
+async function runQueuedJobNotReaped() {
+  const srv = await startFixtureServer({ gate: 'none', stallSegments: true });
+  try {
+    return await withBrowser(async ({ page }) => {
+      const startJob = (variantUrl, mediaUrl) =>
+        page.evaluate(
+          ([v, m]) =>
+            chrome.runtime.sendMessage({
+              kind: 'hls/download',
+              variantUrl: v,
+              mediaUrl: m,
+              tabId: -1,
+            }),
+          [variantUrl, mediaUrl],
+        );
+      const a = await startJob(srv.mediaUrl, srv.masterUrl);
+      const b = await startJob(srv.mediaUrl, srv.masterUrl);
+      if (!a?.ok || !b?.ok) {
+        return { ok: false, detail: `không xếp được 2 job: ${JSON.stringify({ a, b })}` };
+      }
+      // Job #2 xếp sau job #1 (đang stall 63s). Theo dõi nó qua mốc 60s — mốc mà tick sẽ soi tới.
+      const deadline = Date.now() + 75_000;
+      while (Date.now() < deadline) {
+        const job = await page.evaluate(async (id) => {
+          const all = await chrome.storage.session.get('hlsjobs');
+          return all.hlsjobs?.[id] ?? null;
+        }, b.jobId);
+        if (job && /dừng đột ngột/.test(job.error ?? '')) {
+          const secs = ((75_000 - (deadline - Date.now())) / 1000).toFixed(1);
+          return {
+            ok: false,
+            detail: `job XẾP HÀNG bị giết OAN sau ${secs}s dù offscreen còn sống: "${job.error}"`,
+          };
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      return { ok: true, detail: 'job xếp hàng sống qua mốc 60s — không bị tick giết oan' };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
+/**
  * W2.5 — tải progressive .mp4 qua `download/progressive` rồi kiểm file trên đĩa.
  *
  * Tín hiệu ĐỘC LẬP VỚI ĐƯỜNG (cũ trực tiếp vs mới qua offscreen): SERVER có 403 lần nào không +
@@ -301,6 +513,30 @@ const SCENARIOS = [
     expect: 'pass',
     pins: '§2.9/W2.6 (retry không timeout/không huỷ được)',
     run: () => runSegmentStall(),
+  },
+  {
+    id: 'offscreen-death',
+    title:
+      'Giết offscreen giữa lúc tải: job phải báo lỗi có hạn (W2.7), không quay spinner vĩnh viễn',
+    expect: 'pass',
+    pins: '§2.14/W2.7 (offscreen chết im lặng -> job kẹt fetching mãi)',
+    run: () => runOffscreenDeath(),
+  },
+  {
+    id: 'queued-not-reaped',
+    title:
+      'Job xếp hàng sau một job chạy dài KHÔNG được tick W2.7 giết oan (giết oan tệ hơn treo)',
+    expect: 'pass',
+    pins: 'W2.7 (nhịp tim phải phủ cả lúc XẾP HÀNG, không chỉ lúc đang chạy)',
+    run: () => runQueuedJobNotReaped(),
+  },
+  {
+    id: 'progressive-offscreen-death',
+    title:
+      'Giết offscreen giữa lúc tải .mp4: entry phải chốt interrupted, không kẹt in_progress vĩnh viễn',
+    expect: 'pass',
+    pins: 'W2.7 (W2.5 khiến progressive phụ thuộc offscreen — lưới liveness phải phủ cả đường này)',
+    run: () => runProgressiveOffscreenDeath(),
   },
 ];
 

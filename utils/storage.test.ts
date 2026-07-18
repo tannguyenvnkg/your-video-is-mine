@@ -8,10 +8,14 @@ import {
   getDownloads,
   getPreferredHeight,
   getTabMedia,
+  getHlsJobs,
   putDownload,
+  putHlsJob,
   resetTab,
   setPreferredHeight,
   updateDownload,
+  updateHlsJob,
+  type HlsJob,
 } from './storage';
 import { SPOOF_RULE_ID_MIN, SPOOF_RULE_ID_SPAN } from './dnr';
 import type { MediaItem } from './types';
@@ -179,5 +183,61 @@ describe('DownloadEntry — khoá ỔN ĐỊNH theo jobId (W2.5), chromeDownload
     const e = (await getDownloads())['ghost']!;
     expect(e.key).toBe('ghost');
     expect(e.state).toBe('complete');
+  });
+});
+
+describe('W2.7 — phase kết thúc là CHUNG THẨM, không hồi sinh được', () => {
+  beforeEach(() => {
+    fakeBrowser.reset();
+  });
+
+  function job(patch: Partial<HlsJob> = {}): HlsJob {
+    return {
+      id: 'j1',
+      mediaUrl: 'https://x/a.m3u8',
+      variantUrl: 'https://x/v.m3u8',
+      phase: 'fetching',
+      segmentsTotal: 10,
+      segmentsDone: 3,
+      ...patch,
+    };
+  }
+
+  it('job đã "cancelled" KHÔNG bị offscreen kéo ngược về "loading"', async () => {
+    // Ca thật: user bấm Huỷ -> background ghi 'cancelled'; nhưng runHlsJob trong offscreen còn đang
+    // chạy dở và kịp ghi 'loading' đè lên -> popup hiện job huỷ rồi lại quay tiếp. Vô lý với user.
+    await putHlsJob(job({ phase: 'cancelled', error: 'Đã huỷ' }));
+    await updateHlsJob('j1', { phase: 'loading' });
+    expect((await getHlsJobs())['j1']!.phase).toBe('cancelled');
+  });
+
+  it('job đã "error" KHÔNG bị kéo ngược về "fetching"', async () => {
+    // Ca thật W2.7: tick chốt job chết; nếu offscreen hồi sinh muộn và ghi tiếp thì spoof rule đã bị
+    // dọn -> job chạy tiếp chỉ để 403, user nhận LỖI THỨ HAI khó hiểu hơn lỗi đầu.
+    await putHlsJob(job({ phase: 'error', error: 'Bộ xử lý video đã dừng đột ngột' }));
+    await updateHlsJob('j1', { phase: 'fetching', segmentsDone: 9 });
+    const j = (await getHlsJobs())['j1']!;
+    expect(j.phase).toBe('error');
+    expect(j.error).toBe('Bộ xử lý video đã dừng đột ngột');
+  });
+
+  it('vẫn cho ghi các field KHÁC lên job đã kết thúc (chỉ khoá phase + error)', async () => {
+    await putHlsJob(job({ phase: 'done' }));
+    await updateHlsJob('j1', { filename: 'x.mp4' });
+    const j = (await getHlsJobs())['j1']!;
+    expect(j.filename).toBe('x.mp4');
+    expect(j.phase).toBe('done');
+  });
+
+  it('job đang chạy vẫn đổi phase bình thường (không khoá nhầm)', async () => {
+    await putHlsJob(job({ phase: 'fetching' }));
+    await updateHlsJob('j1', { phase: 'muxing' });
+    expect((await getHlsJobs())['j1']!.phase).toBe('muxing');
+  });
+
+  it('job đang chạy vẫn vào được phase kết thúc', async () => {
+    await putHlsJob(job({ phase: 'fetching' }));
+    await updateHlsJob('j1', { phase: 'done' });
+    expect((await getHlsJobs())['j1']!.phase).toBe('done');
   });
 });

@@ -7,6 +7,13 @@ import {
 import { describeError } from '@/utils/errors';
 import { buildDownloadFilename } from '@/utils/filename';
 import {
+  DEAD_OFFSCREEN_ERROR,
+  HEARTBEAT_TIMEOUT_MS,
+  findDeadDownloads,
+  findDeadHlsJobs,
+  singleFlight,
+} from '@/utils/liveness';
+import {
   addChildUrls,
   addTabMedia,
   allocateSpoofRuleId,
@@ -327,10 +334,14 @@ export default defineBackground(() => {
       // biến mất trong hư không. ACK này PHẢI đi qua `respond` — trả Promise ở đây thì trên
       // Chrome <148 nó resolve `undefined` NGAY, và thứ tự ghi storage âm thầm mất.
       if (message.kind === 'hls/progress') {
+        // W2.7 — MỌI tin từ offscreen đều là một nhịp tim: nghe thấy tiếng nó tức là nó còn sống.
+        // Đóng dấu bằng đồng hồ CỦA BACKGROUND (một đồng hồ duy nhất -> không lệch giờ giữa hai
+        // ngữ cảnh, và offscreen chết thì dấu tự nhiên ngừng tiến).
         return respond(
-          updateHlsJob(message.jobId, message.patch).then(
-            (): HlsProgressResponse => ({ ok: true }),
-          ),
+          updateHlsJob(message.jobId, {
+            ...message.patch,
+            lastSeenAt: Date.now(),
+          }).then((): HlsProgressResponse => ({ ok: true })),
         );
       }
       if (message.kind === 'download/blob') {
@@ -349,8 +360,9 @@ export default defineBackground(() => {
       // chrome.storage). ACK qua respond để giữ ĐÚNG THỨ TỰ cập nhật (cùng lý do hls/progress).
       if (message.kind === 'download/progress') {
         const { key, patch } = message;
+        // W2.7 — như hls/progress: mọi tin từ offscreen là bằng chứng nó còn sống.
         return respond(
-          updateDownload(key, patch).then(
+          updateDownload(key, { ...patch, lastSeenAt: Date.now() }).then(
             async (): Promise<DownloadProgressResponse> => {
               // Fetch LỖI (403 giữa chừng/mạng) -> handleBlobDownload KHÔNG bao giờ chạy nên rule
               // spoof của lượt này sẽ RÒ RỈ nguyên phiên nếu không gỡ ở đây (cùng lớp lỗi W2.4).
@@ -365,15 +377,24 @@ export default defineBackground(() => {
         );
       }
       if (message.kind === 'hls/cancel') {
-        void browser.runtime.sendMessage({
-          target: 'offscreen',
-          kind: 'hls/cancel',
-          jobId: message.jobId,
-        });
-        void updateHlsJob(message.jobId, {
-          phase: 'cancelled',
-          error: 'Đã huỷ',
-        });
+        // W2.7 — TRƯỚC: bắn tin rồi ghi 'cancelled' NGAY, không chờ ai. Tin rớt (offscreen chết/chưa
+        // đăng ký listener) thì popup báo "Đã huỷ" trong khi job VẪN CHẠY và vẫn tải file về —
+        // đúng nghĩa nói dối người dùng. NAY: chỉ chốt sau khi offscreen xác nhận đã nhận.
+        const jobId = message.jobId;
+        void (async () => {
+          const delivered = await sendToOffscreen({ kind: 'hls/cancel', jobId });
+          if (delivered) {
+            await updateHlsJob(jobId, { phase: 'cancelled', error: 'Đã huỷ' });
+            return;
+          }
+          // Offscreen KHÔNG nhận được -> nó đã chết, nghĩa là job cũng chết theo (mọi việc tải nằm
+          // trong đó). Vẫn phải chốt về trạng thái kết thúc, nếu không job kẹt 'fetching' mãi —
+          // nhưng nói ĐÚNG lý do, đừng vờ như huỷ êm đẹp.
+          await updateHlsJob(jobId, {
+            phase: 'cancelled',
+            error: 'Đã huỷ (bộ xử lý video đã dừng trước đó).',
+          });
+        })();
         return undefined;
       }
       if (message.kind === 'download/cancel') {
@@ -437,13 +458,10 @@ export default defineBackground(() => {
         delta.state?.current === 'complete' ||
         delta.state?.current === 'interrupted';
       if (finished) {
-        if (entry.blobUrl) {
-          void browser.runtime.sendMessage({
-            target: 'offscreen',
-            kind: 'revoke',
-            url: entry.blobUrl,
-          });
-        }
+        // W2.7 — qua helper: offscreen chết thì blob URL cũng chết theo nó, không có gì để thu hồi
+        // và cũng không được để lại unhandled rejection.
+        if (entry.blobUrl)
+          void sendToOffscreen({ kind: 'revoke', url: entry.blobUrl });
         // Xoá session rule spoof cho lượt tải này (không để tồn suốt phiên). W2.4: theo id riêng.
         // (Progressive đã gỡ ở handleBlobDownload khi fetch xong; trùng nhau vô hại.)
         if (entry.spoofRuleIds?.length)
@@ -536,7 +554,81 @@ export default defineBackground(() => {
     void sweepStaleSpoofRules();
   });
   void sweepStaleSpoofRules();
+
+  // W2.7 — tick dò "bộ xử lý video đã chết". Alarm chứ KHÔNG setInterval: service worker MV3 bị ngủ
+  // bất cứ lúc nào và timer chết theo nó, còn alarm thì đánh thức SW dậy để chạy. Chu kỳ 0.5 phút =
+  // mức dày nhất Chrome cho phép; ngưỡng chết 60s nên tệ nhất user chờ thêm ~30s.
+  browser.alarms.create(DEAD_JOB_ALARM, { periodInMinutes: 0.5 });
+  browser.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name !== DEAD_JOB_ALARM) return;
+    void reapDeadHlsJobs();
+    void reapDeadDownloads();
+  });
+  // Chạy luôn một lượt lúc SW cold-start: nếu SW vừa hồi sinh sau khi cả nó lẫn offscreen bị giết,
+  // job mồ côi phải được chốt NGAY chứ không đợi hết chu kỳ alarm.
+  void reapDeadHlsJobs();
+  void reapDeadDownloads();
 });
+
+const DEAD_JOB_ALARM = 'w27-dead-job-tick';
+
+/**
+ * W2.7 — chốt LỖI cho job mà offscreen đã chết giữa chừng (§2.14).
+ *
+ * Vì sao cần: offscreen chết IM LẶNG — Chrome không bắn sự kiện nào về background. Không có tick
+ * này thì job nằm lại 'fetching' VĨNH VIỄN và popup quay spinner không lời giải thích, đúng kết cục
+ * tệ nhất của một app tải: user không biết nên chờ tiếp hay bấm lại.
+ */
+async function reapDeadHlsJobs(): Promise<void> {
+  try {
+    const jobs = await getHlsJobs();
+    const dead = findDeadHlsJobs(jobs, Date.now(), HEARTBEAT_TIMEOUT_MS);
+    if (dead.length === 0) return;
+    for (const id of dead) {
+      await updateHlsJob(id, {
+        phase: 'error',
+        error: DEAD_OFFSCREEN_ERROR,
+        note: undefined,
+      });
+      // Rule spoof của job chết là rác: nó không tự dọn được nữa (nhánh kết thúc bình thường không
+      // bao giờ chạy). Cùng lớp lỗi rò rỉ W2.4.
+      const ids = jobs[id]?.spoofRuleIds;
+      if (ids?.length) await removeSpoofRules(ids);
+    }
+    console.warn(`[bg] W2.7: chốt lỗi ${dead.length} job do offscreen đã chết`);
+  } catch (e) {
+    // Tick định kỳ KHÔNG được phép ném: ném ở đây là unhandled rejection mỗi 30 giây.
+    console.warn('[bg] tick dò job chết lỗi:', describeError(e));
+  }
+}
+
+/**
+ * W2.7 — chốt LỖI cho lượt tải PROGRESSIVE mà offscreen đã chết giữa lúc fetch.
+ *
+ * Vì sao đường này cũng cần (dễ bỏ sót): W2.5 chuyển .mp4 sang fetch trong offscreen để mang được
+ * Referer spoof — từ đó nó phụ thuộc offscreen y như HLS, nhưng lưới liveness ban đầu chỉ phủ HLS.
+ * ĐÃ ĐO bằng e2e `progressive-offscreen-death`: entry kẹt `in_progress` >150s.
+ */
+async function reapDeadDownloads(): Promise<void> {
+  try {
+    const entries = await getDownloads();
+    const dead = findDeadDownloads(entries, Date.now(), HEARTBEAT_TIMEOUT_MS);
+    if (dead.length === 0) return;
+    for (const key of dead) {
+      await updateDownload(key, {
+        state: 'interrupted',
+        error: DEAD_OFFSCREEN_ERROR,
+      });
+      // Rule spoof của lượt chết không tự dọn được nữa: nhánh kết thúc bình thường (handleBlobDownload
+      // / download/progress 'interrupted') không bao giờ chạy. Cùng lớp rò rỉ W2.4.
+      const ids = entries[key]?.spoofRuleIds;
+      if (ids?.length) await removeSpoofRules(ids);
+    }
+    console.warn(`[bg] W2.7: chốt lỗi ${dead.length} lượt tải do offscreen đã chết`);
+  } catch (e) {
+    console.warn('[bg] tick dò lượt tải chết lỗi:', describeError(e));
+  }
+}
 
 /**
  * W2.2 — bật spoof Referer/Origin ÔM SÁT một cú fetch rồi gỡ ngay trong `finally`.
@@ -647,6 +739,8 @@ async function handleDownload(
       filename,
       state: 'in_progress',
       startedAt: Date.now(),
+      // W2.7 — nhịp tim đầu tiên: phủ cả ca "offscreen chết trước khi kịp nhận việc".
+      lastSeenAt: Date.now(),
       spoofRuleIds: [ruleId],
     });
     await ensureOffscreen();
@@ -827,6 +921,9 @@ async function handleHlsDownload(
       segmentsDone: 0,
       filename,
       tabId,
+      // W2.7 — nhịp tim ĐẦU TIÊN đặt ngay lúc sinh job. Nhờ vậy ca "offscreen chết trước khi kịp
+      // nhận việc" (job kẹt 'queued') cũng có mốc thời gian để tick dò ra, chứ không nằm ngoài lưới.
+      lastSeenAt: Date.now(),
       // Lưu để DỌN ở MỌI nhánh kết thúc (done/error/cancelled), không chỉ nhánh thành công qua
       // handleBlobDownload — W2.3 mở rộng tập host nên rò rỉ khi lỗi sẽ nặng hơn nếu không dọn.
       spoofRuleIds,
@@ -895,11 +992,7 @@ async function handleBlobDownload(
       const cur = (await getDownloads())[key];
       if (cur?.state === 'interrupted') {
         void browser.downloads.cancel(downloadId).catch(() => undefined);
-        void browser.runtime.sendMessage({
-          target: 'offscreen',
-          kind: 'revoke',
-          url: blobUrl,
-        });
+        void sendToOffscreen({ kind: 'revoke', url: blobUrl });
         return;
       }
       // Entry đã có (phase fetch) -> merge id thật + blobUrl; state giữ in_progress (onChanged flip).
@@ -913,11 +1006,7 @@ async function handleBlobDownload(
           state: d.state as DownloadState,
           ...(d.error ? { error: d.error } : {}),
         });
-        void browser.runtime.sendMessage({
-          target: 'offscreen',
-          kind: 'revoke',
-          url: blobUrl,
-        });
+        void sendToOffscreen({ kind: 'revoke', url: blobUrl });
       }
     } else {
       await putDownload({
@@ -968,6 +1057,15 @@ async function handleFfmpegDemo(): Promise<FfmpegDemoResponse> {
       target: 'offscreen',
       kind: 'ffmpeg/demo',
     });
+    // W2.7 — offscreen chết/chưa đăng ký listener thì `sendMessage` resolve UNDEFINED chứ không ném.
+    // Trả thẳng cái đó ra là đưa `undefined` cho popup -> nút "Kiểm tra ffmpeg" im lìm không nói gì.
+    // Hợp đồng của hàm này là LUÔN trả một object đọc được.
+    if (!res || typeof res !== 'object') {
+      return {
+        ok: false,
+        error: 'Bộ xử lý video không trả lời (có thể đã bị trình duyệt thu hồi).',
+      };
+    }
     return res as FfmpegDemoResponse;
   } catch (e) {
     return {
@@ -977,7 +1075,59 @@ async function handleFfmpegDemo(): Promise<FfmpegDemoResponse> {
   }
 }
 
-async function ensureOffscreen(): Promise<void> {
+/**
+ * W2.7 — offscreen document có đang SỐNG không?
+ *
+ * `getContexts` là câu hỏi trực tiếp tới trình duyệt, khác hẳn cách cũ "cứ gửi rồi xem có ném
+ * không": offscreen chết là một NHÁNH BÌNH THƯỜNG cần xử lý, không phải một rejection bất ngờ.
+ * (API có từ Chrome 116; thiếu thì trả `true` để giữ nguyên hành vi cũ thay vì chặn oan.)
+ */
+async function isOffscreenAlive(): Promise<boolean> {
+  const rt = browser.runtime as typeof browser.runtime & {
+    getContexts?: (f: {
+      contextTypes: string[];
+    }) => Promise<{ length: number }[]>;
+  };
+  if (typeof rt.getContexts !== 'function') return true;
+  try {
+    const ctxs = await rt.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+    return ctxs.length > 0;
+  } catch {
+    return true; // API lỗi -> đừng chặn oan, cứ thử gửi như cũ.
+  }
+}
+
+/**
+ * W2.7 — gửi tin sang offscreen, KHÔNG BAO GIỜ ném và không bao giờ tạo unhandled rejection.
+ *
+ * Trả `true` nếu offscreen thực sự nhận được. Trước W2.7 hai chỗ (`hls/cancel`, `revoke`) gọi
+ * `sendMessage` trần không `.catch` -> offscreen chết thì sinh unhandled rejection, mà tệ hơn là
+ * caller vẫn đinh ninh tin đã tới nơi.
+ */
+async function sendToOffscreen(msg: Record<string, unknown>): Promise<boolean> {
+  if (!(await isOffscreenAlive())) return false;
+  try {
+    await browser.runtime.sendMessage({ target: 'offscreen', ...msg });
+    return true;
+  } catch (e) {
+    // Ca thường gặp: offscreen vừa chết GIỮA lúc dò và lúc gửi (đua nhau), hoặc chưa kịp đăng ký
+    // listener. Không phải lỗi chí mạng — caller tự quyết dựa vào `false`.
+    console.warn('[bg] không gửi được tin sang offscreen:', describeError(e));
+    return false;
+  }
+}
+
+/**
+ * W2.7 — `singleFlight` diệt race "hai job cùng gọi createDocument".
+ *
+ * Trước W2.7: hai `handleHlsDownload` gọi sát nhau -> cả hai vào `createDocument`; cái thứ hai ném
+ * "single offscreen document" rồi bị NUỐT như thể bình thường, nên nó bắn `hls/run` vào một
+ * document CÓ THỂ chưa đăng ký listener xong -> job kẹt 'queued' vĩnh viễn, không một dòng lỗi.
+ * Nay lượt thứ hai chờ ĐÚNG promise của lượt đầu, nên khi nó chạy tiếp thì document đã sẵn sàng.
+ */
+const ensureOffscreen = singleFlight(async (): Promise<void> => {
+  // Dò trước: đã sống thì khỏi cần đụng createDocument (khỏi phải bắt lỗi "đã tồn tại" cho vui).
+  if (await isOffscreenAlive()) return;
   try {
     await browser.offscreen.createDocument({
       url: 'offscreen.html',
@@ -991,7 +1141,7 @@ async function ensureOffscreen(): Promise<void> {
     // và job sẽ treo mãi không lời giải thích.
     if (!/single offscreen document/i.test(describeError(e))) throw e;
   }
-}
+});
 
 // Trần số host được spoof cho một job (VDH cap tổng ~750 rule; ở đây một job hiếm khi quá vài host,
 // đặt trần để một manifest dị dạng không sinh hàng trăm rule).

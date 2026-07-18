@@ -2,6 +2,27 @@
 
 Mọi thay đổi đáng chú ý được ghi ở đây. Định dạng theo [Keep a Changelog], phiên bản theo [SemVer].
 
+## [Chưa phát hành]
+
+### Sửa lỗi — HẾT SPINNER QUAY VĨNH VIỄN
+
+- **Bộ xử lý video chết giữa chừng nay được phát hiện và báo tử tế.** Bộ phận ghép video (offscreen)
+  có thể bị trình duyệt thu hồi bất cứ lúc nào — hết bộ nhớ, đóng qua Task Manager, tab crash — và
+  nó chết **hoàn toàn im lặng**. Trước bản này, lượt tải nằm lại ở "Đang tải…" tới lúc bạn đóng
+  trình duyệt: không lỗi, không thông báo, chỉ một vòng xoay không bao giờ dừng. Nay lượt tải chuyển
+  sang **lỗi trong khoảng 90 giây** kèm câu giải thích thật ("Bộ xử lý video đã dừng đột ngột…") và
+  gợi ý chọn chất lượng thấp hơn nếu video quá lớn.
+- **Bấm Huỷ không còn nói dối.** Trước đây popup báo "Đã huỷ" ngay lập tức kể cả khi lệnh huỷ không
+  tới nơi — lượt tải **vẫn chạy và vẫn tải file về** trong nền. Nay chỉ báo đã huỷ sau khi bộ xử lý
+  xác nhận; nếu nó đã chết thì nói đúng như vậy.
+- **Hai lượt tải bấm sát nhau không còn giẫm chân nhau** khi cùng khởi động bộ xử lý video (trước
+  đây lượt thứ hai có thể gửi việc vào một bộ xử lý chưa sẵn sàng và kẹt ở "Đang chờ" vĩnh viễn).
+- **Tải file .mp4 trực tiếp cũng được bảo vệ như trên** — trước đây nếu bộ xử lý chết giữa lúc tải
+  .mp4 thì lượt tải đó kẹt "Đang tải…" mãi mãi.
+- **Lượt tải đã kết thúc không còn "sống lại".** Trước đây bấm Huỷ xong, lượt tải vẫn có thể nhảy
+  ngược về "Đang tải" một lúc rồi mới dừng hẳn.
+- **Nút "Kiểm tra ffmpeg"** không còn im lìm khi bộ xử lý không trả lời — nay báo rõ lý do.
+
 ## [0.7.0] - 2026-07-18
 
 ### Sửa lỗi — VIDEO TẢI VỀ NAY ĐÃ CÓ TIẾNG

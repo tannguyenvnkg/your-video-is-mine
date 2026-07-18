@@ -9,6 +9,9 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { decryptAes128Cbc, hlsSegmentIv } from '@/utils/crypto';
 import { describeError } from '@/utils/errors';
 import { parseHlsSegments } from '@/utils/hls';
+// An toàn với ràng buộc "offscreen KHÔNG có chrome.storage": liveness.ts chỉ import KIỂU từ
+// storage.ts (bị xoá lúc biên dịch) nên không kéo theo một dòng chrome.storage nào.
+import { HEARTBEAT_INTERVAL_MS } from '@/utils/liveness';
 import { CancelledError, fetchWithRetry, timeoutSignal } from '@/utils/retry';
 import {
   CHUNK_THRESHOLD_BYTES,
@@ -393,6 +396,7 @@ async function runHlsJob(
   const throwIfCancelled = () => {
     if (ac.signal.aborted) throw new CancelledError('Đã huỷ');
   };
+
   // Theo dõi mọi file đã ghi vào FS ảo để DỌN trong finally (cả khi lỗi/huỷ).
   const writtenFiles = new Set<string>();
   let ff: FFmpeg | null = null;
@@ -594,7 +598,26 @@ async function runHlsJob(
 function enqueueHlsJob(
   req: Extract<OffscreenRequest, { kind: 'hls/run' }>,
 ): void {
-  jobChain = jobChain.then(() => runHlsJob(req)).catch(() => undefined);
+  // W2.7 — NHỊP TIM. Offscreen có thể bị Chrome giết bất cứ lúc nào (Task Manager, hết RAM, crash)
+  // và nó chết IM LẶNG: không sự kiện nào báo về background, job nằm lại 'fetching' vĩnh viễn.
+  // Nhịp này là bằng chứng SỐNG duy nhất. Patch RỖNG là cố ý — background chỉ cần biết "vẫn còn
+  // tiếng", nó tự đóng dấu `lastSeenAt` bằng đồng hồ của chính nó.
+  //
+  // 🔴 ĐẬP TỪ LÚC XẾP HÀNG, KHÔNG PHẢI TỪ LÚC CHẠY — đã ĐO bằng e2e `queued-not-reaped`: job chạy
+  // TUẦN TỰ (chỉ 1 instance ffmpeg), nên job #2 nằm im trong hàng đợi suốt thời gian job #1 tải.
+  // Đặt nhịp tim trong `runHlsJob` thì job #2 im >60s và bị tick W2.7 **GIẾT OAN sau 61,2s** dù
+  // offscreen hoàn toàn khoẻ. Giết oan một lượt tải khoẻ còn TỆ HƠN cái treo mà W2.7 sinh ra để
+  // chữa — đúng bẫy "trần theo tổng thời gian" mà W2.5/W2.6 đã trả giá hai lần. Đừng dời vào trong.
+  const heartbeat = setInterval(() => {
+    void updateHlsJob(req.jobId, {});
+  }, HEARTBEAT_INTERVAL_MS);
+  jobChain = jobChain
+    .then(() => runHlsJob(req))
+    .catch(() => undefined)
+    // Dọn ở ĐÂY chứ không trong `runHlsJob`: nhịp tim sinh ra trước khi job chạy nên phải chết sau
+    // khi job kết thúc. Còn đập tiếp = mỗi 5 giây một message rác, và một job đã chốt 'error' sẽ bị
+    // nhịp tim lỡ tay hồi sinh mốc thời gian.
+    .finally(() => clearInterval(heartbeat));
 }
 
 function revokeBlob(url: string): void {
@@ -746,6 +769,14 @@ async function runProgressiveDownload(
   const ac = new AbortController();
   progressiveAborts.set(key, ac);
 
+  // W2.7 — NHỊP TIM LIVENESS (khác hẳn `heartbeat` watchdog bên dưới: cái đó canh SERVER câm, cái
+  // này chứng minh OFFSCREEN còn sống). W2.5 đưa .mp4 qua offscreen nên đường này phụ thuộc offscreen
+  // y như HLS; offscreen bị giết ⇒ `finally` không chạy ⇒ không ai gửi 'interrupted' ⇒ entry kẹt
+  // `in_progress` vĩnh viễn (ĐÃ ĐO: e2e `progressive-offscreen-death` kẹt >150s trước bản vá này).
+  const livenessPing = setInterval(() => {
+    void updateProgressiveDownload(key, {});
+  }, HEARTBEAT_INTERVAL_MS);
+
   // Watchdog chống treo: không tiến triển trong PROGRESSIVE_STALL_MS -> abort. `stalled` phân biệt
   // với user-cancel để báo lỗi đúng (treo mạng vs bấm Hủy).
   let stalled = false;
@@ -857,6 +888,7 @@ async function runProgressiveDownload(
     });
   } finally {
     if (watchdog) clearTimeout(watchdog);
+    clearInterval(livenessPing);
     progressiveAborts.delete(key);
   }
 }
