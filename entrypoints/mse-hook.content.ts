@@ -73,7 +73,11 @@ export default defineContentScript({
       const d = e.data as { __yvim?: string; kind?: string } | null;
       if (!d || d.__yvim !== TAG || d.kind !== 'isolated-ready') return;
       for (const p of pendingDrm) {
-        post({ kind: 'drm-detected', keySystem: p.keySystem, source: p.source });
+        post({
+          kind: 'drm-detected',
+          keySystem: p.keySystem,
+          source: p.source,
+        });
       }
     });
 

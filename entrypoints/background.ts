@@ -5,10 +5,7 @@ import {
   type BuildMediaInput,
 } from '@/utils/detect';
 import { describeError } from '@/utils/errors';
-import {
-  DRM_UNSUPPORTED_ERROR,
-  drmNameFromKeySystem,
-} from '@/utils/drm';
+import { DRM_UNSUPPORTED_ERROR, drmNameFromKeySystem } from '@/utils/drm';
 import { buildDownloadFilename } from '@/utils/filename';
 import {
   DEAD_OFFSCREEN_ERROR,

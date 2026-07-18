@@ -72,7 +72,8 @@ export default defineContentScript({
     window.addEventListener('message', (e: MessageEvent) => {
       // Bỏ qua chính cái ping của mình (xem handshake bên dưới) — nếu không sẽ tự xử lý tin của
       // mình và, tệ hơn, vòng lặp postMessage.
-      if ((e.data as { kind?: string } | null)?.kind === 'isolated-ready') return;
+      if ((e.data as { kind?: string } | null)?.kind === 'isolated-ready')
+        return;
       const data = e.data as {
         __yvim?: string;
         kind?: string;
