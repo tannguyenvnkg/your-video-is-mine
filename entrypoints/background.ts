@@ -41,10 +41,9 @@ import {
 import {
   childUrlsOfMaster,
   parseHlsManifest,
-  parseHlsSegments,
   spoofTargetsFromSegments,
 } from '@/utils/hls';
-import { parseDashManifest } from '@/utils/dash';
+import { parseDashManifest, parseTrackSegments } from '@/utils/dash';
 import {
   buildRefererSpoofRule,
   hostFromUrl,
@@ -317,6 +316,9 @@ export default defineBackground(() => {
             message.bandwidth,
             message.audioUrl,
             message.tabId,
+            message.mediaType,
+            message.variantId,
+            message.audioId,
           ),
         );
       }
@@ -328,6 +330,9 @@ export default defineBackground(() => {
             message.tabId,
             message.height,
             message.audioUrl,
+            message.mediaType,
+            message.variantId,
+            message.audioId,
           ),
         );
       }
@@ -832,6 +837,9 @@ async function handleHlsEstimate(
   bandwidth?: number,
   audioUrl?: string,
   tabId?: number,
+  mediaType?: 'hls' | 'dash',
+  variantId?: string,
+  audioId?: string,
 ): Promise<HlsEstimateResponse> {
   // W7.1 — cờ DRM của TAB (EME) là tín hiệu ĐỘC LẬP với playlist: SAMPLE-AES lộ trong playlist,
   // còn Widevine/PlayReady KHÔNG để lại dấu nào ở đó mà chỉ lộ qua EME. Biết trước thì trả lời
@@ -850,7 +858,14 @@ async function handleHlsEstimate(
   const pageUrl = await pageUrlFor(tabId, variantUrl);
   try {
     return await withSpoofedFetch(variantUrl, pageUrl, () =>
-      estimateFromPlaylists(variantUrl, bandwidth, audioUrl),
+      estimateFromPlaylists(
+        variantUrl,
+        bandwidth,
+        audioUrl,
+        mediaType,
+        variantId,
+        audioId,
+      ),
     );
   } catch (e) {
     if (e instanceof HttpError) {
@@ -867,6 +882,9 @@ async function estimateFromPlaylists(
   variantUrl: string,
   bandwidth?: number,
   audioUrl?: string,
+  mediaType?: 'hls' | 'dash',
+  variantId?: string,
+  audioId?: string,
 ): Promise<HlsEstimateResponse> {
   // Mã HTTP PHẢI sống sót tới tay user: "Máy chủ trả mã 403." chỉ thẳng vào chống hotlink,
   // còn "mạng hoặc CORS" chỉ sai hướng hoàn toàn — đúng kiểu "lý do thật bốc hơi" mà chính
@@ -874,7 +892,7 @@ async function estimateFromPlaylists(
   const fetchParse = async (url: string) => {
     const res = await fetch(url, { credentials: 'include' });
     if (!res.ok) throw new HttpError(res.status);
-    return parseHlsSegments(await res.text(), url);
+    return parseTrackSegments(await res.text(), url, mediaType, variantId);
   };
   // W1.1: job sẽ tải CẢ playlist tiếng -> ước lượng phải soi cả nó, nếu không popup báo
   // "10 segment" rồi thanh tiến trình chạy tới 21 — trông như lỗi.
@@ -883,10 +901,25 @@ async function estimateFromPlaylists(
   // thể khác host hình nên spoof của estimate (chỉ phủ host hình) không tới nó -> trên site chống
   // hotlink, playlist tiếng rất dễ 403 ở đây rồi vẫn tải ngon ở handleHlsDownload. Để Promise.all
   // reject thì user mất luôn nút tải vì một con số ước lượng — đổi một phiền toái nhỏ lấy ngõ cụt.
-  const [parsed, audio] = await Promise.all([
-    fetchParse(variantUrl),
-    audioUrl ? fetchParse(audioUrl).catch(() => null) : Promise.resolve(null),
-  ]);
+  // W1.5 — DASH để hình VÀ tiếng trong CÙNG một file .mpd, nên `variantUrl === audioUrl`. Gọi
+  // fetchParse hai lần sẽ tải nguyên manifest hai lượt cho đúng một con số ước lượng; tải một lần
+  // rồi parse hai track là đủ và không đụng mạng thêm.
+  let parsed: Awaited<ReturnType<typeof fetchParse>>;
+  let audio: Awaited<ReturnType<typeof fetchParse>> | null;
+  if (mediaType === 'dash') {
+    const res = await fetch(variantUrl, { credentials: 'include' });
+    if (!res.ok) throw new HttpError(res.status);
+    const text = await res.text();
+    parsed = parseTrackSegments(text, variantUrl, 'dash', variantId);
+    audio = audioId
+      ? parseTrackSegments(text, variantUrl, 'dash', audioId)
+      : null;
+  } else {
+    [parsed, audio] = await Promise.all([
+      fetchParse(variantUrl),
+      audioUrl ? fetchParse(audioUrl).catch(() => null) : Promise.resolve(null),
+    ]);
+  }
   // Thời lượng là MAX chứ KHÔNG phải tổng: hình và tiếng chạy SONG SONG, không nối đuôi.
   const durationSec = Math.max(parsed.totalDuration, audio?.totalDuration ?? 0);
   // BANDWIDTH của #EXT-X-STREAM-INF đã gồm cả rendition tiếng (RFC 8216 §4.3.4.2) -> KHÔNG
@@ -910,6 +943,9 @@ async function handleHlsDownload(
   tabId: number,
   height?: number,
   audioUrl?: string,
+  mediaType?: 'hls' | 'dash',
+  variantId?: string,
+  audioId?: string,
 ): Promise<HlsDownloadResponse> {
   // W7.1 — RANH GIỚI CỨNG §7: từ chối NGAY, trước khi áp một rule spoof hay bắn một request nào.
   const drmBlocked = await drmBlockReason(tabId);
@@ -946,14 +982,41 @@ async function handleHlsDownload(
     // host với playlist (key AES gần như LUÔN khác, lại là thứ hay kiểm Referer nhất) -> bỏ sót là
     // job tới 'fetching' rồi mọi segment 403. Rule áp XONG ở đây, TRƯỚC khi offscreen tải segment.
     // Best-effort: playlist 403 ở bước này thì offscreen vẫn tự thử lại; ta chỉ mất phần "khác host".
-    for (const pl of audioUrl ? [variantUrl, audioUrl] : [variantUrl]) {
+    //
+    // W1.5 — parse theo ĐÚNG định dạng: nạp .mpd vào parser HLS thì ra 0 segment mà KHÔNG ném lỗi
+    // -> 0 host segment được spoof -> job chạy tới 'fetching' rồi 403 sạch, im lặng.
+    // DASH để cả hình lẫn tiếng trong một .mpd nên dedupe theo URL: cùng một tài liệu, hai track.
+    const playlistJobs: { url: string; trackId?: string }[] =
+      mediaType === 'dash'
+        ? [
+            { url: variantUrl, ...(variantId ? { trackId: variantId } : {}) },
+            ...(audioId ? [{ url: variantUrl, trackId: audioId }] : []),
+          ]
+        : (audioUrl ? [variantUrl, audioUrl] : [variantUrl]).map((url) => ({
+            url,
+          }));
+    const textCache = new Map<string, string | null>();
+    for (const job of playlistJobs) {
       try {
-        const res = await fetch(pl, { credentials: 'include' });
-        if (!res.ok) continue;
-        const parsed = parseHlsSegments(await res.text(), pl);
+        if (!textCache.has(job.url)) {
+          const res = await fetch(job.url, { credentials: 'include' });
+          textCache.set(job.url, res.ok ? await res.text() : null);
+        }
+        const text = textCache.get(job.url);
+        if (text == null) continue;
+        const parsed = parseTrackSegments(
+          text,
+          job.url,
+          mediaType,
+          job.trackId,
+        );
         for (const url of spoofTargetsFromSegments(parsed.segments)) {
           await spoof(url);
         }
+        // DASH SegmentBase: cả representation chỉ là MỘT file .mp4 tải thẳng được -> không có
+        // segment nào để ghép. Đẩy sang luồng progressive (W2.5) thay vì để offscreen báo
+        // "playlist không có segment nào" — đúng chữ nhưng sai hẳn nguyên nhân.
+        if (parsed.directUrl) await spoof(parsed.directUrl);
       } catch {
         // best-effort — không được để việc dò host làm hỏng đường tải.
       }
@@ -999,6 +1062,10 @@ async function handleHlsDownload(
         mediaUrl,
         tabId,
         spoofRuleIds,
+        // W1.5 — thiếu 3 trường này thì offscreen nạp .mpd vào parser HLS và job chết câm.
+        mediaType,
+        variantId,
+        audioId,
         // Offscreen không đọc được settings (không có chrome.storage) -> đọc hộ rồi truyền vào.
         concurrency: await getConcurrency(),
       })

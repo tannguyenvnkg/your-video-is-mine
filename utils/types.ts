@@ -59,6 +59,11 @@ export interface MediaItem {
  * `messages.ts` lần nữa.
  */
 export interface RenditionInfo {
+  /**
+   * W1.5 — danh tính track khi `uri` KHÔNG phân biệt nổi (DASH: mọi track chung một `.mpd`).
+   * HLS không có id tự nhiên nên bỏ trống và vẫn định danh bằng `uri` như cũ.
+   */
+  id?: string;
   /** GROUP-ID của `#EXT-X-MEDIA`; variant trỏ tới group qua `AUDIO=` / `SUBTITLES=`. */
   groupId: string;
   /** NAME — key trong group, cũng là nhãn hiển thị cho user. */

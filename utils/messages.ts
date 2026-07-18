@@ -72,6 +72,19 @@ export type RuntimeMessage =
       audioUrl?: string;
       /** W2.2: tra `media.pageUrl` để spoof Referer trước khi fetch playlist ước lượng. */
       tabId?: number;
+      /**
+       * W1.5 — định dạng manifest. Vắng = 'hls' (mọi lượt tải trước W1.5).
+       *
+       * 🔴 URL KHÔNG định danh nổi track của DASH: với SegmentTemplate thì `resolvedUri` của MỌI
+       * representation (kể cả tiếng) đều là chính file `.mpd`. Vì vậy phải kèm `variantId`/`audioId`
+       * — thiếu chúng thì tầng dưới bốc đại representation đầu tiên: user chọn 1080p nhận về 240p,
+       * hoặc tải nhầm tiếng làm hình, KHÔNG một dòng lỗi nào.
+       */
+      mediaType?: ManifestKind;
+      /** W1.5 — id representation hình (DASH). Xem `VariantInfo.id`. */
+      variantId?: string;
+      /** W1.5 — id representation tiếng (DASH). Xem `RenditionInfo.id`. */
+      audioId?: string;
     }
   // popup -> background: bắt đầu tải & ghép HLS.
   | {
@@ -86,6 +99,19 @@ export type RuntimeMessage =
        * W4.4 (chọn ngôn ngữ) chỉ việc gửi URL khác vào đây, KHÔNG phải đổi giao thức lần nữa.
        */
       audioUrl?: string;
+      /**
+       * W1.5 — định dạng manifest. Vắng = 'hls' (mọi lượt tải trước W1.5).
+       *
+       * 🔴 URL KHÔNG định danh nổi track của DASH: với SegmentTemplate thì `resolvedUri` của MỌI
+       * representation (kể cả tiếng) đều là chính file `.mpd`. Vì vậy phải kèm `variantId`/`audioId`
+       * — thiếu chúng thì tầng dưới bốc đại representation đầu tiên: user chọn 1080p nhận về 240p,
+       * hoặc tải nhầm tiếng làm hình, KHÔNG một dòng lỗi nào.
+       */
+      mediaType?: ManifestKind;
+      /** W1.5 — id representation hình (DASH). Xem `VariantInfo.id`. */
+      variantId?: string;
+      /** W1.5 — id representation tiếng (DASH). Xem `RenditionInfo.id`. */
+      audioId?: string;
     }
   // offscreen -> background: cập nhật tiến trình job HLS.
   // Offscreen KHÔNG ghi thẳng chrome.storage được (chỉ có chrome.runtime) -> mọi thay đổi state
@@ -141,6 +167,19 @@ export type OffscreenRequest =
        * offscreen KHÔNG có `chrome.storage` (chỉ có `chrome.runtime`) nên không tự đọc được.
        */
       concurrency: number;
+      /**
+       * W1.5 — định dạng manifest. Vắng = 'hls' (mọi lượt tải trước W1.5).
+       *
+       * 🔴 URL KHÔNG định danh nổi track của DASH: với SegmentTemplate thì `resolvedUri` của MỌI
+       * representation (kể cả tiếng) đều là chính file `.mpd`. Vì vậy phải kèm `variantId`/`audioId`
+       * — thiếu chúng thì tầng dưới bốc đại representation đầu tiên: user chọn 1080p nhận về 240p,
+       * hoặc tải nhầm tiếng làm hình, KHÔNG một dòng lỗi nào.
+       */
+      mediaType?: ManifestKind;
+      /** W1.5 — id representation hình (DASH). Xem `VariantInfo.id`. */
+      variantId?: string;
+      /** W1.5 — id representation tiếng (DASH). Xem `RenditionInfo.id`. */
+      audioId?: string;
     }
   | { target: 'offscreen'; kind: 'revoke'; url: string }
   | { target: 'offscreen'; kind: 'hls/cancel'; jobId: string }
@@ -216,6 +255,9 @@ export async function requestHlsEstimate(
   bandwidth?: number,
   audioUrl?: string,
   tabId?: number,
+  mediaType?: ManifestKind,
+  variantId?: string,
+  audioId?: string,
 ): Promise<HlsEstimateResponse> {
   try {
     const res = await browser.runtime.sendMessage({
@@ -224,6 +266,9 @@ export async function requestHlsEstimate(
       bandwidth,
       audioUrl,
       tabId,
+      mediaType,
+      variantId,
+      audioId,
     });
     return res as HlsEstimateResponse;
   } catch {
@@ -237,6 +282,9 @@ export async function requestHlsDownload(
   tabId: number,
   height?: number,
   audioUrl?: string,
+  mediaType?: ManifestKind,
+  variantId?: string,
+  audioId?: string,
 ): Promise<HlsDownloadResponse> {
   try {
     const res = await browser.runtime.sendMessage({
@@ -246,6 +294,9 @@ export async function requestHlsDownload(
       tabId,
       height,
       audioUrl,
+      mediaType,
+      variantId,
+      audioId,
     });
     return res as HlsDownloadResponse;
   } catch {

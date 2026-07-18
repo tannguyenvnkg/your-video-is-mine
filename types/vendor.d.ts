@@ -111,16 +111,64 @@ declare module 'mpd-parser' {
     [key: string]: unknown;
   }
 
+  /** Đoạn byte — cùng shape với HLS: `offset` là byte đầu tiên (tính từ 0). */
+  export interface MpdByteRange {
+    length: number;
+    offset: number;
+  }
+
+  /**
+   * Một segment DASH đã được mpd-parser dựng sẵn.
+   * ⚠️ `map` là init segment và mpd-parser gắn nó vào TỪNG segment — với MPD đa Period, mỗi
+   * Period mang `map.resolvedUri` KHÁC nhau (đã đo, ghim ở utils/dash.test.ts).
+   */
+  export interface MpdSegment {
+    uri?: string;
+    resolvedUri?: string;
+    duration?: number;
+    /** mpd-parser đánh dấu segment ĐẦU của mỗi Period sau Period đầu tiên. */
+    discontinuity?: boolean;
+    byterange?: MpdByteRange;
+    map?: {
+      uri?: string;
+      resolvedUri?: string;
+      byterange?: MpdByteRange;
+    };
+    [key: string]: unknown;
+  }
+
   export interface MpdPlaylist {
     uri?: string;
     /** URL tuyệt đối đã resolve (mpd-parser điền sẵn). */
     resolvedUri?: string;
     attributes?: MpdAttributes;
+    segments?: MpdSegment[];
+    /**
+     * Chỉ số các segment mở đầu một Period mới, do mpd-parser tính khi khâu nhiều Period.
+     * 🔬 ĐÃ ĐO: đây là tín hiệu đa-Period LUÔN có mặt — khác `map.resolvedUri`, thứ có thể GIỐNG
+     * nhau giữa các Period khi template init nội suy ra cùng một URI.
+     */
+    discontinuityStarts?: number[];
+    [key: string]: unknown;
+  }
+
+  /** Một AdaptationSet tiếng, đã dàn theo mediaGroups.AUDIO[group][label]. */
+  export interface MpdAudioRendition {
+    language?: string;
+    default?: boolean;
+    autoselect?: boolean;
+    playlists?: MpdPlaylist[];
+    [key: string]: unknown;
+  }
+
+  export interface MpdMediaGroups {
+    AUDIO?: Record<string, Record<string, MpdAudioRendition>>;
     [key: string]: unknown;
   }
 
   export interface MpdManifest {
     playlists?: MpdPlaylist[];
+    mediaGroups?: MpdMediaGroups;
     [key: string]: unknown;
   }
 

@@ -15,7 +15,7 @@
 //
 // Chạy: pnpm e2e:fixture   (cần `pnpm build` trước; cần ffprobe cho phần kiểm thời lượng)
 
-import { startFixtureServer } from './fixture-server.mjs';
+import { startFixtureServer, startDemuxedServer } from './fixture-server.mjs';
 import {
   requireBuild,
   withBrowser as withBrowserRaw,
@@ -54,11 +54,17 @@ async function runDownload({ gate, segmentHost }) {
         [srv.mediaUrl, srv.masterUrl],
       );
       if (!start?.ok) {
-        return { ok: false, detail: `hls/download bị từ chối: ${JSON.stringify(start)}` };
+        return {
+          ok: false,
+          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+        };
       }
       const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
       if (!job) {
-        return { ok: false, detail: `job TREO sau ${JOB_TIMEOUT_MS / 1000}s (không done/error)` };
+        return {
+          ok: false,
+          detail: `job TREO sau ${JOB_TIMEOUT_MS / 1000}s (không done/error)`,
+        };
       }
       if (job.phase !== 'done') {
         const b = srv.blocked().length;
@@ -71,21 +77,41 @@ async function runDownload({ gate, segmentHost }) {
       // đã bị Playwright đổi hướng, xem chú thích ở waitDownloadedFile().
       const wantName = `${DOWNLOAD_FOLDER}/media.mp4`;
       if (job.filename !== wantName) {
-        return { ok: false, detail: `tên file dự định sai: "${job.filename}", mong đợi "${wantName}"` };
+        return {
+          ok: false,
+          detail: `tên file dự định sai: "${job.filename}", mong đợi "${wantName}"`,
+        };
       }
       const file = await waitDownloadedFile(page, 30_000);
-      if (!file) return { ok: false, detail: 'job done nhưng KHÔNG có file nào rơi xuống đĩa' };
+      if (!file)
+        return {
+          ok: false,
+          detail: 'job done nhưng KHÔNG có file nào rơi xuống đĩa',
+        };
       if (file.state !== 'complete') {
-        return { ok: false, detail: `download ${file.state}: ${file.error ?? '?'}` };
+        return {
+          ok: false,
+          detail: `download ${file.state}: ${file.error ?? '?'}`,
+        };
       }
       if (!existsSync(file.filename)) {
-        return { ok: false, detail: `downloads báo complete nhưng file không tồn tại: ${file.filename}` };
+        return {
+          ok: false,
+          detail: `downloads báo complete nhưng file không tồn tại: ${file.filename}`,
+        };
       }
       const size = statSync(file.filename).size;
       const probe = probeFile(file.filename);
-      if (probe.error) return { ok: false, detail: `ffprobe không đọc được file ra: ${probe.error}` };
+      if (probe.error)
+        return {
+          ok: false,
+          detail: `ffprobe không đọc được file ra: ${probe.error}`,
+        };
       if (!probe.codecs.includes('video')) {
-        return { ok: false, detail: `file ra KHÔNG có track hình (streams: ${probe.codecs.join(',') || 'rỗng'})` };
+        return {
+          ok: false,
+          detail: `file ra KHÔNG có track hình (streams: ${probe.codecs.join(',') || 'rỗng'})`,
+        };
       }
       // §2.6: nhảy cóc segment -> THIẾU KHUNG HÌNH (thời lượng thì không đổi — xem probeFile).
       // Dung sai ±2 khung: remux -c copy có thể lệch 1 khung ở mép, nhưng rơi 1 segment = -10 khung.
@@ -134,7 +160,10 @@ async function runSegmentStall() {
         [srv.mediaUrl, srv.masterUrl],
       );
       if (!start?.ok) {
-        return { ok: false, detail: `hls/download bị từ chối: ${JSON.stringify(start)}` };
+        return {
+          ok: false,
+          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+        };
       }
       const t0 = Date.now();
       const job = await waitJob(page, start.jobId, budgetMs);
@@ -146,7 +175,10 @@ async function runSegmentStall() {
         };
       }
       if (job.phase !== 'error') {
-        return { ok: false, detail: `mong đợi phase 'error', nhận '${job.phase}' sau ${secs}s` };
+        return {
+          ok: false,
+          detail: `mong đợi phase 'error', nhận '${job.phase}' sau ${secs}s`,
+        };
       }
       return {
         ok: true,
@@ -187,7 +219,10 @@ async function runOffscreenDeath() {
         [srv.mediaUrl, srv.masterUrl],
       );
       if (!start?.ok) {
-        return { ok: false, detail: `hls/download bị từ chối: ${JSON.stringify(start)}` };
+        return {
+          ok: false,
+          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+        };
       }
       // Chờ job thực sự vào 'fetching' rồi mới giết — giết sớm quá thì ta đo nhầm ca "chưa nhận việc".
       let reached = false;
@@ -202,7 +237,11 @@ async function runOffscreenDeath() {
         }
         await new Promise((r) => setTimeout(r, 250));
       }
-      if (!reached) return { ok: false, detail: 'job không vào được phase fetching để giết offscreen' };
+      if (!reached)
+        return {
+          ok: false,
+          detail: 'job không vào được phase fetching để giết offscreen',
+        };
 
       const killed = await page.evaluate(async () => {
         try {
@@ -212,7 +251,8 @@ async function runOffscreenDeath() {
           return String(e?.message ?? e);
         }
       });
-      if (killed !== true) return { ok: false, detail: `không giết được offscreen: ${killed}` };
+      if (killed !== true)
+        return { ok: false, detail: `không giết được offscreen: ${killed}` };
       console.log('      [kill] offscreen đã bị đóng — nhịp tim dừng từ đây');
 
       const t0 = Date.now();
@@ -225,7 +265,10 @@ async function runOffscreenDeath() {
         };
       }
       if (job.phase !== 'error') {
-        return { ok: false, detail: `mong đợi phase 'error', nhận '${job.phase}' sau ${secs}s` };
+        return {
+          ok: false,
+          detail: `mong đợi phase 'error', nhận '${job.phase}' sau ${secs}s`,
+        };
       }
       // Thông báo phải nói ĐÚNG chuyện gì xảy ra: "bộ xử lý đã dừng", không phải lỗi mạng chung chung.
       if (!/dừng đột ngột/.test(job.error ?? '')) {
@@ -234,7 +277,10 @@ async function runOffscreenDeath() {
           detail: `báo lỗi sau ${secs}s nhưng SAI lý do: "${job.error ?? '?'}"`,
         };
       }
-      return { ok: true, detail: `job báo lỗi sau ${secs}s, đúng lý do: "${job.error}"` };
+      return {
+        ok: true,
+        detail: `job báo lỗi sau ${secs}s, đúng lý do: "${job.error}"`,
+      };
     });
   } finally {
     await srv.close();
@@ -277,11 +323,15 @@ async function runDrmRefused() {
       if (systems.length === 0) {
         return {
           ok: false,
-          detail: 'KHÔNG phát hiện được DRM — ranh giới §7 vẫn chỉ là lời tuyên bố suông',
+          detail:
+            'KHÔNG phát hiện được DRM — ranh giới §7 vẫn chỉ là lời tuyên bố suông',
         };
       }
       if (!systems.includes('Widevine')) {
-        return { ok: false, detail: `phát hiện DRM nhưng sai tên: ${JSON.stringify(systems)}` };
+        return {
+          ok: false,
+          detail: `phát hiện DRM nhưng sai tên: ${JSON.stringify(systems)}`,
+        };
       }
 
       // Cửa 1: HLS. Phải bị từ chối, kèm lý do đọc được.
@@ -296,16 +346,26 @@ async function runDrmRefused() {
         [srv.mediaUrl, srv.masterUrl, tabId],
       );
       if (hls?.ok !== false) {
-        return { ok: false, detail: `hls/download KHÔNG bị chặn trên tab DRM: ${JSON.stringify(hls)}` };
+        return {
+          ok: false,
+          detail: `hls/download KHÔNG bị chặn trên tab DRM: ${JSON.stringify(hls)}`,
+        };
       }
       if (!/DRM/i.test(hls.error ?? '')) {
-        return { ok: false, detail: `bị chặn nhưng lý do không nói tới DRM: "${hls.error}"` };
+        return {
+          ok: false,
+          detail: `bị chặn nhưng lý do không nói tới DRM: "${hls.error}"`,
+        };
       }
 
       // Cửa 2: progressive. Cùng ranh giới, phải bịt luôn — không để hở đường vòng.
       const prog = await page.evaluate(
         ([url, id]) =>
-          chrome.runtime.sendMessage({ kind: 'download/progressive', url, tabId: id }),
+          chrome.runtime.sendMessage({
+            kind: 'download/progressive',
+            url,
+            tabId: id,
+          }),
         [srv.progressiveUrl, tabId],
       );
       if (prog?.ok !== false) {
@@ -327,7 +387,10 @@ async function runDrmRefused() {
         [srv.mediaUrl, srv.masterUrl],
       );
       if (clean?.ok !== true) {
-        return { ok: false, detail: `tab SẠCH bị chặn OAN: ${JSON.stringify(clean)}` };
+        return {
+          ok: false,
+          detail: `tab SẠCH bị chặn OAN: ${JSON.stringify(clean)}`,
+        };
       }
 
       return {
@@ -356,11 +419,18 @@ async function runProgressiveOffscreenDeath() {
     return await withBrowser(async ({ page }) => {
       const start = await page.evaluate(
         (url) =>
-          chrome.runtime.sendMessage({ kind: 'download/progressive', url, tabId: -1 }),
+          chrome.runtime.sendMessage({
+            kind: 'download/progressive',
+            url,
+            tabId: -1,
+          }),
         srv.stallProgressiveUrl ?? srv.progressiveUrl,
       );
       if (!start?.ok) {
-        return { ok: false, detail: `download/progressive bị từ chối: ${JSON.stringify(start)}` };
+        return {
+          ok: false,
+          detail: `download/progressive bị từ chối: ${JSON.stringify(start)}`,
+        };
       }
       // Chờ entry thực sự vào 'in_progress' rồi mới giết offscreen.
       let ready = false;
@@ -375,7 +445,11 @@ async function runProgressiveOffscreenDeath() {
         }
         await new Promise((r) => setTimeout(r, 250));
       }
-      if (!ready) return { ok: false, detail: 'entry không vào được in_progress để giết offscreen' };
+      if (!ready)
+        return {
+          ok: false,
+          detail: 'entry không vào được in_progress để giết offscreen',
+        };
 
       const killed = await page.evaluate(async () => {
         try {
@@ -385,7 +459,8 @@ async function runProgressiveOffscreenDeath() {
           return String(e?.message ?? e);
         }
       });
-      if (killed !== true) return { ok: false, detail: `không giết được offscreen: ${killed}` };
+      if (killed !== true)
+        return { ok: false, detail: `không giết được offscreen: ${killed}` };
       console.log('      [kill] offscreen đã bị đóng giữa lúc fetch .mp4');
 
       const t0 = Date.now();
@@ -397,12 +472,21 @@ async function runProgressiveOffscreenDeath() {
         if (entry && entry.state !== 'in_progress') {
           const secs = ((Date.now() - t0) / 1000).toFixed(1);
           if (entry.state !== 'interrupted') {
-            return { ok: false, detail: `mong đợi 'interrupted', nhận '${entry.state}' sau ${secs}s` };
+            return {
+              ok: false,
+              detail: `mong đợi 'interrupted', nhận '${entry.state}' sau ${secs}s`,
+            };
           }
           if (!/dừng đột ngột/.test(entry.error ?? '')) {
-            return { ok: false, detail: `chốt sau ${secs}s nhưng SAI lý do: "${entry.error ?? '?'}"` };
+            return {
+              ok: false,
+              detail: `chốt sau ${secs}s nhưng SAI lý do: "${entry.error ?? '?'}"`,
+            };
           }
-          return { ok: true, detail: `entry chốt 'interrupted' sau ${secs}s, đúng lý do: "${entry.error}"` };
+          return {
+            ok: true,
+            detail: `entry chốt 'interrupted' sau ${secs}s, đúng lý do: "${entry.error}"`,
+          };
         }
         await new Promise((r) => setTimeout(r, 1000));
       }
@@ -444,7 +528,10 @@ async function runQueuedJobNotReaped() {
       const a = await startJob(srv.mediaUrl, srv.masterUrl);
       const b = await startJob(srv.mediaUrl, srv.masterUrl);
       if (!a?.ok || !b?.ok) {
-        return { ok: false, detail: `không xếp được 2 job: ${JSON.stringify({ a, b })}` };
+        return {
+          ok: false,
+          detail: `không xếp được 2 job: ${JSON.stringify({ a, b })}`,
+        };
       }
       // Job #2 xếp sau job #1 (đang stall 63s). Theo dõi nó qua mốc 60s — mốc mà tick sẽ soi tới.
       const deadline = Date.now() + 75_000;
@@ -462,7 +549,10 @@ async function runQueuedJobNotReaped() {
         }
         await new Promise((r) => setTimeout(r, 1000));
       }
-      return { ok: true, detail: 'job xếp hàng sống qua mốc 60s — không bị tick giết oan' };
+      return {
+        ok: true,
+        detail: 'job xếp hàng sống qua mốc 60s — không bị tick giết oan',
+      };
     });
   } finally {
     await srv.close();
@@ -483,11 +573,18 @@ async function runProgressive({ gate }) {
     return await withBrowser(async ({ page, logs }) => {
       const start = await page.evaluate(
         (url) =>
-          chrome.runtime.sendMessage({ kind: 'download/progressive', url, tabId: -1 }),
+          chrome.runtime.sendMessage({
+            kind: 'download/progressive',
+            url,
+            tabId: -1,
+          }),
         srv.progressiveUrl,
       );
       if (!start?.ok) {
-        return { ok: false, detail: `download/progressive bị từ chối: ${JSON.stringify(start)}` };
+        return {
+          ok: false,
+          detail: `download/progressive bị từ chối: ${JSON.stringify(start)}`,
+        };
       }
       const file = await waitDownloadedFile(page, 30_000);
       // DownloadEntry của extension (thứ popup HIỂN THỊ) PHẢI tới 'complete' — bắt cả race "blob nhỏ
@@ -502,7 +599,10 @@ async function runProgressive({ gate }) {
         await new Promise((r) => setTimeout(r, 300));
       }
       if (entryState !== 'complete') {
-        return { ok: false, detail: `DownloadEntry kẹt ở "${entryState}" (popup sẽ hiện sai trạng thái)` };
+        return {
+          ok: false,
+          detail: `DownloadEntry kẹt ở "${entryState}" (popup sẽ hiện sai trạng thái)`,
+        };
       }
       const blocked = srv.blocked().length;
       const hits = srv.progressiveHits();
@@ -513,18 +613,32 @@ async function runProgressive({ gate }) {
           detail: `server chặn ${blocked} request 403 (thiếu Referer), phục vụ ${hits} lần mp4 — spoof KHÔNG áp cho đường tải`,
         };
       }
-      if (!file) return { ok: false, detail: 'không có file nào rơi xuống đĩa' };
+      if (!file)
+        return { ok: false, detail: 'không có file nào rơi xuống đĩa' };
       if (file.state !== 'complete') {
-        return { ok: false, detail: `download ${file.state}: ${file.error ?? '?'}` };
+        return {
+          ok: false,
+          detail: `download ${file.state}: ${file.error ?? '?'}`,
+        };
       }
       if (!existsSync(file.filename)) {
-        return { ok: false, detail: `downloads báo complete nhưng file không tồn tại: ${file.filename}` };
+        return {
+          ok: false,
+          detail: `downloads báo complete nhưng file không tồn tại: ${file.filename}`,
+        };
       }
       const size = statSync(file.filename).size;
       const probe = probeFile(file.filename);
-      if (probe.error) return { ok: false, detail: `ffprobe không đọc được file: ${probe.error}` };
+      if (probe.error)
+        return {
+          ok: false,
+          detail: `ffprobe không đọc được file: ${probe.error}`,
+        };
       if (!probe.codecs.includes('video')) {
-        return { ok: false, detail: `file ra KHÔNG có track hình (streams: ${probe.codecs.join(',') || 'rỗng'})` };
+        return {
+          ok: false,
+          detail: `file ra KHÔNG có track hình (streams: ${probe.codecs.join(',') || 'rỗng'})`,
+        };
       }
       const errLog = logs.filter((l) => l.includes('error:')).slice(-3);
       return {
@@ -546,7 +660,12 @@ async function runVariants({ gate }) {
   try {
     return await withBrowser(async ({ page }) => {
       const res = await page.evaluate(
-        (url) => chrome.runtime.sendMessage({ kind: 'manifest/variants', url, mediaType: 'hls' }),
+        (url) =>
+          chrome.runtime.sendMessage({
+            kind: 'manifest/variants',
+            url,
+            mediaType: 'hls',
+          }),
         srv.masterUrl,
       );
       if (res?.ok) {
@@ -565,6 +684,126 @@ async function runVariants({ gate }) {
 
 // --- Danh sách ca ------------------------------------------------------------------------------
 
+/**
+ * W1.5 — DASH tải được THẬT, và file ra phải có ĐỦ hình + tiếng.
+ *
+ * Vì sao ca này nặng ký: DASH LUÔN tách tiếng, và `resolvedUri` của MỌI representation (kể cả
+ * tiếng) đều là chính file .mpd. Nghĩa là mọi tầng định danh track bằng URL sẽ IM LẶNG tải nhầm
+ * — bệnh CÂM §2.1. Kiểm "có track audio" ở đây là thứ DUY NHẤT bắt được nó.
+ */
+async function runDashDownload() {
+  const srv = await startDemuxedServer();
+  try {
+    return await withBrowser(async ({ page }) => {
+      // Bước 1: liệt kê chất lượng như popup làm -> lấy id representation hình + tiếng.
+      const vars = await page.evaluate(
+        (url) =>
+          chrome.runtime.sendMessage({
+            kind: 'manifest/variants',
+            url,
+            mediaType: 'dash',
+          }),
+        srv.mpdUrl,
+      );
+      if (!vars?.ok)
+        return {
+          ok: false,
+          detail: `manifest/variants lỗi: ${JSON.stringify(vars)}`,
+        };
+      const variant = vars.variants?.[0];
+      const audioId = variant?.audioRenditions?.find((r) => r.selected)?.id;
+      if (!variant?.id)
+        return {
+          ok: false,
+          detail: `variant DASH không có id: ${JSON.stringify(vars)}`,
+        };
+      // Thiếu audioId = popup sẽ tải đường một-input -> file CÂM. Bắt ngay tại đây.
+      if (!audioId) {
+        return {
+          ok: false,
+          detail: `DASH không lộ ra rendition tiếng nào -> chắc chắn ra file CÂM (variant: ${JSON.stringify(variant)})`,
+        };
+      }
+
+      // Bước 2: tải đúng như popup gửi.
+      const start = await page.evaluate(
+        ([variantUrl, mediaUrl, variantId, aId]) =>
+          chrome.runtime.sendMessage({
+            kind: 'hls/download',
+            variantUrl,
+            mediaUrl,
+            tabId: -1,
+            mediaType: 'dash',
+            variantId,
+            audioId: aId,
+          }),
+        [srv.mpdUrl, srv.mpdUrl, variant.id, audioId],
+      );
+      if (!start?.ok)
+        return {
+          ok: false,
+          detail: `hls/download lỗi: ${JSON.stringify(start)}`,
+        };
+
+      const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
+      if (job.phase !== 'done') {
+        return {
+          ok: false,
+          detail: `job không xong: phase=${job.phase} error=${job.error ?? '-'}`,
+        };
+      }
+      const file = await waitDownloadedFile(page, 30_000);
+      if (!file) return { ok: false, detail: 'không thấy file trên đĩa' };
+      if (file.state !== 'complete') {
+        return {
+          ok: false,
+          detail: `download ${file.state}: ${file.error ?? '?'}`,
+        };
+      }
+      if (!existsSync(file.filename)) {
+        return {
+          ok: false,
+          detail: `downloads báo complete nhưng file không tồn tại: ${file.filename}`,
+        };
+      }
+
+      const probe = probeFile(file.filename);
+      if (probe.error)
+        return { ok: false, detail: `ffprobe không đọc được: ${probe.error}` };
+      if (!probe.codecs.includes('video')) {
+        return {
+          ok: false,
+          detail: `file ra KHÔNG có hình (streams: ${probe.codecs.join(',') || 'rỗng'})`,
+        };
+      }
+      // 🔴 Lưới CHỐNG CÂM — lý do ca này tồn tại.
+      if (!probe.codecs.includes('audio')) {
+        return {
+          ok: false,
+          detail: `file ra CÂM: không có track tiếng (streams: ${probe.codecs.join(',')}) — DASH tách tiếng bị bỏ rơi`,
+        };
+      }
+      if (srv.dashAudioHits() === 0) {
+        return {
+          ok: false,
+          detail:
+            'không fetch segment tiếng DASH nào -> tiếng không thật sự được tải',
+        };
+      }
+      const size = statSync(file.filename).size;
+      return {
+        ok: true,
+        detail:
+          `file ${(size / 1024).toFixed(0)}KB, ${probe.duration.toFixed(2)}s, ` +
+          `track: ${probe.codecs.join('+')}, đã fetch ${srv.dashSegmentHits()} segment DASH ` +
+          `(tiếng: ${srv.dashAudioHits()})`,
+      };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
 const SCENARIOS = [
   {
     id: 'happy',
@@ -580,7 +819,8 @@ const SCENARIOS = [
   },
   {
     id: 'variants-403',
-    title: 'Cổng 403 manifest: bấm "Chất lượng" -> spoof bật TRƯỚC fetch (W2.2) -> phải qua',
+    title:
+      'Cổng 403 manifest: bấm "Chất lượng" -> spoof bật TRƯỚC fetch (W2.2) -> phải qua',
     // W2.2 XONG (2026-07-17): handleVariants nay applySpoof ÔM SÁT cú fetch -> qua cổng hotlink.
     // Ratchet đã bật đúng lúc sửa xong (known-fail -> pass), giờ là lưới chống hồi quy.
     expect: 'pass',
@@ -588,7 +828,8 @@ const SCENARIOS = [
   },
   {
     id: 'segments-other-host',
-    title: 'Segment ở host KHÁC manifest + cổng 403 -> spoof MỌI host đã parse (W2.3) -> tải trọn',
+    title:
+      'Segment ở host KHÁC manifest + cổng 403 -> spoof MỌI host đã parse (W2.3) -> tải trọn',
     // W2.3 XONG (2026-07-17): handleHlsDownload parse playlist TRƯỚC rồi spoof mọi host của
     // segment/key/init. Ratchet đã bật đúng lúc sửa xong (known-fail -> pass), nay là lưới hồi quy.
     expect: 'pass',
@@ -596,7 +837,8 @@ const SCENARIOS = [
   },
   {
     id: 'progressive-403',
-    title: 'Cổng 403 mp4: tải progressive phải qua (W2.5 định tuyến qua offscreen -> fetch mang Referer)',
+    title:
+      'Cổng 403 mp4: tải progressive phải qua (W2.5 định tuyến qua offscreen -> fetch mang Referer)',
     // W2.5 XONG (2026-07-18): handleDownload định tuyến fetch qua offscreen (xmlhttprequest tab-less
     // -> khớp rule DNR). Ratchet đã bật đúng lúc sửa xong (known-fail -> pass), nay là lưới hồi quy.
     // ĐO 2026-07-18: đường cũ chrome.downloads.download thẳng -> server nhận ref=NONE -> 403.
@@ -606,7 +848,8 @@ const SCENARIOS = [
   },
   {
     id: 'segment-stall',
-    title: 'Server câm giữa chừng: job phải BÁO LỖI có hạn (W2.6), không kẹt fetching vĩnh viễn',
+    title:
+      'Server câm giữa chừng: job phải BÁO LỖI có hạn (W2.6), không kẹt fetching vĩnh viễn',
     // W2.6 (2026-07-18): fetchWithRetry nay có đồng hồ chờ-header + đồng hồ im-lặng, ghép với
     // signal huỷ của job. Trước W2.6 ca này treo hết budget vì fetch không có signal nào.
     expect: 'pass',
@@ -638,6 +881,15 @@ const SCENARIOS = [
     run: () => runProgressiveOffscreenDeath(),
   },
   {
+    id: 'dash-download',
+    title: 'DASH tải được THẬT và file ra có ĐỦ hình + tiếng (W1.5 nửa sau)',
+    // Trước W1.5 nửa sau: nút tải DASH còn không tồn tại; nạp .mpd vào parser HLS ra 0 segment
+    // mà KHÔNG ném lỗi -> mọi cổng tĩnh vẫn xanh. Ca này là thứ duy nhất chứng minh đường DASH sống.
+    expect: 'pass',
+    pins: '§2.8/W1.5 (DASH ngõ cụt + định danh track bằng URL -> file câm)',
+    run: () => runDashDownload(),
+  },
+  {
     id: 'drm-refused',
     title:
       'Trang xin DRM/EME -> TỪ CHỐI tải và nói rõ lý do; tab sạch vẫn tải được (ranh giới cứng §7)',
@@ -652,7 +904,9 @@ const SCENARIOS = [
 let failed = false;
 const only = process.argv[2];
 
-console.log('W0.3 — lưới an toàn tích hợp (extension thật + fixture 403 cục bộ)\n');
+console.log(
+  'W0.3 — lưới an toàn tích hợp (extension thật + fixture 403 cục bộ)\n',
+);
 
 for (const s of SCENARIOS) {
   if (only && s.id !== only) continue;
@@ -677,8 +931,12 @@ for (const s of SCENARIOS) {
     } else {
       // Ratchet bật: bug đã được sửa -> ép đổi nhãn, không cho lặng lẽ trôi.
       failed = true;
-      console.log(`  ✗ RATCHET BẬT — ca này LẼ RA phải đỏ nhưng đã ĐẠT: ${r.detail}`);
-      console.log(`     => ${s.pins} đã được sửa. Đổi expect: 'known-fail' -> 'pass' trong e2e/hls-403.mjs.\n`);
+      console.log(
+        `  ✗ RATCHET BẬT — ca này LẼ RA phải đỏ nhưng đã ĐẠT: ${r.detail}`,
+      );
+      console.log(
+        `     => ${s.pins} đã được sửa. Đổi expect: 'known-fail' -> 'pass' trong e2e/hls-403.mjs.\n`,
+      );
     }
   }
 }

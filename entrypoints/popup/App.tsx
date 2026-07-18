@@ -231,9 +231,7 @@ function MediaRow({
 
   const canPickQuality = media.type === 'hls' || media.type === 'dash';
   const isProgressive = media.type === 'progressive';
-  const isHls = media.type === 'hls';
   const isBlob = media.type === 'blob';
-  const isDash = media.type === 'dash';
   const jobBusy =
     hlsJob?.phase === 'queued' ||
     hlsJob?.phase === 'loading' ||
@@ -264,7 +262,12 @@ function MediaRow({
       setDlError(null);
       // Bỏ khoảng im lặng: hiện "Đang kiểm tra…" trong lúc ước tính (job chưa tồn tại).
       setChecking(true);
-      const audioUri = variant.audioRenditions?.find((r) => r.selected)?.uri;
+      const audioRendition = variant.audioRenditions?.find((r) => r.selected);
+      const audioUri = audioRendition?.uri;
+      // W1.5 — DASH định danh track bằng id, KHÔNG bằng uri (mọi representation chung một .mpd).
+      const kind = media.type === 'dash' ? ('dash' as const) : ('hls' as const);
+      const variantId = kind === 'dash' ? variant.id : undefined;
+      const audioId = kind === 'dash' ? audioRendition?.id : undefined;
       let est: Awaited<ReturnType<typeof requestHlsEstimate>>;
       try {
         est = await requestHlsEstimate(
@@ -272,6 +275,9 @@ function MediaRow({
           variant.bandwidth,
           audioUri,
           tabId,
+          kind,
+          variantId,
+          audioId,
         );
       } finally {
         setChecking(false);
@@ -302,10 +308,13 @@ function MediaRow({
         // W1.1: luồng tiếng tách rời mà variant này dùng. Vắng `uri` = tiếng đã nằm sẵn trong
         // variant (RFC 8216 §4.3.4.2.1) -> không gửi gì -> offscreen giữ đường một-input.
         audioUri,
+        kind,
+        variantId,
+        audioId,
       );
       if (!res.ok) setDlError(res.error);
     },
-    [tabId, media.url],
+    [tabId, media.url, media.type],
   );
 
   const toggleQuality = useCallback(async () => {
@@ -407,16 +416,9 @@ function MediaRow({
         </p>
       )}
 
-      {/*
-        W1.5: DASH xem được chất lượng nhưng KHÔNG có nút tải -> user bấm xong rồi hết đường.
-        Ngõ cụt im lặng trông y hệt bug, nên nói thẳng ra thay vì để user tự đoán.
-      */}
-      {isDash && (
-        <p className="hint">
-          DASH (.mpd) — phát hiện được và xem được chất lượng, nhưng chưa hỗ trợ
-          tải.
-        </p>
-      )}
+      {/* W1.5 — DASH nay TẢI ĐƯỢC thật (dùng lại bộ máy fetch/ghép của HLS), nên gợi ý
+          "chưa hỗ trợ tải" đã bỏ. Ca ta cố ý không ghép (đa Period init khác nhau) được offscreen
+          báo lý do cụ thể ngay trên job, không phải một câu chung chung ở đây. */}
 
       {hlsJob && (
         <div className={`dl-hls-${hlsJob.phase}`}>
@@ -455,7 +457,7 @@ function MediaRow({
                       </span>
                     ) : null}
                   </button>
-                  {isHls && (
+                  {canPickQuality && (
                     <button
                       type="button"
                       className="ghost-btn"

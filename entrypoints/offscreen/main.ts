@@ -8,7 +8,12 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { decryptAes128Cbc, hlsSegmentIv } from '@/utils/crypto';
 import { describeError } from '@/utils/errors';
-import { parseHlsSegments } from '@/utils/hls';
+import type { HlsSegmentsResult } from '@/utils/hls';
+// ⚠️ `utils/dash` chỉ kéo theo mpd-parser + types + hls + drm — TOÀN BỘ không đụng chrome.storage
+// và declarativeNetRequest, nên an toàn cho offscreen (nơi CHỈ có chrome.runtime). Giữ nguyên
+// tính chất đó: thêm một import storage/dnr vào chuỗi này là TypeError lúc chạy mà mọi cổng tĩnh
+// đều không thấy — đúng con bug từng làm HLS chết câm nhiều commit đầu.
+import { parseTrackSegments } from '@/utils/dash';
 // An toàn với ràng buộc "offscreen KHÔNG có chrome.storage": liveness.ts chỉ import KIỂU từ
 // storage.ts (bị xoá lúc biên dịch) nên không kéo theo một dòng chrome.storage nào.
 import { HEARTBEAT_INTERVAL_MS } from '@/utils/liveness';
@@ -159,11 +164,17 @@ async function runFfmpegDemo(): Promise<FfmpegDemoResponse> {
 // để không giữ toàn bộ video trong bộ nhớ.
 
 /** Tải + parse một media playlist. Ném lỗi RÕ thay vì để body trang lỗi (403/404) lọt vào parser. */
-async function loadPlaylist(
+/**
+ * Tải NGUYÊN VĂN một manifest (m3u8 hoặc mpd) với timeout + kiểm status.
+ *
+ * Tách khỏi `loadPlaylist` cho W1.5: DASH cần chính đoạn text đó để parse NHIỀU track (hình +
+ * tiếng nằm chung một .mpd), nên phần "tải" phải dùng lại được mà không kèm phần "parse".
+ */
+async function loadPlaylistText(
   url: string,
   label: string,
   jobSignal?: AbortSignal,
-): Promise<ReturnType<typeof parseHlsSegments>> {
+): Promise<string> {
   let text: string;
   // W2.6: ghép timeout với signal huỷ của job -> bấm Huỷ trong lúc đang tải playlist cũng đứt ngay
   // (trước đây chỉ có timeout: huỷ phải chờ hết 30s mới có tác dụng).
@@ -187,7 +198,19 @@ async function loadPlaylist(
   } finally {
     dispose();
   }
-  return parseHlsSegments(text, url);
+  return text;
+}
+
+/** Tải + parse một media playlist theo ĐÚNG định dạng của nó. */
+async function loadPlaylist(
+  url: string,
+  label: string,
+  jobSignal?: AbortSignal,
+  mediaType?: 'hls' | 'dash',
+  trackId?: string,
+): Promise<HlsSegmentsResult> {
+  const text = await loadPlaylistText(url, label, jobSignal);
+  return parseTrackSegments(text, url, mediaType, trackId);
 }
 
 /** Kết quả tải một track: tên file segment trong FS ảo, theo ĐÚNG thứ tự phát. */
@@ -207,7 +230,7 @@ interface TrackFiles {
  */
 async function downloadTrack(o: {
   ff: FFmpeg;
-  parsed: ReturnType<typeof parseHlsSegments>;
+  parsed: HlsSegmentsResult;
   prefix: string;
   concurrency: number;
   writtenFiles: Set<string>;
@@ -409,12 +432,26 @@ async function runHlsJob(
     const ffPromise = ensureFfmpeg();
 
     // W1.1: tải SONG SONG playlist hình và playlist tiếng (nếu master khai tiếng tách rời).
-    const [parsed, parsedAudio] = await Promise.all([
-      loadPlaylist(variantUrl, 'hình', ac.signal),
-      audioUrl
-        ? loadPlaylist(audioUrl, 'tiếng', ac.signal)
-        : Promise.resolve(null),
-    ]);
+    // W1.5 — DASH để CẢ hình lẫn tiếng trong MỘT file .mpd: tải một lần rồi parse hai track theo
+    // id. Gọi loadPlaylist hai lần ở đây sẽ tải nguyên manifest hai lượt và, tệ hơn, không có
+    // cách nào phân biệt track vì `resolvedUri` của mọi representation đều là chính file .mpd.
+    const mediaType = req.mediaType;
+    let parsed: HlsSegmentsResult;
+    let parsedAudio: HlsSegmentsResult | null = null;
+    if (mediaType === 'dash') {
+      const mpdText = await loadPlaylistText(variantUrl, 'DASH', ac.signal);
+      parsed = parseTrackSegments(mpdText, variantUrl, 'dash', req.variantId);
+      parsedAudio = req.audioId
+        ? parseTrackSegments(mpdText, variantUrl, 'dash', req.audioId)
+        : null;
+    } else {
+      [parsed, parsedAudio] = await Promise.all([
+        loadPlaylist(variantUrl, 'hình', ac.signal),
+        audioUrl
+          ? loadPlaylist(audioUrl, 'tiếng', ac.signal)
+          : Promise.resolve(null),
+      ]);
+    }
 
     // Ranh giới cứng: SAMPLE-AES/EME -> DỪNG. Phải kiểm CẢ HAI playlist: tiếng có thể được bảo vệ
     // trong khi hình thì không.
@@ -423,6 +460,13 @@ async function runHlsJob(
         phase: 'error',
         error: 'Không hỗ trợ nội dung được bảo vệ (SAMPLE-AES/DRM).',
       });
+      return;
+    }
+    // W1.5 — ta parse ĐƯỢC nhưng CỐ Ý không ghép (vd DASH đa Period, mỗi Period một init khác
+    // nhau): ghép mù thì ffmpeg vẫn nhận, job vẫn báo "xong", file thì hỏng. Nói thẳng lý do.
+    const refuse = parsed.unsupportedReason ?? parsedAudio?.unsupportedReason;
+    if (refuse) {
+      await updateHlsJob(jobId, { phase: 'error', error: refuse });
       return;
     }
     if (parsed.segments.length === 0) {

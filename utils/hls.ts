@@ -245,6 +245,19 @@ export interface HlsSegmentsResult {
   totalDuration: number;
   /** có init segment fMP4 không. */
   hasInit: boolean;
+  /**
+   * W1.5 — playlist parse được nhưng ta CỐ Ý không tải: nêu lý do người thường hiểu được.
+   *
+   * Khác `isProtected` (ranh giới DRM) ở chỗ đây là giới hạn kỹ thuật của ta, và khác "0 segment"
+   * ở chỗ nó nói ĐÚNG nguyên nhân. Sinh ra vì DASH đa Period ghép mù sẽ ra file hỏng mà ffmpeg
+   * vẫn nhận -> job báo "xong" trong khi file sai. Giao file hỏng im lặng tệ hơn từ chối thẳng.
+   */
+  unsupportedReason?: string;
+  /**
+   * W1.5 — không có segment nào NHƯNG có một file media tải thẳng được (DASH SegmentBase: cả
+   * representation chỉ là một .mp4 + indexRange). Tầng trên định tuyến sang luồng progressive.
+   */
+  directUrl?: string;
 }
 
 /**

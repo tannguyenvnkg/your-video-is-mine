@@ -18,7 +18,10 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const FIXTURES = resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures/hls');
+const FIXTURES = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  'fixtures/hls',
+);
 const FIXTURES_DEMUXED = resolve(
   dirname(fileURLToPath(import.meta.url)),
   'fixtures/hls-demuxed',
@@ -68,7 +71,10 @@ export async function startFixtureServer({
 
     const send = (status, body, type) => {
       requests.push({ url: path, referer, status });
-      res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store' });
+      res.writeHead(status, {
+        'content-type': type,
+        'cache-control': 'no-store',
+      });
       res.end(body);
     };
 
@@ -105,7 +111,11 @@ export async function startFixtureServer({
       // đuôi .ts TRÙNG đuôi TypeScript, để nguyên thì tsc/eslint parse file video như mã nguồn và
       // cổng compile/lint ĐỎ. Tên trên đĩa là chi tiết nội bộ; thứ extension nhìn thấy là URL .ts
       // + Content-Type video/mp2t, nên độ giống thật không mất gì.
-      send(200, readFixture(path.slice('/hls/'.length).replace(/\.ts$/, '.bin')), 'video/mp2t');
+      send(
+        200,
+        readFixture(path.slice('/hls/'.length).replace(/\.ts$/, '.bin')),
+        'video/mp2t',
+      );
       return;
     }
     // W2.7 — .mp4 CÂM TUYỆT ĐỐI: nhận request rồi im (không header, không byte, không đóng socket).
@@ -167,7 +177,11 @@ export async function startFixtureServer({
       return;
     }
     if (path === '/page.html') {
-      send(200, '<!doctype html><title>fixture</title><p>fixture page', 'text/html');
+      send(
+        200,
+        '<!doctype html><title>fixture</title><p>fixture page',
+        'text/html',
+      );
       return;
     }
     send(404, 'not found', 'text/plain');
@@ -216,6 +230,7 @@ export async function startFixtureServer({
  * W0.4): bản sửa nào chỉ dựa vào "ưu tiên DEFAULT=YES" sẽ chọn trượt và lộ ra ngay tại đây.
  */
 export async function startDemuxedServer() {
+  const FIXTURES_DASH = join(FIXTURES_DEMUXED, '..', 'dash');
   /** @type {{url:string, status:number}[]} */
   const requests = [];
 
@@ -223,7 +238,10 @@ export async function startDemuxedServer() {
     const path = (req.url ?? '/').split('?')[0];
     const send = (status, body, type) => {
       requests.push({ url: path, status });
-      res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store' });
+      res.writeHead(status, {
+        'content-type': type,
+        'cache-control': 'no-store',
+      });
       res.end(body);
     };
 
@@ -231,7 +249,23 @@ export async function startDemuxedServer() {
     // .ts trùng đuôi TypeScript nên tsc/eslint sẽ parse file video như mã nguồn (đã trả giá ở W0.3).
     const m = /^\/hls\/((?:v|a)\d+)\.ts$/.exec(path);
     if (m) {
-      send(200, readFileSync(join(FIXTURES_DEMUXED, `${m[1]}.bin`)), 'video/mp2t');
+      send(
+        200,
+        readFileSync(join(FIXTURES_DEMUXED, `${m[1]}.bin`)),
+        'video/mp2t',
+      );
+      return;
+    }
+    // W1.5 — fixture DASH THẬT (ffmpeg -f dash): tách tiếng, fMP4, SegmentTemplate — đúng dạng
+    // phổ biến nhất ngoài đời. Representation hình id="0", tiếng id="1".
+    const d = /^\/dash\/([\w.-]+\.(?:mpd|m4s|mp4))$/.exec(path);
+    if (d) {
+      const type = d[1].endsWith('.mpd')
+        ? 'application/dash+xml'
+        : d[1].endsWith('.m4s')
+          ? 'video/iso.segment'
+          : 'video/mp4';
+      send(200, readFileSync(join(FIXTURES_DASH, d[1])), type);
       return;
     }
     const pl = /^\/hls\/(master|video|audio)\.m3u8$/.exec(path);
@@ -259,7 +293,11 @@ export async function startDemuxedServer() {
       return;
     }
     if (path === '/page.html') {
-      send(200, '<!doctype html><title>fixture tách tiếng</title><p>fixture', 'text/html');
+      send(
+        200,
+        '<!doctype html><title>fixture tách tiếng</title><p>fixture',
+        'text/html',
+      );
       return;
     }
     send(404, 'not found', 'text/plain');
@@ -275,12 +313,20 @@ export async function startDemuxedServer() {
     pageUrl: `http://127.0.0.1:${port}/page.html`,
     /** W7.1 — trang gọi requestMediaKeySystemAccess (giả lập site DRM). */
     drmPageUrl: `http://127.0.0.1:${port}/drm.html`,
+    /** W1.5 — manifest DASH (hình + tiếng nằm CHUNG file này, phân biệt bằng Representation@id). */
+    mpdUrl: `http://127.0.0.1:${port}/dash/stream.mpd`,
+    /** Đã fetch segment DASH lần nào chưa -> bằng chứng đường DASH có thật sự chạy. */
+    dashSegmentHits: () =>
+      requests.filter((r) => /\/chunk-\d+-\d+\.m4s$/.test(r.url)).length,
+    dashAudioHits: () =>
+      requests.filter((r) => /\/chunk-1-\d+\.m4s$/.test(r.url)).length,
     masterUrl: `http://127.0.0.1:${port}/hls/master.m3u8`,
     /** Playlist HÌNH — đây là thứ user chọn khi bấm 720p (nó KHÔNG chứa tiếng). */
     videoUrl: `http://127.0.0.1:${port}/hls/video.m3u8`,
     audioUrl: `http://127.0.0.1:${port}/hls/audio.m3u8`,
     /** Đã fetch segment tiếng lần nào chưa -> bằng chứng đường tiếng có thật sự chạy. */
-    audioSegmentHits: () => requests.filter((r) => /\/a\d+\.ts$/.test(r.url)).length,
+    audioSegmentHits: () =>
+      requests.filter((r) => /\/a\d+\.ts$/.test(r.url)).length,
     close: () => new Promise((r) => server.close(r)),
   };
 }
