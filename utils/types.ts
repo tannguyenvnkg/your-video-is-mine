@@ -49,6 +49,15 @@ export interface MediaItem {
   child?: boolean;
   /** URL master đã khai ra item này (giải thích vì sao bị ẩn; dùng cho nhãn ở W4.4). */
   parentUrl?: string;
+  /**
+   * W2.1 — bản chụp header THẬT mà player của trang đã gửi cho chính URL này (`onSendHeaders`),
+   * tên header đã hạ chữ thường. Dùng để PHÁT LẠI thay vì BỊA Referer/Origin (§2.11).
+   *
+   * Vắng = chưa quan sát được request nào của player cho URL này (vd media phát hiện qua DOM, hoặc
+   * content script báo sau khi request đã bay) -> caller PHẢI lùi về đường spoof Referer cũ.
+   * Lọc/chia rổ bằng `planHeaderReplay` (utils/headers.ts) — KHÔNG dùng thẳng map này.
+   */
+  sentHeaders?: Record<string, string>;
 }
 
 /**

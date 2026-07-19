@@ -40,6 +40,8 @@ function stubUnrelatedListeners(): void {
   const events = [
     browser.webRequest?.onBeforeRequest,
     browser.webRequest?.onHeadersReceived,
+    // W2.1 — listener bắt header thật của player. fakeBrowser cũng không cài đặt cái này.
+    browser.webRequest?.onSendHeaders,
     browser.downloads?.onChanged,
     browser.storage?.onChanged,
     browser.tabs?.onRemoved,

@@ -139,6 +139,8 @@ export interface BuildMediaInput extends DetectInput {
   acceptRanges?: boolean;
   detectSource?: MediaDetectSource;
   detectedAt: number;
+  /** W2.1 — header THẬT player đã gửi cho URL này (từ `onSendHeaders`). */
+  sentHeaders?: Record<string, string>;
 }
 
 /** Dựng MediaItem từ một lần phát hiện. null nếu không phải media. */
@@ -157,6 +159,7 @@ export function buildMediaItem(input: BuildMediaInput): MediaItem | null {
     acceptRanges: input.acceptRanges,
     detectedAt: input.detectedAt,
     detectSource: input.detectSource ?? 'network',
+    sentHeaders: input.sentHeaders,
   };
 }
 
@@ -201,6 +204,11 @@ export function upsertMedia(
     width: pick(existing.width, item.width),
     height: pick(existing.height, item.height),
     durationSec: pick(existing.durationSec, item.durationSec),
+    // 🔴 W2.1 — BẮT BUỘC có mặt trong danh sách merge này. `onBeforeRequest` tạo item TRƯỚC,
+    // `onSendHeaders` bắt được header SAU, nên header LUÔN tới ở nhánh merge chứ không bao giờ ở
+    // nhánh thêm-mới. Thiếu dòng này thì `{...existing}` nuốt bản chụp và `dirty` không bật ->
+    // changed=false -> addTabMedia không ghi gì -> W2.1 chết 100% mà không một lỗi nào hiện ra.
+    sentHeaders: pick(existing.sentHeaders, item.sentHeaders),
   };
 
   if (!dirty) return { list, changed: false };

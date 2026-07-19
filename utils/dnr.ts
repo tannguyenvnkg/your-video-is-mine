@@ -21,6 +21,15 @@ export interface DnrRule {
     resourceTypes: string[];
     /** -1 = request KHÔNG gắn với tab nào (do SW/offscreen của extension phát). */
     tabIds: number[];
+    /**
+     * Neo rule vào ĐÚNG một origin (vd `|https://example.com/`).
+     *
+     * 🔴 BẮT BUỘC cho rule mang header nhạy cảm: `requestDomains:['example.com']` của DNR khớp
+     * **cả subdomain** (`api.`, `accounts.`, `cdn.`) -> token `Authorization` của media trên apex
+     * sẽ rò sang mọi subdomain extension fetch tới. `|` neo vào đầu URL nên
+     * `https://api.example.com/` KHÔNG khớp `|https://example.com/`.
+     */
+    urlFilter?: string;
   };
 }
 
@@ -70,20 +79,45 @@ export function buildRefererSpoofRule(
   referer: string,
   origin: string,
 ): DnrRule {
+  return buildHeaderSpoofRule(id, host, { referer, origin });
+}
+
+/**
+ * W2.1 — rule đặt CHÍNH XÁC tập header được giao, không thêm không bớt.
+ *
+ * Khác `buildRefererSpoofRule` (bản BỊA: luôn kèm đúng 2 header ta nghĩ ra) ở chỗ caller quyết
+ * định hoàn toàn danh sách, nên **quy tắc vàng §2.11** thi hành được: trang không gửi header nào
+ * thì không có mục nào cho header đó. Việc set `Origin` vô điều kiện lên GET từng có thể TỰ GÂY
+ * 403 trên CDN coi Origin lạ là vi phạm CORS.
+ *
+ * 🔬 ĐO THẬT (Edge, fetch từ SW, tabId -1): DNR đặt được MỌI header đã thử — cookie, referer,
+ * origin, authorization, user-agent, accept-language và header lạ (`x-playback-session-id`).
+ * Nhờ vậy phát lại KHÔNG cần luồn header qua 5 tầng vào offscreen, và tránh được bẫy đè mất
+ * `Range` của byterange trong `utils/retry.ts`.
+ */
+export function buildHeaderSpoofRule(
+  id: number,
+  host: string,
+  headers: Readonly<Record<string, string>>,
+  /** Neo theo origin — dùng khi rule mang header nhạy cảm (xem `condition.urlFilter`). */
+  anchorOrigin?: string,
+): DnrRule {
   return {
     id,
     priority: 1,
     action: {
       type: 'modifyHeaders',
-      requestHeaders: [
-        { header: 'referer', operation: 'set', value: referer },
-        { header: 'origin', operation: 'set', value: origin },
-      ],
+      requestHeaders: Object.entries(headers).map(([header, value]) => ({
+        header,
+        operation: 'set' as const,
+        value,
+      })),
     },
     condition: {
       requestDomains: [host],
       resourceTypes: SPOOFED_RESOURCE_TYPES,
       tabIds: [-1],
+      ...(anchorOrigin ? { urlFilter: `|${anchorOrigin}/` } : {}),
     },
   };
 }

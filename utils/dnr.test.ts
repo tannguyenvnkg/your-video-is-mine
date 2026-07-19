@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildHeaderSpoofRule,
   buildRefererSpoofRule,
   hostFromUrl,
   originFromUrl,
@@ -93,5 +94,51 @@ describe('staleSpoofRuleIds (đối soát rule rò rỉ — W2.4 sweep)', () => 
 
   it('tập sống rỗng + không rule spoof nào -> không xoá gì', () => {
     expect(staleSpoofRuleIds([1, 2, 3], [])).toEqual([]);
+  });
+});
+
+// ── W2.1 ─────────────────────────────────────────────────────────────────────────────────────
+describe('buildHeaderSpoofRule — phát lại header THẬT của player', () => {
+  it('sinh đúng một mục modifyHeaders cho mỗi header được giao', () => {
+    const rule = buildHeaderSpoofRule(SPOOF_RULE_ID_MIN, 'cdn.example', {
+      referer: 'https://site.example/watch',
+      'x-playback-session-id': 'sess-9',
+    });
+    expect(rule.action.requestHeaders).toEqual([
+      {
+        header: 'referer',
+        operation: 'set',
+        value: 'https://site.example/watch',
+      },
+      { header: 'x-playback-session-id', operation: 'set', value: 'sess-9' },
+    ]);
+  });
+
+  it('🔴 KHÔNG tự thêm Origin khi không được giao (quy tắc vàng §2.11)', () => {
+    // Bản BỊA cũ luôn kèm Origin. Player thật thường không gửi Origin trên GET, và một số CDN
+    // 403 chính vì cái Origin lạ đó -> rule "chống 403" tự gây 403.
+    const rule = buildHeaderSpoofRule(SPOOF_RULE_ID_MIN, 'cdn.example', {
+      referer: 'https://site.example/',
+    });
+    expect(rule.action.requestHeaders.map((h) => h.header)).toEqual([
+      'referer',
+    ]);
+  });
+
+  it('giữ nguyên bán kính sát thương đã thu hẹp ở W2.4 (tabIds:[-1], không có media/sub_frame)', () => {
+    const rule = buildHeaderSpoofRule(SPOOF_RULE_ID_MIN, 'cdn.example', {
+      referer: 'https://site.example/',
+    });
+    expect(rule.condition.tabIds).toEqual([-1]);
+    expect(rule.condition.requestDomains).toEqual(['cdn.example']);
+    expect(rule.condition.resourceTypes).not.toContain('media');
+    expect(rule.condition.resourceTypes).not.toContain('sub_frame');
+  });
+
+  it('header rỗng -> rule không có mục nào (caller phải tự tránh áp rule vô nghĩa)', () => {
+    expect(
+      buildHeaderSpoofRule(SPOOF_RULE_ID_MIN, 'cdn.example', {}).action
+        .requestHeaders,
+    ).toEqual([]);
   });
 });

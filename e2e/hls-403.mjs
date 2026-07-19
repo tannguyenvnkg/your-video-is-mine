@@ -15,7 +15,7 @@
 //
 // Chạy: pnpm e2e:fixture   (cần `pnpm build` trước; cần ffprobe cho phần kiểm thời lượng)
 
-import { startFixtureServer, startDemuxedServer } from './fixture-server.mjs';
+import { PLAYER_TOKEN, startFixtureServer, startDemuxedServer } from './fixture-server.mjs';
 import {
   requireBuild,
   withBrowser as withBrowserRaw,
@@ -682,6 +682,111 @@ async function runVariants({ gate }) {
   }
 }
 
+/**
+ * W2.1 — BẮT & PHÁT LẠI header THẬT của player, thay vì BỊA Referer/Origin (§2.11).
+ *
+ * VÌ SAO CA NÀY LÀ THỨ DUY NHẤT CHỨNG MINH ĐƯỢC W2.1: cổng `Referer` mà các ca trước dùng thì bản
+ * BỊA cũng qua được — Referer suy ra từ `pageUrl` là xong. Ở đây server đòi
+ * `X-Playback-Session-Id: <token ngẫu nhiên do trang sinh>`. Token đó KHÔNG suy được từ URL, host,
+ * hay pageUrl; con đường DUY NHẤT để extension có nó là nghe `onSendHeaders` lúc player của trang
+ * fetch manifest, rồi phát lại qua DNR. Bản BỊA trượt cổng này 100%.
+ *
+ * Trình tự: mở trang player (player tự fetch manifest kèm token) -> extension bắt được header ->
+ * user bấm tải -> mọi request của extension phải mang token thì mới qua nổi 403.
+ */
+async function runRealHeaderReplay() {
+  const srv = await startFixtureServer({ tokenGate: true });
+  try {
+    return await withBrowser(async ({ page }) => {
+      // Bước 1: trang player chạy thật trong TAB RIÊNG (không đụng `page` — đó là trang extension,
+      // nơi duy nhất đọc được chrome.storage), phát request có token -> extension quan sát được.
+      const playerTab = await page.context().newPage();
+      await playerTab.goto(srv.playerPageUrl);
+      const played = await playerTab.evaluate(() => window.__played);
+      if (!played) {
+        return {
+          ok: false,
+          detail: 'harness hỏng: player của trang không fetch được manifest',
+        };
+      }
+      // Bước 2: chờ background ghi xong bản chụp header vào storage.session. Khoá `media:<tabId>`
+      // cho luôn tabId của tab player -> khỏi phải đoán bằng chrome.tabs.query.
+      const found = await page.evaluate(async (masterUrl) => {
+        for (let i = 0; i < 40; i++) {
+          const all = await chrome.storage.session.get(null);
+          for (const [k, v] of Object.entries(all)) {
+            if (!k.startsWith('media:')) continue;
+            const hit = (v?.items ?? []).find((m) => m.url === masterUrl);
+            if (hit?.sentHeaders) {
+              return { headers: hit.sentHeaders, tabId: Number(k.slice(6)) };
+            }
+          }
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        return null;
+      }, srv.masterUrl);
+      const captured = found?.headers;
+      if (!captured) {
+        return {
+          ok: false,
+          detail:
+            'KHÔNG bắt được header nào của player (onSendHeaders không chạy, ' +
+            'hoặc bản chụp bị nuốt ở merge upsertMedia)',
+        };
+      }
+      if (captured['x-playback-session-id'] !== PLAYER_TOKEN) {
+        return {
+          ok: false,
+          detail: `bắt được header nhưng thiếu/sai token: ${JSON.stringify(captured)}`,
+        };
+      }
+
+      // Bước 3: tải thật — mọi request phải mang token mới qua được cổng 403.
+      const tabId = found.tabId;
+      const start = await page.evaluate(
+        ([variantUrl, mediaUrl, tid]) =>
+          chrome.runtime.sendMessage({
+            kind: 'hls/download',
+            variantUrl,
+            mediaUrl,
+            tabId: tid,
+          }),
+        [srv.mediaUrl, srv.masterUrl, tabId],
+      );
+      if (!start?.ok) {
+        return {
+          ok: false,
+          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+        };
+      }
+      const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
+      if (!job) {
+        return { ok: false, detail: `job TREO sau ${JOB_TIMEOUT_MS / 1000}s` };
+      }
+      if (job.phase !== 'done') {
+        const bad = srv.requests.filter((r) => r.status === 403).length;
+        return {
+          ok: false,
+          detail:
+            `job ${job.phase}: ${job.error ?? '?'} — server đã 403 ${bad} request ` +
+            'vì thiếu token (header thật KHÔNG được phát lại)',
+        };
+      }
+      // Bằng chứng dương: có request của extension mang đúng token tới server.
+      const withToken = srv.requests.filter(
+        (r) => r.token === PLAYER_TOKEN && r.status === 200,
+      ).length;
+      const blocked = srv.requests.filter((r) => r.status === 403).length;
+      return {
+        ok: true,
+        detail: `${withToken} request mang token thật qua cổng, ${blocked} bị chặn`,
+      };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
 // --- Danh sách ca ------------------------------------------------------------------------------
 
 /**
@@ -964,6 +1069,14 @@ const SCENARIOS = [
     expect: 'pass',
     pins: '§2.?/W1.4 (discontinuity ghép mù -> file hỏng im lặng)',
     run: () => runDiscontinuityCounted(),
+  },
+  {
+    id: 'real-header-replay',
+    title:
+      'Server đòi token riêng của player -> extension phải BẮT & PHÁT LẠI header thật (bịa là trượt)',
+    expect: 'pass',
+    pins: '§2.11/W2.1 (ta bịa Referer/Origin, chưa từng quan sát một request header nào)',
+    run: () => runRealHeaderReplay(),
   },
   {
     id: 'drm-refused',

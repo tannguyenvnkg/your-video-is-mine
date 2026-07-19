@@ -258,3 +258,61 @@ describe('W4.2 upsertMedia giữ cờ con khi merge', () => {
     expect(list[0]!.parentUrl).toBe('https://ex.com/hls/master.m3u8');
   });
 });
+
+// ── W2.1 ─────────────────────────────────────────────────────────────────────────────────────
+describe('W2.1 upsertMedia mang được header THẬT đã bắt', () => {
+  // 🔴 BẪY IM LẶNG: `onBeforeRequest` tạo item TRƯỚC, `onSendHeaders` mới bắt được header SAU.
+  // Nghĩa là header LUÔN LUÔN tới ở nhánh MERGE, không bao giờ ở nhánh thêm-mới. Merge của
+  // upsertMedia lại theo DANH SÁCH TRẮNG: field ngoài danh sách bị `{...existing}` nuốt và
+  // `dirty` không bật -> changed=false -> addTabMedia KHÔNG GHI GÌ CẢ. Không một lỗi nào hiện ra;
+  // tính năng W2.1 sẽ chết 100% mà 4 cổng vẫn xanh. Đúng loại lỗi đã giết dự án này 3 lần.
+  const mk = (url: string, extra: Partial<MediaItem> = {}): MediaItem => ({
+    id: 'x',
+    type: 'hls',
+    url,
+    tabId: 1,
+    detectedAt: 1,
+    ...extra,
+  });
+
+  it('🔴 item ĐÃ TỒN TẠI + header tới sau -> PHẢI ghi được (changed=true)', () => {
+    const base = [mk('https://a.com/1.m3u8')];
+    const { list, changed } = upsertMedia(
+      base,
+      mk('https://a.com/1.m3u8', {
+        sentHeaders: { referer: 'https://site.example/watch' },
+      }),
+    );
+    expect(changed).toBe(true);
+    expect(list[0]!.sentHeaders).toEqual({
+      referer: 'https://site.example/watch',
+    });
+  });
+
+  it('không ghi đè bản chụp đã có (bản đầu là bản player thật dùng)', () => {
+    const base = [
+      mk('https://a.com/1.m3u8', {
+        sentHeaders: { referer: 'https://first/' },
+      }),
+    ];
+    const { list } = upsertMedia(
+      base,
+      mk('https://a.com/1.m3u8', {
+        sentHeaders: { referer: 'https://second/' },
+      }),
+    );
+    expect(list[0]!.sentHeaders).toEqual({ referer: 'https://first/' });
+  });
+
+  it('lần phát hiện sau KHÔNG mang header -> giữ nguyên bản đã bắt được', () => {
+    const base = [
+      mk('https://a.com/1.m3u8', { sentHeaders: { referer: 'https://keep/' } }),
+    ];
+    const { list } = upsertMedia(
+      base,
+      mk('https://a.com/1.m3u8', { size: 99 }),
+    );
+    expect(list[0]!.sentHeaders).toEqual({ referer: 'https://keep/' });
+    expect(list[0]!.size).toBe(99);
+  });
+});

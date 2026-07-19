@@ -49,7 +49,15 @@ import {
   hostFromUrl,
   originFromUrl,
   staleSpoofRuleIds,
+  type DnrRule,
+  buildHeaderSpoofRule,
 } from '@/utils/dnr';
+import {
+  capturedFromHeaderList,
+  filterCapturable,
+  planHeaderReplay,
+  shouldCaptureRequest,
+} from '@/utils/headers';
 import type { MediaItem } from '@/utils/types';
 import type {
   DownloadProgressResponse,
@@ -261,6 +269,46 @@ export default defineBackground(() => {
     },
     filter,
     ['responseHeaders'],
+  );
+
+  /**
+   * W2.1 — BẮT header THẬT mà player của trang gửi, để sau này PHÁT LẠI thay vì BỊA (§2.11).
+   *
+   * `extraHeaders` là BẮT BUỘC: thiếu nó Chrome giấu Cookie/Referer/Origin khỏi listener. Đã đo
+   * trong Edge thật — có `extraHeaders` thì thấy đủ `Referer`, `Cookie`, `X-Playback-Session-Id`.
+   *
+   * VÌ SAO ĐI QUA `recordMedia` chứ không nuôi một Map riêng: lộ trình gợi ý "Map requestId ->
+   * headers có quét TTL", nhưng service worker MV3 EPHEMERAL — biến toàn cục chết theo SW và bản
+   * chụp sẽ bốc hơi ngay trước lúc user bấm tải (đúng loại lỗi im lặng đã giết dự án này 3 lần).
+   * Đi qua `recordMedia` thì bản chụp nằm luôn trong `chrome.storage.session` cùng MediaItem: sống
+   * qua SW chết, tự dọn theo tab, tự tuân epoch điều hướng. Không cần TTL, không cần Map.
+   *
+   * Lọc rác miễn phí: `buildMediaItem` trả null cho URL không phải media, nên segment/ảnh/script
+   * không sinh ghi nào — chỉ manifest & file media mới được lưu header.
+   */
+  browser.webRequest.onSendHeaders.addListener(
+    (details): undefined => {
+      if (!shouldCaptureRequest(details, browser.runtime.id)) return undefined;
+      // Lọc NGAY LÚC BẮT: Cookie & bạn bè không bao giờ được phát lại nên đừng lưu chúng vào
+      // storage.session (listener chạy trên <all_urls>, user chưa hề bấm tải gì).
+      const sentHeaders = filterCapturable(
+        capturedFromHeaderList(details.requestHeaders ?? []),
+      );
+      if (Object.keys(sentHeaders).length === 0) return undefined;
+      void recordMedia(
+        {
+          url: details.url,
+          tabId: details.tabId,
+          detectedAt: Date.now(),
+          detectSource: 'network',
+          sentHeaders,
+        },
+        details.timeStamp,
+      );
+      return undefined;
+    },
+    filter,
+    ['requestHeaders', 'extraHeaders'],
   );
 
   // Router message.
@@ -668,9 +716,10 @@ async function withSpoofedFetch<T>(
   targetUrl: string,
   pageUrl: string | undefined,
   fn: () => Promise<T>,
+  captured?: CapturedContext,
 ): Promise<T> {
   const ruleId = await allocateSpoofRuleId();
-  await applySpoof(ruleId, targetUrl, pageUrl);
+  await applySpoof(ruleId, targetUrl, pageUrl, captured);
   try {
     return await fn();
   } finally {
@@ -697,6 +746,22 @@ async function pageUrlFor(
   return items.find((m) => m.pageUrl)?.pageUrl;
 }
 
+/**
+ * W2.1 — bản chụp header thật cho ĐÚNG `url`. KHỚP CHÍNH XÁC, không có đường lùi.
+ *
+ * Cố ý khác `pageUrlFor` ngay bên trên: hàm đó được phép lùi về item bất kỳ vì `pageUrl` là sự
+ * thật cấp TRANG. Header thì là sự thật cấp REQUEST — lấy header của media khác gán cho request
+ * này chính là BỊA, đúng thứ W2.1 sinh ra để diệt. Không khớp -> undefined -> lùi về spoof cũ.
+ */
+async function capturedFor(
+  tabId: number | undefined,
+  url: string,
+): Promise<CapturedContext | undefined> {
+  if (tabId === undefined || tabId < 0) return undefined;
+  const items = await getTabMedia(tabId);
+  return capturedContextOf(items.find((m) => m.url === url));
+}
+
 async function handleVariants(
   url: string,
   mediaType: ManifestKind,
@@ -705,8 +770,12 @@ async function handleVariants(
   try {
     const pageUrl = await pageUrlFor(tabId, url);
     // W2.2: spoof TRƯỚC khi fetch — 403 không được giết bước chọn chất lượng.
-    const res = await withSpoofedFetch(url, pageUrl, () =>
-      fetch(url, { credentials: 'include' }),
+    // W2.1: phát lại header THẬT của player cho đúng manifest này nếu đã bắt được.
+    const res = await withSpoofedFetch(
+      url,
+      pageUrl,
+      () => fetch(url, { credentials: 'include' }),
+      await capturedFor(tabId, url),
     );
     if (!res.ok) return { ok: false, error: `Máy chủ trả mã ${res.status}.` };
     const text = await res.text();
@@ -746,7 +815,7 @@ async function handleDownload(
     const media = (await getTabMedia(tabId)).find((m) => m.url === url);
     // Spoof Referer/Origin để vượt hotlink-protection/403 (non-DRM). Id riêng cho lượt tải này (W2.4).
     ruleId = await allocateSpoofRuleId();
-    await applySpoof(ruleId, url, media?.pageUrl);
+    await applySpoof(ruleId, url, media?.pageUrl, capturedContextOf(media));
     const folder = await getDownloadFolder();
     const filename = buildDownloadFilename({
       url,
@@ -860,15 +929,19 @@ async function handleHlsEstimate(
   // Ước lượng thường trỏ cùng host với hình; host tiếng khác (nếu có) là phần W2.3 phủ đầy đủ.
   const pageUrl = await pageUrlFor(tabId, variantUrl);
   try {
-    return await withSpoofedFetch(variantUrl, pageUrl, () =>
-      estimateFromPlaylists(
-        variantUrl,
-        bandwidth,
-        audioUrl,
-        mediaType,
-        variantId,
-        audioId,
-      ),
+    return await withSpoofedFetch(
+      variantUrl,
+      pageUrl,
+      () =>
+        estimateFromPlaylists(
+          variantUrl,
+          bandwidth,
+          audioUrl,
+          mediaType,
+          variantId,
+          audioId,
+        ),
+      await capturedFor(tabId, variantUrl),
     );
   } catch (e) {
     if (e instanceof HttpError) {
@@ -967,6 +1040,10 @@ async function handleHlsDownload(
   try {
     const media = (await getTabMedia(tabId)).find((m) => m.url === mediaUrl);
     const pageUrl = media?.pageUrl;
+    // W2.1 — header THẬT player đã gửi cho chính manifest này. Bắt theo ĐÚNG URL media, KHÔNG
+    // dùng đường lùi kiểu `pageUrlFor` (nó trả item bất kỳ của tab): pageUrl là sự thật cấp
+    // TRANG nên mượn được, còn header là sự thật cấp REQUEST — mượn của media khác là bịa kiểu mới.
+    const captured = capturedContextOf(media);
     // Mọi rule đã spoof PHẢI được theo dõi để còn DỌN: rule DNR session sống hết phiên trình duyệt
     // (§2.10) -> sót một cái là rác tới lúc đóng trình duyệt. W2.4: mỗi host một id RIÊNG (không
     // suy từ host) nên hai download cùng host không giật rule của nhau. `spoofedHosts` chỉ để DEDUPE
@@ -981,7 +1058,7 @@ async function handleHlsDownload(
       )
         return;
       const ruleId = await allocateSpoofRuleId();
-      await applySpoof(ruleId, url, pageUrl);
+      await applySpoof(ruleId, url, pageUrl, captured);
       spoofedHosts.add(host);
       spoofRuleIds.push(ruleId);
     };
@@ -1281,21 +1358,82 @@ const ensureOffscreen = singleFlight(async (): Promise<void> => {
 // đặt trần để một manifest dị dạng không sinh hàng trăm rule).
 const MAX_SPOOF_HOSTS = 64;
 
+/** W2.1 — bản chụp header thật của player + host đã chụp được nó. */
+interface CapturedContext {
+  headers: Record<string, string>;
+  /** host của URL đã quan sát được request; quyết định header nào bắn sang host khác được. */
+  host: string;
+  /** origin của URL đã chụp — dùng để NEO rule mang header nhạy cảm (chống rò sang subdomain). */
+  origin: string;
+}
+
+/**
+ * W2.1 — lấy bản chụp header của ĐÚNG media này (undefined nếu chưa quan sát được request nào).
+ *
+ * ⚠️ KHÔNG được nới thành "lấy đại item nào của tab" như `pageUrlFor` đang làm: `pageUrl` là sự
+ * thật cấp TRANG nên mượn giữa các media là hợp lý, còn header là sự thật cấp REQUEST — mượn
+ * `Authorization` của video khác chính là bịa kiểu mới, đúng thứ W2.1 sinh ra để diệt.
+ */
+function capturedContextOf(media?: MediaItem): CapturedContext | undefined {
+  if (!media?.sentHeaders) return undefined;
+  const host = hostFromUrl(media.url);
+  const origin = originFromUrl(media.url);
+  if (!host || !origin) return undefined;
+  return { headers: media.sentHeaders, host, origin };
+}
+
+/**
+ * W2.1 — chọn rule spoof: PHÁT LẠI header thật nếu bắt được, nếu không thì lùi về đường BỊA cũ.
+ *
+ * 🔴 ĐƯỜNG LÙI LÀ BẮT BUỘC, KHÔNG PHẢI CẨN THẬN THỪA. Ta chỉ bắt được header khi đã quan sát một
+ * request của player cho đúng URL đó. Media phát hiện qua DOM/MSE, hoặc tab đã tải xong trước khi
+ * extension kịp nghe, thì `sentHeaders` trống. Bỏ đường lùi = mất tính năng vượt 403 ĐANG CHẠY
+ * ĐƯỢC (e2e `variants-403`, `segments-other-host`, `progressive-403` đều xanh nhờ nó).
+ */
+function buildSpoofRule(
+  ruleId: number,
+  host: string,
+  targetUrl: string,
+  pageUrl: string | undefined,
+  captured: CapturedContext | undefined,
+): DnrRule | null {
+  if (captured) {
+    const plan = planHeaderReplay(captured.headers, {
+      sameHost: host === captured.host,
+    });
+    // isEmpty = bản chụp chỉ toàn header bị vứt -> coi như chưa bắt được gì -> đi tiếp xuống lùi.
+    if (!plan.isEmpty) {
+      // Rule mang header nhạy cảm (Authorization, token x-*) phải NEO theo origin: requestDomains
+      // của DNR khớp cả subdomain, nếu không neo thì token rò sang api./accounts./cdn. cùng apex.
+      return buildHeaderSpoofRule(
+        ruleId,
+        host,
+        plan.headers,
+        plan.hasSensitive ? captured.origin : undefined,
+      );
+    }
+  }
+  const refererBase =
+    pageUrl && pageUrl.startsWith('http') ? pageUrl : targetUrl;
+  const origin = originFromUrl(refererBase);
+  if (!origin) return null;
+  return buildRefererSpoofRule(ruleId, host, refererBase, origin);
+}
+
 // Áp session rule DNR spoof Referer/Origin cho host của media (vượt hotlink/403 non-DRM).
 // W2.4: `ruleId` do caller cấp (allocateSpoofRuleId) — id riêng mỗi (download, host) nên hai lượt
 // tải cùng host không giật rule của nhau.
+// W2.1: ưu tiên header THẬT của player (`captured`), chỉ BỊA khi không có gì để phát lại.
 async function applySpoof(
   ruleId: number,
   targetUrl: string,
   pageUrl?: string,
+  captured?: CapturedContext,
 ): Promise<void> {
   const host = hostFromUrl(targetUrl);
   if (!host) return;
-  const refererBase =
-    pageUrl && pageUrl.startsWith('http') ? pageUrl : targetUrl;
-  const origin = originFromUrl(refererBase);
-  if (!origin) return;
-  const rule = buildRefererSpoofRule(ruleId, host, refererBase, origin);
+  const rule = buildSpoofRule(ruleId, host, targetUrl, pageUrl, captured);
+  if (!rule) return;
   try {
     // Cast: DnrRule (string literals) tương thích cấu trúc với kiểu Rule của API.
     await browser.declarativeNetRequest.updateSessionRules({

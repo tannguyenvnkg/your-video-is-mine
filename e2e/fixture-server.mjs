@@ -31,6 +31,12 @@ const FIXTURES_PROGRESSIVE = resolve(
   'fixtures/progressive',
 );
 
+/**
+ * W2.1 — token phiên do "player" của trang sinh ra. KHÔNG suy được từ URL/pageUrl/host, nên
+ * extension chỉ có thể có nó bằng cách QUAN SÁT request thật của player (`onSendHeaders`).
+ */
+export const PLAYER_TOKEN = 'e2e-player-session-4f2a91';
+
 /** File mp4 progressive (đọc một lần) — dùng cho ca W2.5. */
 const PROGRESSIVE_MP4 = readFileSync(join(FIXTURES_PROGRESSIVE, 'sample.mp4'));
 
@@ -52,8 +58,9 @@ export async function startFixtureServer({
   gate = 'none',
   segmentHost = null,
   stallSegments = false,
+  tokenGate = false,
 } = {}) {
-  /** @type {{url:string, referer:string|undefined, status:number}[]} */
+  /** @type {{url:string, referer:string|undefined, token:string|undefined, status:number}[]} */
   const requests = [];
 
   const isSegment = (p) => /\/seg\d+\.ts$/.test(p);
@@ -68,9 +75,10 @@ export async function startFixtureServer({
   const server = createServer((req, res) => {
     const path = (req.url ?? '/').split('?')[0];
     const referer = req.headers.referer;
+    const token = req.headers['x-playback-session-id'];
 
     const send = (status, body, type) => {
-      requests.push({ url: path, referer, status });
+      requests.push({ url: path, referer, token, status });
       res.writeHead(status, {
         'content-type': type,
         'cache-control': 'no-store',
@@ -82,6 +90,19 @@ export async function startFixtureServer({
     if (needsReferer(path) && !referer) {
       send(403, 'Forbidden: thiếu Referer', 'text/plain');
       return;
+    }
+
+    // W2.1 — CỔNG TOKEN: đòi một header mà extension KHÔNG THỂ BỊA RA.
+    //
+    // Vì sao cổng này chứng minh được điều Referer không chứng minh nổi: Referer suy được từ
+    // pageUrl (bản BỊA cũ làm đúng thế và vẫn qua cổng). `X-Playback-Session-Id: <giá trị ngẫu
+    // nhiên do trang sinh>` thì KHÔNG suy ra được từ bất cứ đâu — chỉ có thể QUAN SÁT ĐƯỢC từ
+    // request thật của player. Qua cổng này = đã bắt & phát lại header thật. Không qua = chưa.
+    if (tokenGate && (isManifest(path) || isSegment(path))) {
+      if (token !== PLAYER_TOKEN) {
+        send(403, `Forbidden: token sai/thiếu (${token ?? 'NONE'})`, 'text/plain');
+        return;
+      }
     }
 
     if (path === '/hls/master.m3u8') {
@@ -187,6 +208,22 @@ export async function startFixtureServer({
       );
       return;
     }
+    // W2.1 — trang có "player" thật: nó fetch manifest KÈM header token riêng. Extension phải
+    // nghe được cú fetch này thì mới có gì để phát lại.
+    if (path === '/player.html') {
+      send(
+        200,
+        `<!doctype html><title>player fixture</title><p>player page<script>
+          window.__played = fetch('/hls/master.m3u8', {
+            headers: { 'X-Playback-Session-Id': '${PLAYER_TOKEN}' },
+          }).then((r) => r.text()).then(() => fetch('/hls/media.m3u8', {
+            headers: { 'X-Playback-Session-Id': '${PLAYER_TOKEN}' },
+          })).then((r) => r.ok);
+        </script>`,
+        'text/html',
+      );
+      return;
+    }
     if (path === '/page.html') {
       send(
         200,
@@ -206,6 +243,8 @@ export async function startFixtureServer({
     requests,
     origin: `http://127.0.0.1:${port}`,
     pageUrl: `http://127.0.0.1:${port}/page.html`,
+    /** W2.1 — trang có player gửi header token riêng. */
+    playerPageUrl: `http://127.0.0.1:${port}/player.html`,
     /** W7.1 — trang gọi requestMediaKeySystemAccess (giả lập site DRM). */
     drmPageUrl: `http://127.0.0.1:${port}/drm.html`,
     masterUrl: `http://127.0.0.1:${port}/hls/master.m3u8`,
