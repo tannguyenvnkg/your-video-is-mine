@@ -975,6 +975,125 @@ async function runDiscontinuityCounted() {
   }
 }
 
+/**
+ * W4.3 — tên file phải theo TÊN VIDEO của trang, không phải theo path URL.
+ *
+ * Ghim ba thứ mà unit test KHÔNG với tới, vì chúng nằm ở phần đấu dây trong background:
+ *  1. background thật sự CÓ gọi resolveTitle (thay vì `media?.title` cũ, gần như luôn trống);
+ *  2. `frameIds: [0]` — trang có iframe player mang tiêu đề sai, đọc nhầm khung là lộ ngay;
+ *  3. tiêu đề unicode đi trọn đường tới tên file mà không bị cắt/hỏng.
+ */
+async function runTitleFromPage({ page: pagePath, want, template, spaNavigate }) {
+  const srv = await startFixtureServer({ gate: 'none' });
+  try {
+    return await withBrowser(async ({ page }) => {
+      const pageUrl = pagePath === 'og' ? srv.ogPageUrl : srv.docPageUrl;
+      // Ghim đường đấu dây của cài đặt: mẫu chỉ có tác dụng nếu CẢ HAI chỗ gọi
+      // buildDownloadFilename cùng đọc getFilenameTemplate. Quên một chỗ là cài đặt câm.
+      if (template) {
+        await page.evaluate(
+          (tpl) => chrome.storage.local.set({ 'settings:filenameTemplate': tpl }),
+          template,
+        );
+      }
+      // Tab THẬT: resolveTitle đọc DOM qua scripting.executeScript nên tabId phải là tab thật.
+      const tabId = await page.evaluate(async (url) => {
+        const t = await chrome.tabs.create({ url, active: false });
+        return t.id;
+      }, pageUrl);
+      if (typeof tabId !== 'number') {
+        return { ok: false, detail: 'không mở được tab fixture' };
+      }
+      // Chờ trang dựng xong DOM — đọc tiêu đề trước khi parse xong là đọc hụt.
+      for (let i = 0; i < 40; i++) {
+        const ready = await page.evaluate(async (id) => {
+          const [r] = await chrome.scripting.executeScript({
+            target: { tabId: id, frameIds: [0] },
+            func: () => document.readyState,
+          });
+          return r?.result;
+        }, tabId);
+        if (ready === 'complete') break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      // Chờ extension PHÁT HIỆN master qua webRequest -> sinh MediaItem thật, có đóng dấu
+      // detectPageUrl. Không có bước này thì `media` là undefined và cổng chống đặt nhầm tên
+      // không hề được kiểm — đúng lỗ hổng review đối kháng chỉ ra.
+      let stamped;
+      for (let i = 0; i < 40; i++) {
+        stamped = await page.evaluate(
+          async ([id, url]) => {
+            const all = await chrome.storage.session.get(`media:${id}`);
+            const it = (all[`media:${id}`]?.items ?? []).find((m) => m.url === url);
+            return it ? { detectPageUrl: it.detectPageUrl } : null;
+          },
+          [tabId, srv.masterUrl],
+        );
+        if (stamped) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (!stamped) {
+        return { ok: false, detail: 'extension KHÔNG phát hiện được master trên tab fixture' };
+      }
+      if (!stamped.detectPageUrl) {
+        return {
+          ok: false,
+          detail: 'media KHÔNG được đóng dấu trang lúc phát hiện (detectPageUrl trống)',
+        };
+      }
+
+      // Ca SPA: đổi route KHÔNG tải lại trang. Dòng media cũ nay thuộc trang cũ -> cổng phải ĐÓNG
+      // và tên file lùi về tên từ URL, TUYỆT ĐỐI không được mượn tiêu đề trang mới.
+      if (spaNavigate) {
+        await page.evaluate(async (id) => {
+          await chrome.scripting.executeScript({
+            target: { tabId: id, frameIds: [0] },
+            func: () => history.pushState({}, '', '/og.html?v=2'),
+          });
+        }, tabId);
+        for (let i = 0; i < 40; i++) {
+          const nav = await page.evaluate(async (id) => {
+            const all = await chrome.storage.session.get(`media:${id}`);
+            return all[`media:${id}`]?.navUrl;
+          }, tabId);
+          if (nav && nav.includes('v=2')) break;
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
+
+      const start = await page.evaluate(
+        ([variantUrl, mediaUrl, id]) =>
+          chrome.runtime.sendMessage({
+            kind: 'hls/download',
+            variantUrl,
+            mediaUrl,
+            tabId: id,
+          }),
+        [srv.mediaUrl, srv.masterUrl, tabId],
+      );
+      if (!start?.ok) {
+        return {
+          ok: false,
+          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+        };
+      }
+      const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
+      if (!job) return { ok: false, detail: 'job TREO' };
+      const wantName = `${DOWNLOAD_FOLDER}/${want}.mp4`;
+      if (job.filename !== wantName) {
+        return {
+          ok: false,
+          detail: `tên file sai: "${job.filename}", mong đợi "${wantName}"`,
+        };
+      }
+      return { ok: true, detail: `tên file đúng: "${job.filename}"` };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
 const SCENARIOS = [
   {
     id: 'happy',
@@ -1077,6 +1196,44 @@ const SCENARIOS = [
     expect: 'pass',
     pins: '§2.11/W2.1 (ta bịa Referer/Origin, chưa từng quan sát một request header nào)',
     run: () => runRealHeaderReplay(),
+  },
+  {
+    id: 'title-og',
+    title:
+      'Trang có og:title -> tên file theo TÊN VIDEO (og thắng <title> bẩn; unicode giữ nguyên)',
+    expect: 'pass',
+    pins: 'W4.3 (media phát hiện qua mạng không mang title -> đa số file ra master/media.mp4)',
+    run: () => runTitleFromPage({ page: 'og', want: 'Tên Video Thật' }),
+  },
+  {
+    id: 'title-doc',
+    title:
+      'Trang chỉ có <title> bẩn -> phải cắt bộ đếm "(3)" và đuôi tên site, ra đúng tên video',
+    expect: 'pass',
+    pins: 'W4.3 (chuỗi làm sạch tiêu đề phải chạy trong đường đấu dây thật, không chỉ trong vitest)',
+    run: () => runTitleFromPage({ page: 'doc', want: 'Tên Video Thật' }),
+  },
+  {
+    id: 'title-template',
+    title:
+      'Mẫu tên do user đặt ({site}_{title}) phải tới được tên file thật, không chỉ nằm trong storage',
+    expect: 'pass',
+    pins: 'W4.3 (cài đặt mẫu tên chỉ có unit test; đường từ storage tới tên file chưa ai canh)',
+    run: () =>
+      runTitleFromPage({
+        page: 'og',
+        want: '127.0.0.1_Tên Video Thật',
+        template: '{site}_{title}',
+      }),
+  },
+  {
+    id: 'title-spa-stale',
+    title:
+      'Chuyển video kiểu SPA rồi tải dòng CŨ -> phải lùi về tên từ URL, KHÔNG mượn tên trang mới',
+    expect: 'pass',
+    pins: 'W4.3 (cổng chống đặt nhầm tên: thà thiếu tên còn hơn SAI tên)',
+    run: () =>
+      runTitleFromPage({ page: 'og', want: 'media', spaNavigate: true }),
   },
   {
     id: 'drm-refused',

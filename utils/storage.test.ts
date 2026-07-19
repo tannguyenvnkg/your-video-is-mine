@@ -6,13 +6,17 @@ import {
   clearTabMedia,
   getDownloadByChromeId,
   getDownloads,
+  getFilenameTemplate,
   getPreferredHeight,
   getTabMedia,
+  getTabState,
   getHlsJobs,
   putDownload,
   putHlsJob,
   resetTab,
+  setFilenameTemplate,
   setPreferredHeight,
+  setTabNavUrl,
   updateDownload,
   updateHlsJob,
   type HlsJob,
@@ -214,7 +218,9 @@ describe('W2.7 — phase kết thúc là CHUNG THẨM, không hồi sinh đượ
   it('job đã "error" KHÔNG bị kéo ngược về "fetching"', async () => {
     // Ca thật W2.7: tick chốt job chết; nếu offscreen hồi sinh muộn và ghi tiếp thì spoof rule đã bị
     // dọn -> job chạy tiếp chỉ để 403, user nhận LỖI THỨ HAI khó hiểu hơn lỗi đầu.
-    await putHlsJob(job({ phase: 'error', error: 'Bộ xử lý video đã dừng đột ngột' }));
+    await putHlsJob(
+      job({ phase: 'error', error: 'Bộ xử lý video đã dừng đột ngột' }),
+    );
     await updateHlsJob('j1', { phase: 'fetching', segmentsDone: 9 });
     const j = (await getHlsJobs())['j1']!;
     expect(j.phase).toBe('error');
@@ -239,5 +245,100 @@ describe('W2.7 — phase kết thúc là CHUNG THẨM, không hồi sinh đượ
     await putHlsJob(job({ phase: 'fetching' }));
     await updateHlsJob('j1', { phase: 'done' });
     expect((await getHlsJobs())['j1']!.phase).toBe('done');
+  });
+});
+
+// ── W4.3 ────────────────────────────────────────────────────────────────────
+
+describe('settings:filenameTemplate', () => {
+  beforeEach(() => {
+    fakeBrowser.reset();
+  });
+
+  it('mặc định là mẫu giữ nguyên hành vi cũ', async () => {
+    expect(await getFilenameTemplate()).toBe('{title}{res}');
+  });
+
+  it('lưu rồi đọc lại', async () => {
+    await setFilenameTemplate('{title}');
+    expect(await getFilenameTemplate()).toBe('{title}');
+  });
+
+  it('mẫu rỗng -> lùi về mặc định', async () => {
+    await setFilenameTemplate('   ');
+    expect(await getFilenameTemplate()).toBe('{title}{res}');
+  });
+
+  // 🔴 Mẫu không có {title}/{basename} dồn MỌI video về một tên; conflictAction 'uniquify' lặng lẽ
+  // thêm ' (1)', ' (2)'... nên user không bao giờ thấy lỗi — chỉ thấy một đống file vô danh.
+  it('mẫu không phân biệt được video -> từ chối, lùi về mặc định', async () => {
+    await setFilenameTemplate('{date}');
+    expect(await getFilenameTemplate()).toBe('{title}{res}');
+  });
+});
+
+describe('W4.3 navUrl theo tab', () => {
+  beforeEach(() => {
+    fakeBrowser.reset();
+  });
+
+  it('resetTab ghi navUrl của trang mới', async () => {
+    await resetTab(1, 100, 'https://a.com/p');
+    expect((await getTabState(1)).navUrl).toBe('https://a.com/p');
+  });
+
+  it('setTabNavUrl chỉ đổi navUrl, KHÔNG đụng items/navStartedAt', async () => {
+    await resetTab(1, 100, 'https://a.com/p');
+    await addTabMedia(1, item('https://a.com/v.m3u8'));
+    await setTabNavUrl(1, 'https://a.com/q');
+    const st = await getTabState(1);
+    expect(st.navUrl).toBe('https://a.com/q');
+    expect(st.navStartedAt).toBe(100);
+    expect(st.items).toHaveLength(1);
+  });
+
+  // 🔴 GHIM CÁI BẪY XOÁ SẠCH: getTabState dựng lại object literal, field nào không được liệt kê
+  // trong đó sẽ bị lần read-modify-write kế tiếp nuốt mất. Triệu chứng: tải ngay thì đúng, phát
+  // hiện thêm một media nữa là mất tên. tsc/eslint/vitest hiện có ĐỀU KHÔNG THẤY.
+  it('navUrl SỐNG SÓT qua lần ghi media kế tiếp', async () => {
+    await setTabNavUrl(1, 'https://a.com/q');
+    await addTabMedia(1, item('https://a.com/v.m3u8'));
+    expect((await getTabState(1)).navUrl).toBe('https://a.com/q');
+  });
+
+  it('điều hướng thật (resetTab không kèm URL) xoá navUrl', async () => {
+    await resetTab(1, 100, 'https://a.com/p');
+    await resetTab(1, 200);
+    expect((await getTabState(1)).navUrl).toBeUndefined();
+  });
+
+  // 🔴 Đây là mấu chốt để cổng sameDocument có dữ liệu THẬT trên đường phát hiện MẠNG: media bắt
+  // qua webRequest không mang theo URL trang nào cả.
+  it('media mới được đóng dấu URL trang LÚC PHÁT HIỆN', async () => {
+    await resetTab(1, 100, 'https://a.com/p');
+    await addTabMedia(1, item('https://a.com/v.m3u8'));
+    expect((await getTabMedia(1))[0]!.detectPageUrl).toBe('https://a.com/p');
+  });
+
+  // 🔴 CA NÀY TỪNG KHOÁ CHẶT MỘT HÀNH VI SAI — review đối kháng bắt được, nay đã lật lại.
+  // Bản cũ ăn mừng việc `detectPageUrl` được điền ở nhánh MERGE. Nhưng điền muộn = đóng dấu media
+  // của trang A bằng URL trang B: cùng một URL media hay được báo lại SAU khi user đã chuyển trang
+  // SPA. Khi đó cổng sameDocument quay ra XÁC NHẬN cái sai -> tên video B nằm trên file video A.
+  // Đúng, không đóng dấu thì mất tên đẹp — nhưng thà thiếu tên còn hơn SAI tên.
+  it('KHÔNG điền detectPageUrl muộn ở nhánh MERGE (dấu là của LẦN ĐẦU)', async () => {
+    await addTabMedia(1, item('https://a.com/v.m3u8'));
+    expect((await getTabMedia(1))[0]!.detectPageUrl).toBeUndefined();
+    await setTabNavUrl(1, 'https://b.com/khac');
+    await addTabMedia(1, item('https://a.com/v.m3u8'));
+    expect((await getTabMedia(1))[0]!.detectPageUrl).toBeUndefined();
+  });
+
+  it('KHÔNG ghi đè detectPageUrl đã có sẵn', async () => {
+    await resetTab(1, 100, 'https://a.com/p');
+    await addTabMedia(
+      1,
+      item('https://a.com/v.m3u8', { detectPageUrl: 'https://b.com/' }),
+    );
+    expect((await getTabMedia(1))[0]!.detectPageUrl).toBe('https://b.com/');
   });
 });

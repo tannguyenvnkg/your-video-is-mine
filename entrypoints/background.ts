@@ -7,6 +7,7 @@ import {
 import { describeError } from '@/utils/errors';
 import { DRM_UNSUPPORTED_ERROR, drmNameFromKeySystem } from '@/utils/drm';
 import { buildDownloadFilename } from '@/utils/filename';
+import { pickTitle, sameDocument } from '@/utils/title';
 import {
   DEAD_OFFSCREEN_ERROR,
   HEARTBEAT_TIMEOUT_MS,
@@ -24,6 +25,7 @@ import {
   getDownloadByChromeId,
   getDownloadFolder,
   getDownloads,
+  getFilenameTemplate,
   getHlsJobs,
   getTabMedia,
   getTabState,
@@ -31,6 +33,7 @@ import {
   putDownload,
   putHlsJob,
   resetTab,
+  setTabNavUrl,
   updateDownload,
   updateHlsJob,
   type DownloadEntry,
@@ -220,7 +223,7 @@ export default defineBackground(() => {
     if (details.type === 'main_frame' && details.tabId >= 0) {
       const navAt = details.timeStamp;
       void serialize(async () => {
-        await resetTab(details.tabId, navAt);
+        await resetTab(details.tabId, navAt, details.url);
         await updateBadge(details.tabId, 0);
       });
       return undefined;
@@ -482,7 +485,10 @@ export default defineBackground(() => {
       // ta chỉ từ chối TẢI, không phá trải nghiệm xem.
       if (message.kind === 'media/drm') {
         const name = drmNameFromKeySystem(message.keySystem) ?? 'DRM không rõ';
-        void markTabDrm(tabId, name).then((isNew) => {
+        // 🔴 PHẢI đi qua `serialize`: đây là read-modify-write trên CÙNG khoá storage với
+        // `setTabNavUrl` (W4.3, bắn theo mọi lần đổi URL). Không xếp hàng thì hai bên ghi đè nhau
+        // và cờ DRM có thể bị XOÁ -> ranh giới cứng §7 thủng mà không một dòng lỗi nào hiện ra.
+        void serialize(() => markTabDrm(tabId, name)).then((isNew) => {
           if (isNew) console.warn(`[bg] W7.1: tab ${tabId} dùng DRM (${name})`);
         });
       }
@@ -613,11 +619,21 @@ export default defineBackground(() => {
     void clearTabMedia(tabId);
   });
 
+  // W4.3 — điều hướng SPA (`pushState`) KHÔNG sinh request `main_frame` nào nên `resetTab` không
+  // chạy; nhưng `tabs.onUpdated` VẪN bắn kèm `changeInfo.url`. Chỉ cập nhật navUrl, KHÔNG xoá
+  // items: media của route mới cần được đóng dấu đúng trang, còn xoá danh sách là việc của resetTab.
+  browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    const url = changeInfo.url;
+    if (url) void serialize(() => setTabNavUrl(tabId, url));
+  });
+
   // W2.4 — đối soát rule spoof rò rỉ. `onStartup` bắn khi mở lại trình duyệt; lời gọi top-level
   // bắn mỗi lần SW cold-start giữa phiên (bắt rule của job đã chết trước đó mà chưa kịp dọn). Job
   // còn sống thì id của nó nằm trong tập "còn sống" nên KHÔNG bị quét nhầm.
   browser.runtime.onStartup.addListener(() => {
     void sweepStaleSpoofRules();
+    // W4.3 — tab đã mở sẵn trước khi SW này chạy cũng cần biết mình đang ở URL nào.
+    void seedNavUrls(serialize);
   });
   void sweepStaleSpoofRules();
 
@@ -762,6 +778,134 @@ async function capturedFor(
   return capturedContextOf(items.find((m) => m.url === url));
 }
 
+/**
+ * Trần chờ khi đọc tiêu đề trang. Đọc tên file là việc PHỤ — không được phép giữ cả lượt tải.
+ *
+ * Ca thật: renderer treo (trang nặng, breakpoint devtools) thì `executeScript` không bao giờ trả
+ * lời. Lời gọi này nằm TRƯỚC `putHlsJob`/`putDownload`, nên treo ở đây nghĩa là bấm Tải mà KHÔNG
+ * có gì xảy ra: không job, không lỗi, không dòng log — đúng kiểu hỏng câm dự án này đã trả giá.
+ */
+const TITLE_READ_TIMEOUT_MS = 3_000;
+
+function withTitleTimeout<T>(p: Promise<T>): Promise<T | undefined> {
+  return Promise.race([
+    p,
+    new Promise<undefined>((resolve) =>
+      setTimeout(() => resolve(undefined), TITLE_READ_TIMEOUT_MS),
+    ),
+  ]);
+}
+
+/**
+ * W4.3 — nạp `navUrl` cho các tab ĐANG MỞ SẴN lúc service worker khởi động.
+ *
+ * Không có bước này thì tab đã mở từ trước khi extension cài/cập nhật sẽ không có `navUrl` (chỉ
+ * `resetTab` theo main_frame và `tabs.onUpdated` mới đặt), nên mọi media phát hiện trong đó KHÔNG
+ * được đóng dấu -> cổng chống đặt nhầm tên đóng lại -> tên file lùi về `master.mp4` dù user đang
+ * đứng đúng ở trang đó. Nạp sẵn để trường hợp thường gặp vẫn có tên đẹp.
+ */
+async function seedNavUrls(
+  run: <T>(fn: () => Promise<T>) => Promise<T>,
+): Promise<void> {
+  try {
+    const tabs = await browser.tabs.query({});
+    for (const t of tabs) {
+      const id = t.id;
+      const url = t.url;
+      if (typeof id === 'number' && id >= 0 && url?.startsWith('http')) {
+        await run(() => setTabNavUrl(id, url));
+      }
+    }
+  } catch (e) {
+    console.warn('[bg] W4.3 không nạp được navUrl ban đầu:', describeError(e));
+  }
+}
+
+/**
+ * W4.3 — giải tiêu đề video LÚC TẢI, không phải lúc phát hiện.
+ *
+ * VÌ SAO ĐỌC MUỘN: phát hiện qua mạng (`onBeforeRequest`/`onHeadersReceived`/`onSendHeaders`) chạy
+ * TRƯỚC content script (`document_idle`) — đó chính là lý do đa số media HLS/DASH xưa nay không có
+ * tiêu đề nào và rơi về `master.mp4`. Đọc lúc user bấm tải thì DOM đã dựng xong, `og:title` đã có.
+ * Đọc muộn cũng có nghĩa KHÔNG cần lưu tiêu đề lên `MediaItem` -> không dính bẫy "ai ghi trước
+ * thắng" của `upsertMedia`, và không có cuộc đua nào để thua.
+ *
+ * Về `frameIds: [0]` — ĐÃ ĐO (e2e `title-og` + mutation ME5, 2026-07-19): nó KHÔNG phải thứ đang
+ * gánh việc. `executeScript` mặc định đã chỉ chèn vào khung TOP, nên bỏ dòng này ca e2e vẫn xanh.
+ * Giữ lại vì nó nói rõ ý định và chặn trước ca ai đó đổi sang `allFrames: true` — lúc ấy iframe của
+ * player nhúng (title riêng kiểu 'JW Player') mới thật sự có cửa chen vào. ĐỪNG ghi nó là "bắt
+ * buộc": fixture `/og.html` có sẵn iframe tiêu đề sai mà mutation vẫn không bắn.
+ */
+async function resolveTitle(
+  tabId: number | undefined,
+  media: MediaItem | undefined,
+): Promise<string | undefined> {
+  const stored = media?.title;
+  const detectedAt = media?.detectPageUrl;
+  if (tabId === undefined || tabId < 0) {
+    return pickTitle({ stored }, detectedAt);
+  }
+
+  let tab: { url?: string; title?: string } | undefined;
+  try {
+    tab = await withTitleTimeout(browser.tabs.get(tabId));
+  } catch {
+    // Tab đã đóng / bị Chrome loại khỏi bộ nhớ. Không phải lỗi — cứ dùng thứ đã lưu.
+    tab = undefined;
+  }
+  const currentUrl = tab?.url;
+
+  // 🔴 Cổng chống ĐẶT NHẦM TÊN — ĐÓNG khi thiếu dữ kiện (review đối kháng: 6 lăng kính độc lập
+  // cùng chỉ vào chỗ này). Hai ca đều phải chặn:
+  //  - media được phát hiện ở trang khác trang đang mở (user chuyển video kiểu SPA);
+  //  - media KHÔNG có dấu trang (`detectPageUrl` trống) -> ta không có cách nào biết nó thuộc trang
+  //    nào, nên KHÔNG được mượn tiêu đề của trang đang mở.
+  // Chặn ở đây chỉ làm tên file lùi về tên từ URL. Cho qua thì cho ra một cái tên SAI mà trông rất
+  // thật — tệ hơn hẳn `master.mp4`, vì user TIN nó đúng.
+  if (!detectedAt || !sameDocument(detectedAt, currentUrl)) {
+    return pickTitle({ stored }, detectedAt ?? currentUrl);
+  }
+
+  let meta: { og?: string; twitter?: string; doc?: string } = {};
+  try {
+    const results = await withTitleTimeout(
+      browser.scripting.executeScript({
+        target: { tabId, frameIds: [0] },
+        func: () => {
+          const read = (sel: string): string | undefined => {
+            const el = document.querySelector(sel);
+            const v = el?.getAttribute('content') ?? undefined;
+            return v && v.trim() ? v : undefined;
+          };
+          return {
+            og: read('meta[property="og:title"]'),
+            twitter:
+              read('meta[name="twitter:title"]') ??
+              read('meta[property="twitter:title"]'),
+            doc: document.title || undefined,
+          };
+        },
+      }),
+    );
+    meta = results?.[0]?.result ?? {};
+  } catch (e) {
+    // Trang cấm chèn script (chrome://, Web Store, PDF viewer) — KHÔNG phải lỗi của lượt tải.
+    // Ghi log chứ không nuốt trọn: `catch {}` trần là thứ đã giấu 3 con bug chí mạng của dự án này.
+    console.warn('[bg] W4.3 không đọc được tiêu đề trang:', describeError(e));
+  }
+
+  return pickTitle(
+    {
+      og: meta.og,
+      twitter: meta.twitter,
+      doc: meta.doc,
+      tab: tab?.title,
+      stored,
+    },
+    currentUrl ?? detectedAt,
+  );
+}
+
 async function handleVariants(
   url: string,
   mediaType: ManifestKind,
@@ -819,10 +963,13 @@ async function handleDownload(
     const folder = await getDownloadFolder();
     const filename = buildDownloadFilename({
       url,
-      title: media?.title,
+      // W4.3 — KHÔNG dùng `media?.title` nữa: nó gần như luôn trống trên đường phát hiện qua mạng.
+      title: await resolveTitle(tabId, media),
       height: media?.height,
       contentType: media?.contentType,
       folder,
+      template: await getFilenameTemplate(),
+      pageUrl: media?.pageUrl ?? media?.detectPageUrl,
     });
     // Entry in-flight (phase FETCH trong offscreen) — chưa có chromeDownloadId, popup hiện "Đang tải…".
     await putDownload({
@@ -1111,9 +1258,12 @@ async function handleHlsDownload(
     const folder = await getDownloadFolder();
     const filename = buildDownloadFilename({
       url: variantUrl,
-      title: media?.title,
+      // W4.3 — đây là đường tải CHỦ LỰC (HLS/DASH) và cũng là chỗ `media?.title` trống nhiều nhất.
+      title: await resolveTitle(tabId, media),
       height: height ?? media?.height,
       folder,
+      template: await getFilenameTemplate(),
+      pageUrl: media?.pageUrl ?? media?.detectPageUrl,
     });
     const jobId = crypto.randomUUID();
     await putHlsJob({

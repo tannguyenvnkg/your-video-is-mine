@@ -16,6 +16,14 @@ export interface MediaItem {
   tabId: number;
   /** URL trang chứa media (đặt tên file, hiển thị). */
   pageUrl?: string;
+  /**
+   * W4.3 — URL trang tại THỜI ĐIỂM PHÁT HIỆN, do `addTabMedia` đóng dấu từ `TabMediaState.navUrl`.
+   *
+   * Cố ý TÁCH khỏi `pageUrl`: `pageUrl` đang là nguồn dựng Referer chống 403 (W2.1/W2.4), đụng vào
+   * nó là đụng vào tầng mạng đã đo kỹ. Trường này CHỈ phục vụ đặt tên file — so với URL trang hiện
+   * tại lúc tải để biết media có còn thuộc trang đang mở không (SPA đổi video).
+   */
+  detectPageUrl?: string;
   /** tiêu đề trang. */
   title?: string;
   contentType?: string;

@@ -4,13 +4,19 @@ import {
   getConcurrency,
   getDownloadFolder,
   getEnabledTypes,
+  getFilenameTemplate,
   getSizeWarnBytes,
   setConcurrency,
   setDownloadFolder,
   setEnabledTypes,
+  setFilenameTemplate,
   setSizeWarnBytes,
   type EnabledTypes,
 } from '@/utils/storage';
+import {
+  buildDownloadFilename,
+  DEFAULT_FILENAME_TEMPLATE,
+} from '@/utils/filename';
 import { requestFfmpegDemo } from '@/utils/messages';
 import type { MediaType } from '@/utils/types';
 
@@ -28,6 +34,7 @@ function App() {
   const [sizeGb, setSizeGb] = useState('1.5');
   const [concurrency, setConcurrencyState] = useState(6);
   const [types, setTypes] = useState<EnabledTypes>(DEFAULT_ENABLED_TYPES);
+  const [template, setTemplate] = useState(DEFAULT_FILENAME_TEMPLATE);
   const [saved, setSaved] = useState(false);
 
   const [ffBusy, setFfBusy] = useState(false);
@@ -39,6 +46,7 @@ function App() {
       setSizeGb((((await getSizeWarnBytes()) / GB) * 1).toFixed(2));
       setConcurrencyState(await getConcurrency());
       setTypes(await getEnabledTypes());
+      setTemplate(await getFilenameTemplate());
     })();
   }, []);
 
@@ -48,6 +56,7 @@ function App() {
     if (Number.isFinite(gb) && gb > 0)
       await setSizeWarnBytes(Math.round(gb * GB));
     await setConcurrency(concurrency);
+    await setFilenameTemplate(template.trim() || DEFAULT_FILENAME_TEMPLATE);
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
   };
@@ -108,6 +117,45 @@ function App() {
         <p style={{ fontSize: 13, opacity: 0.7, marginTop: 6 }}>
           File lưu vào <code>Downloads/&lt;thư mục&gt;/</code>. Ký tự không hợp
           lệ thay bằng “_”.
+        </p>
+      </section>
+
+      <section style={{ marginTop: 20 }}>
+        <label htmlFor="tpl" style={labelStyle}>
+          Mẫu tên file
+        </label>
+        <input
+          id="tpl"
+          type="text"
+          value={template}
+          placeholder={DEFAULT_FILENAME_TEMPLATE}
+          onChange={(e) => setTemplate(e.target.value)}
+          style={inputStyle}
+        />
+        <p style={{ fontSize: 13, opacity: 0.7, marginTop: 6 }}>
+          Thẻ dùng được: <code>{'{title}'}</code> tên video ·{' '}
+          <code>{'{res}'}</code> chất lượng (vd <code>_720p</code>) ·{' '}
+          <code>{'{site}'}</code> tên trang · <code>{'{date}'}</code> ngày ·{' '}
+          <code>{'{time}'}</code> giờ · <code>{'{basename}'}</code> tên từ URL.
+          <br />
+          Mẫu phải chứa <code>{'{title}'}</code> hoặc{' '}
+          <code>{'{basename}'}</code>, nếu không mọi video sẽ trùng tên nhau và
+          mẫu sẽ bị bỏ qua.
+        </p>
+        {/* Xem trước là bước xác nhận DUY NHẤT: tải về không hiện hộp thoại nào (saveAs: false),
+            nên mẫu sai sẽ âm thầm nằm trên đĩa mà user không hề biết. */}
+        <p style={{ fontSize: 13, marginTop: 6 }}>
+          Xem trước:{' '}
+          <code>
+            {buildDownloadFilename({
+              url: 'https://example.com/video/master.m3u8',
+              title: 'Tên video mẫu',
+              height: 720,
+              pageUrl: 'https://example.com/watch',
+              template,
+              folder,
+            })}
+          </code>
         </p>
       </section>
 

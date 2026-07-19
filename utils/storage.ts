@@ -8,6 +8,7 @@
 import type { MediaItem, MediaType } from './types';
 import { markChildren, upsertMedia, visibleMedia } from './detect';
 import { SPOOF_RULE_ID_MIN, SPOOF_RULE_ID_SPAN } from './dnr';
+import { DEFAULT_FILENAME_TEMPLATE, isUsableTemplate } from './filename';
 
 const MEDIA_KEY_PREFIX = 'media:';
 const DOWNLOADS_KEY = 'downloads';
@@ -19,6 +20,7 @@ const CONCURRENCY_KEY = 'settings:concurrency';
 const ENABLED_TYPES_KEY = 'settings:enabledTypes';
 const UPDATE_CHECK_KEY = 'settings:updateCheck';
 const DNR_RULE_COUNTER_KEY = 'settings:dnrRuleCounter';
+const FILENAME_TEMPLATE_KEY = 'settings:filenameTemplate';
 
 // Tuần tự hoá ghi storage (downloads/hlsjobs) trong 1 context để tránh race read-modify-write.
 let writeChain: Promise<unknown> = Promise.resolve();
@@ -37,6 +39,12 @@ export const DEFAULT_SIZE_WARN_BYTES = 1.5 * 1024 * 1024 * 1024;
 export interface TabMediaState {
   /** epoch ms của lần điều hướng main_frame gần nhất. */
   navStartedAt: number;
+  /**
+   * W4.3 — URL trang hiện tại của KHUNG TOP. Đặt bởi `resetTab` (điều hướng main_frame) và bởi
+   * `setTabNavUrl` (điều hướng SPA qua `tabs.onUpdated`). `addTabMedia` đóng dấu giá trị này lên
+   * `detectPageUrl` của mỗi media mới, để lúc tải còn biết media được phát hiện ở trang nào.
+   */
+  navUrl?: string;
   items: MediaItem[];
   /**
    * W4.2 — URL playlist con học được từ các master đã parse của tab này (child -> master).
@@ -64,12 +72,21 @@ function mediaKey(tabId: number): string {
   return `${MEDIA_KEY_PREFIX}${tabId}`;
 }
 
+/**
+ * 🔴 MỌI field mới của `TabMediaState` PHẢI được liệt kê trong object literal dưới đây.
+ *
+ * Thiếu một dòng = field được ghi một lần rồi bị XOÁ SẠCH bởi lần read-modify-write kế tiếp
+ * (`addTabMedia` spread `{...state}` từ một state đã mất field đó). Triệu chứng đánh lừa: bấm tải
+ * NGAY thì đúng, nhưng chỉ cần trang phát hiện thêm một media nữa là mất. tsc/eslint/vitest đều
+ * KHÔNG thấy — `Partial<TabMediaState>` cho phép thiếu field.
+ */
 export async function getTabState(tabId: number): Promise<TabMediaState> {
   const key = mediaKey(tabId);
   const res = await browser.storage.session.get(key);
   const val = res[key] as Partial<TabMediaState> | undefined;
   return {
     navStartedAt: typeof val?.navStartedAt === 'number' ? val.navStartedAt : 0,
+    navUrl: val?.navUrl,
     items: Array.isArray(val?.items) ? val.items : [],
     childUrls: val?.childUrls ?? {},
     parsedMasters: Array.isArray(val?.parsedMasters) ? val.parsedMasters : [],
@@ -88,8 +105,21 @@ async function setTabState(tabId: number, state: TabMediaState): Promise<void> {
 export async function resetTab(
   tabId: number,
   navStartedAt: number,
+  navUrl?: string,
 ): Promise<void> {
-  await setTabState(tabId, { navStartedAt, items: [] });
+  await setTabState(tabId, { navStartedAt, navUrl, items: [] });
+}
+
+/**
+ * W4.3 — cập nhật URL trang hiện tại của tab, KHÔNG đụng `items`/`navStartedAt`.
+ *
+ * Dùng cho điều hướng SPA (`pushState`): trang đổi video mà KHÔNG phát sinh request `main_frame`
+ * nào, nên `resetTab` không bao giờ chạy. Cố ý không xoá `items`: đó là việc của `resetTab`, và
+ * xoá ở đây sẽ thổi bay danh sách media mỗi lần trang đổi query string.
+ */
+export async function setTabNavUrl(tabId: number, url: string): Promise<void> {
+  const state = await getTabState(tabId);
+  await setTabState(tabId, { ...state, navUrl: url });
 }
 
 /**
@@ -125,9 +155,15 @@ export async function addTabMedia(
   // W4.2 — master thường parse xong TRƯỚC khi playlist con bị phát hiện, nên item mới phải tự tra
   // bảng con. Thiếu bước này thì thứ tự đến quyết định có ẩn được hay không (race).
   const parent = state.childUrls?.[item.url];
-  const incoming: MediaItem = parent
+  const withParent: MediaItem = parent
     ? { ...item, child: true, parentUrl: parent }
     : item;
+  // W4.3 — đóng dấu URL trang LÚC PHÁT HIỆN. Media bắt qua webRequest không mang theo URL trang
+  // nào cả, nên nếu không đóng dấu ở đây thì cổng `sameDocument` lúc tải không có gì để so.
+  const incoming: MediaItem =
+    withParent.detectPageUrl === undefined && state.navUrl
+      ? { ...withParent, detectPageUrl: state.navUrl }
+      : withParent;
   const { list, changed } = upsertMedia(state.items, incoming);
   if (!changed) return null;
   await setTabState(tabId, { ...state, items: list });
@@ -401,6 +437,25 @@ export async function getDownloadFolder(): Promise<string> {
 
 export async function setDownloadFolder(folder: string): Promise<void> {
   await browser.storage.local.set({ [DOWNLOAD_FOLDER_KEY]: folder });
+}
+
+/**
+ * W4.3 — mẫu đặt tên file.
+ *
+ * Getter CÓ KIỂM TRA chứ không trả thẳng giá trị đã lưu: mẫu thiếu `{title}`/`{basename}` sẽ dồn
+ * MỌI video về cùng một tên, và `conflictAction: 'uniquify'` lặng lẽ thêm ' (1)', ' (2)'... nên
+ * user không hề thấy lỗi — chỉ thấy một thư mục đầy file vô danh. Thà lùi về mặc định.
+ */
+export async function getFilenameTemplate(): Promise<string> {
+  const res = await browser.storage.local.get(FILENAME_TEMPLATE_KEY);
+  const v = res[FILENAME_TEMPLATE_KEY];
+  return typeof v === 'string' && isUsableTemplate(v)
+    ? v.trim()
+    : DEFAULT_FILENAME_TEMPLATE;
+}
+
+export async function setFilenameTemplate(template: string): Promise<void> {
+  await browser.storage.local.set({ [FILENAME_TEMPLATE_KEY]: template });
 }
 
 /** Ngưỡng (byte) cảnh báo dung lượng trước khi tải HLS. */

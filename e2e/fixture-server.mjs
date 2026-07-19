@@ -232,6 +232,40 @@ export async function startFixtureServer({
       );
       return;
     }
+    // W4.3 — khung con của /og.html. Tiêu đề và og:title ở đây đều SAI CỐ Ý: nếu extension đọc
+    // tiêu đề mà không ghim `frameIds: [0]` thì nó sẽ vớ phải mấy chuỗi này.
+    if (path === '/og-frame.html') {
+      send(
+        200,
+        '<!doctype html><title>JW Player</title>' +
+          '<meta property="og:title" content="TIÊU ĐỀ IFRAME SAI">',
+        'text/html; charset=utf-8',
+      );
+      return;
+    }
+    // W4.3 — trang có og:title ĐÚNG trong khi <title> thì BẨN (bộ đếm + tên site).
+    if (path === '/og.html') {
+      send(
+        200,
+        '<!doctype html><title>(3) Tên Video Thật - Fixture Site</title>' +
+          '<meta property="og:title" content="Tên Video Thật">' +
+          '<meta name="twitter:title" content="TWITTER KHONG DUOC THANG OG">' +
+          '<iframe src="/og-frame.html"></iframe>' +
+          '<script>window.__m = fetch("/hls/master.m3u8").then(r => r.ok);</script>',
+        'text/html; charset=utf-8',
+      );
+      return;
+    }
+    // W4.3 — KHÔNG có thẻ meta nào: buộc phải làm sạch <title> mới ra đúng tên.
+    if (path === '/doc.html') {
+      send(
+        200,
+        '<!doctype html><title>(3) Tên Video Thật - 127.0.0.1</title>' +
+          '<script>window.__m = fetch("/hls/master.m3u8").then(r => r.ok);</script>',
+        'text/html; charset=utf-8',
+      );
+      return;
+    }
     send(404, 'not found', 'text/plain');
   });
 
@@ -247,6 +281,10 @@ export async function startFixtureServer({
     playerPageUrl: `http://127.0.0.1:${port}/player.html`,
     /** W7.1 — trang gọi requestMediaKeySystemAccess (giả lập site DRM). */
     drmPageUrl: `http://127.0.0.1:${port}/drm.html`,
+    /** W4.3 — og:title đúng + <title> bẩn + iframe có tiêu đề sai. */
+    ogPageUrl: `http://127.0.0.1:${port}/og.html`,
+    /** W4.3 — chỉ có <title> bẩn, không thẻ meta. */
+    docPageUrl: `http://127.0.0.1:${port}/doc.html`,
     masterUrl: `http://127.0.0.1:${port}/hls/master.m3u8`,
     mediaUrl: `http://127.0.0.1:${port}/hls/media.m3u8`,
     /** W1.4 — playlist y hệt mediaUrl nhưng có 2 chỗ nối (stream chèn quảng cáo). */

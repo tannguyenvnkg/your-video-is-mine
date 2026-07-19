@@ -200,6 +200,12 @@ export function upsertMedia(
     size: pick(existing.size, item.size),
     acceptRanges: pick(existing.acceptRanges, item.acceptRanges),
     pageUrl: pick(existing.pageUrl, item.pageUrl),
+    // 🔴 W4.3 — `detectPageUrl` CỐ Ý VẮNG MẶT trong danh sách merge này. Đừng "sửa" bằng cách thêm
+    // nó vào: bản trước đã thêm và review đối kháng bắt được đó là LỖI. Ý nghĩa của trường này là
+    // "URL trang lúc media được phát hiện LẦN ĐẦU" — điền muộn ở nhánh merge nghĩa là đóng dấu một
+    // media của trang A bằng URL trang B (cùng URL media hay được báo lại sau khi user đã chuyển
+    // trang SPA). Cổng sameDocument khi đó quay ra XÁC NHẬN cái sai, tức là tệ hơn không có cổng.
+    // Thiếu dấu thì cổng đóng lại và ta lùi về tên từ URL — thà thiếu tên còn hơn SAI tên.
     title: pick(existing.title, item.title),
     width: pick(existing.width, item.width),
     height: pick(existing.height, item.height),
