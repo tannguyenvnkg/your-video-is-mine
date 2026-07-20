@@ -933,3 +933,75 @@ https://cdn.example.com/2.ts
     expect(spoofTargetsFromSegments([])).toEqual([]);
   });
 });
+
+// --- §7: DRM khai trong playlist phải CHẶN, và AES-128 thường phải KHÔNG bị chặn oan -------------
+//
+// 🔴 ĐO ĐƯỢC 2026-07-19 trước bản vá: ba ca DRM đầu tiên dưới đây đều trả isProtected=FALSE, tức
+// extension tải thẳng nội dung được bảo vệ. Nguyên nhân nằm ở m3u8-parser (nó nuốt `segment.key`
+// khi KEYFORMAT không phải identity) chứ không nằm ở logic của ta — nên đừng suy DRM từ segment.key.
+describe('parseHlsSegments — ranh giới §7 với playlist DRM', () => {
+  const pl = (keyLine: string) =>
+    `#EXTM3U\n#EXT-X-VERSION:5\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n${keyLine}\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n`;
+  const U = 'https://x/media.m3u8';
+
+  it('FairPlay -> isProtected + nêu tên hãng', () => {
+    const r = parseHlsSegments(
+      pl('#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://k",KEYFORMAT="com.apple.streamingkeydelivery"'),
+      U,
+    );
+    expect(r.isProtected).toBe(true);
+    expect(r.drmName).toBe('FairPlay');
+  });
+
+  it('PlayReady -> isProtected', () => {
+    const r = parseHlsSegments(
+      pl('#EXT-X-KEY:METHOD=SAMPLE-AES,URI="data:x",KEYFORMAT="com.microsoft.playready"'),
+      U,
+    );
+    expect(r.isProtected).toBe(true);
+  });
+
+  it('Widevine (urn:uuid) -> isProtected', () => {
+    const r = parseHlsSegments(
+      pl(
+        '#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,URI="data:x",KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"',
+      ),
+      U,
+    );
+    expect(r.isProtected).toBe(true);
+    expect(r.drmName).toBe('Widevine');
+  });
+
+  // CHIỀU NGƯỢC LẠI — chặn oan còn tệ hơn bỏ sót.
+  it('AES-128 thường -> KHÔNG protected, vẫn tải được', () => {
+    const r = parseHlsSegments(pl('#EXT-X-KEY:METHOD=AES-128,URI="k.bin"'), U);
+    expect(r.isProtected).toBe(false);
+    expect(r.encryption).toBe('aes-128');
+    expect(r.drmName).toBeUndefined();
+  });
+
+  it('AES-128 kèm KEYFORMAT="identity" -> KHÔNG protected', () => {
+    const r = parseHlsSegments(
+      pl('#EXT-X-KEY:METHOD=AES-128,URI="k.bin",KEYFORMAT="identity"'),
+      U,
+    );
+    expect(r.isProtected).toBe(false);
+  });
+
+  it('master có #EXT-X-SESSION-KEY DRM -> isProtected (master không có segment nào để mà suy)', () => {
+    const master =
+      '#EXTM3U\n#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI="skd://k",KEYFORMAT="com.apple.streamingkeydelivery"\n' +
+      '#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=1280x720\nmedia.m3u8\n';
+    const r = parseHlsManifest(master, 'https://x/master.m3u8');
+    expect(r.isMaster).toBe(true);
+    expect(r.isProtected).toBe(true);
+    expect(r.drmName).toBe('FairPlay');
+  });
+
+  it('master SẠCH -> KHÔNG protected', () => {
+    const master =
+      '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=1280x720\nmedia.m3u8\n';
+    const r = parseHlsManifest(master, 'https://x/master.m3u8');
+    expect(r.isProtected ?? false).toBe(false);
+  });
+});

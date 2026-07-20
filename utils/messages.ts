@@ -31,6 +31,8 @@ export type HlsEstimateResponse =
   | {
       ok: true;
       protected: boolean;
+      /** Tên hãng DRM để thông báo nói rõ (FairPlay/PlayReady/Widevine/...). */
+      drmName?: string;
       segmentCount: number;
       durationSec: number;
       /** dung lượng ước tính (byte) nếu biết bitrate. */

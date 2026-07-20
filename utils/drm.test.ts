@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DRM_UNSUPPORTED_ERROR,
   drmNameFromKeySystem,
+  drmSystemFromHlsPlaylist,
   drmSystemsInMpd,
   isDrmKeySystem,
 } from './drm';
@@ -116,5 +117,87 @@ describe('drmSystemsInMpd — DASH khai báo DRM ngay trong manifest', () => {
     const mpd = `<MPD><!-- no ContentProtection here -->
       <BaseURL>https://cdn.example/ContentProtection/clip.mp4</BaseURL></MPD>`;
     expect(drmSystemsInMpd(mpd)).toEqual([]);
+  });
+});
+
+// --- HLS: DRM khai ngay trong playlist qua #EXT-X-KEY / #EXT-X-SESSION-KEY ------------------------
+//
+// 🔴 LỖ HỔNG THẬT, ĐÃ ĐO 2026-07-19 (đừng "đơn giản hoá" mấy test này đi):
+// Trước bản vá, ba hệ DRM phổ biến nhất đều LỌT qua ranh giới §7. Đo bằng m3u8-parser@7.2.0 thật
+// qua chính parseHlsSegments():
+//     FairPlay  (KEYFORMAT="com.apple.streamingkeydelivery") -> encryption='none', isProtected=FALSE
+//     PlayReady (KEYFORMAT="com.microsoft.playready")        -> encryption='none', isProtected=FALSE
+//     Widevine  (KEYFORMAT="urn:uuid:edef8ba9-...")          -> encryption='none', isProtected=FALSE
+// Nguyên nhân: m3u8-parser đẩy khoá có KEYFORMAT lạ sang `manifest.contentProtection` và KHÔNG gán
+// `segment.key`, nên mọi thứ suy ra từ `segment.key` đều thấy playlist "sạch". Hệ quả: extension tải
+// trọn nội dung DRM rồi giao file nhiễu KÈM DẤU TÍCH XANH — vừa vượt ranh giới §7, vừa hỏng âm thầm.
+//
+// => Không được suy DRM từ `segment.key`. Phải soi THẲNG văn bản playlist.
+describe('drmSystemFromHlsPlaylist (ranh giới §7 cho HLS)', () => {
+  const pl = (keyLine: string) =>
+    `#EXTM3U\n#EXT-X-VERSION:5\n#EXT-X-TARGETDURATION:6\n${keyLine}\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n`;
+
+  it('FairPlay (Apple) -> chặn, nêu đúng tên hãng', () => {
+    const t = pl(
+      '#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://kid",KEYFORMAT="com.apple.streamingkeydelivery"',
+    );
+    expect(drmSystemFromHlsPlaylist(t)).toBe('FairPlay');
+  });
+
+  it('PlayReady (Microsoft) -> chặn, nêu đúng tên hãng', () => {
+    const t = pl(
+      '#EXT-X-KEY:METHOD=SAMPLE-AES,URI="data:text/plain;base64,AAAA",KEYFORMAT="com.microsoft.playready"',
+    );
+    expect(drmSystemFromHlsPlaylist(t)).toBe('PlayReady');
+  });
+
+  it('Widevine (KEYFORMAT dạng urn:uuid) -> chặn, nêu đúng tên hãng', () => {
+    const t = pl(
+      '#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,URI="data:text/plain;base64,AAAA",KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"',
+    );
+    expect(drmSystemFromHlsPlaylist(t)).toBe('Widevine');
+  });
+
+  it('KEYFORMAT LẠ vẫn chặn (mặc định an toàn — danh sách trắng là lỗ hổng)', () => {
+    const t = pl('#EXT-X-KEY:METHOD=SAMPLE-AES,URI="x://y",KEYFORMAT="com.hang.moi.ra.doi"');
+    expect(drmSystemFromHlsPlaylist(t)).not.toBeNull();
+  });
+
+  it('#EXT-X-SESSION-KEY trong MASTER cũng phải chặn (master không có segment nào)', () => {
+    // Master quảng cáo DRM bằng SESSION-KEY. Chỉ soi #EXT-X-KEY thì master DRM lọt sạch.
+    const t =
+      '#EXTM3U\n#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI="skd://k",KEYFORMAT="com.apple.streamingkeydelivery"\n' +
+      '#EXT-X-STREAM-INF:BANDWIDTH=800000\nmedia.m3u8\n';
+    expect(drmSystemFromHlsPlaylist(t)).toBe('FairPlay');
+  });
+
+  it('SAMPLE-AES trần (không KEYFORMAT) -> vẫn chặn', () => {
+    expect(drmSystemFromHlsPlaylist(pl('#EXT-X-KEY:METHOD=SAMPLE-AES,URI="k.bin"'))).not.toBeNull();
+  });
+
+  // --- CHIỀU NGƯỢC LẠI: chặn oan còn tệ hơn bỏ sót (luật dự án) ---
+
+  it('AES-128 thường -> KHÔNG chặn (đây là thứ ta ĐƯỢC PHÉP tải)', () => {
+    expect(drmSystemFromHlsPlaylist(pl('#EXT-X-KEY:METHOD=AES-128,URI="k.bin"'))).toBeNull();
+  });
+
+  it('AES-128 kèm KEYFORMAT="identity" -> KHÔNG chặn (identity là mặc định của RFC 8216)', () => {
+    const t = pl('#EXT-X-KEY:METHOD=AES-128,URI="k.bin",KEYFORMAT="identity"');
+    expect(drmSystemFromHlsPlaylist(t)).toBeNull();
+  });
+
+  it('METHOD=NONE -> KHÔNG chặn dù có KEYFORMAT (đoạn trong-veo giữa stream mã hoá)', () => {
+    const t = pl('#EXT-X-KEY:METHOD=NONE,KEYFORMAT="com.apple.streamingkeydelivery"');
+    expect(drmSystemFromHlsPlaylist(t)).toBeNull();
+  });
+
+  it('playlist SẠCH hoàn toàn -> KHÔNG chặn', () => {
+    expect(drmSystemFromHlsPlaylist(pl('#EXT-X-INDEPENDENT-SEGMENTS'))).toBeNull();
+  });
+
+  it('chữ KEYFORMAT nằm trong URL segment KHÔNG được tính là DRM', () => {
+    const t =
+      '#EXTM3U\n#EXTINF:6.0,\nhttps://cdn.example/KEYFORMAT=com.apple.streamingkeydelivery/s0.ts\n#EXT-X-ENDLIST\n';
+    expect(drmSystemFromHlsPlaylist(t)).toBeNull();
   });
 });

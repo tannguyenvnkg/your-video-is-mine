@@ -1154,6 +1154,10 @@ async function estimateFromPlaylists(
   return {
     ok: true,
     protected: parsed.isProtected || (audio?.isProtected ?? false),
+    // Nêu đích danh hãng DRM: "không hỗ trợ" trống không khiến user tưởng extension hỏng.
+    ...(parsed.drmName || audio?.drmName
+      ? { drmName: parsed.drmName ?? audio?.drmName }
+      : {}),
     segmentCount: parsed.segments.length + (audio?.segments.length ?? 0),
     durationSec,
     estBytes,

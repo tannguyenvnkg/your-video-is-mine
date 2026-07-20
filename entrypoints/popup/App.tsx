@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { formatVersionLabel, isUpdateAvailable } from '@/utils/version';
 import { fetchLatestRelease } from '@/utils/update';
 import { shortenUrl, visibleMedia } from '@/utils/detect';
+import { DRM_UNSUPPORTED_ERROR } from '@/utils/drm';
 import {
   computeFetchStats,
   formatBytes,
@@ -287,7 +288,7 @@ function MediaRow({
         return;
       }
       if (est.protected) {
-        setDlError('Không hỗ trợ nội dung được bảo vệ (DRM/SAMPLE-AES).');
+        setDlError(DRM_UNSUPPORTED_ERROR(est.drmName));
         return;
       }
       // Gộp MỌI cảnh báo vào ĐÚNG MỘT hộp thoại: hai confirm liên tiếp thì user bấm OK theo quán

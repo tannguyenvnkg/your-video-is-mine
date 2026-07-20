@@ -535,7 +535,7 @@ async function runHlsJob(
     if (parsed.isProtected || parsedAudio?.isProtected) {
       await updateHlsJob(jobId, {
         phase: 'error',
-        error: DRM_UNSUPPORTED_ERROR(),
+        error: DRM_UNSUPPORTED_ERROR(parsed.drmName ?? parsedAudio?.drmName),
       });
       return;
     }

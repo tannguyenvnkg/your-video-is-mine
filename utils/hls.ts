@@ -2,6 +2,7 @@
 // Không phụ thuộc chrome API. Xử lý cả master playlist lẫn media playlist trực tiếp.
 
 import { Parser, type M3u8Rendition, type M3u8Segment } from 'm3u8-parser';
+import { drmSystemFromHlsPlaylist } from './drm';
 import type { RenditionInfo, VariantInfo } from './types';
 
 export interface HlsParseResult {
@@ -10,6 +11,8 @@ export interface HlsParseResult {
   segmentCount?: number;
   keyMethod?: string;
   isProtected?: boolean;
+  /** Tên hãng DRM để nói cho user (chỉ có khi isProtected vì DRM khai trong playlist). */
+  drmName?: string;
 }
 
 /** Resolve URL tương đối trong manifest thành tuyệt đối. */
@@ -165,17 +168,26 @@ export function parseHlsManifest(
       };
     });
     sortVariantsDesc(variants);
-    return { isMaster: true, variants };
+    // §7 — master quảng cáo DRM bằng #EXT-X-SESSION-KEY (nó không có segment nào để mà suy ra).
+    // Bỏ qua chỗ này thì mọi site DRM đi lọt ngay từ bước liệt kê chất lượng.
+    const masterDrm = drmSystemFromHlsPlaylist(text);
+    return {
+      isMaster: true,
+      variants,
+      ...(masterDrm ? { isProtected: true, drmName: masterDrm } : {}),
+    };
   }
 
   const segments = manifest.segments ?? [];
   const keyMethod = firstKeyMethod(segments);
+  const mediaDrm = drmSystemFromHlsPlaylist(text);
   return {
     isMaster: false,
     variants: [{ id: 'v0', uri: manifestUrl, name: 'Gốc' }],
     segmentCount: segments.length,
     keyMethod,
-    isProtected: keyMethod === 'SAMPLE-AES',
+    isProtected: mediaDrm !== null || keyMethod === 'SAMPLE-AES',
+    ...(mediaDrm ? { drmName: mediaDrm } : {}),
   };
 }
 
@@ -240,8 +252,10 @@ export interface HlsSegment {
 export interface HlsSegmentsResult {
   segments: HlsSegment[];
   encryption: HlsEncryption;
-  /** true nếu nội dung được bảo vệ (SAMPLE-AES/EME) -> KHÔNG hỗ trợ, phải DỪNG. */
+  /** true nếu nội dung được bảo vệ (SAMPLE-AES/DRM) -> KHÔNG hỗ trợ, phải DỪNG. */
   isProtected: boolean;
+  /** Tên hãng DRM (FairPlay/PlayReady/Widevine/...) để thông báo nói rõ, không chỉ "không hỗ trợ". */
+  drmName?: string;
   totalDuration: number;
   /** có init segment fMP4 không. */
   hasInit: boolean;
@@ -388,11 +402,16 @@ export function parseHlsSegments(
           ? 'other'
           : 'none';
 
+  // §7 — soi THẲNG văn bản: m3u8-parser nuốt `segment.key` với FairPlay/PlayReady/Widevine, nên
+  // mọi suy luận từ `encryption` (vốn dẫn từ segment.key) đều thấy playlist DRM là "sạch". ĐÃ ĐO.
+  const drmName = drmSystemFromHlsPlaylist(text);
   return {
     segments,
     encryption,
     // AES-128 giải mã được -> KHÔNG protected. SAMPLE-AES/khác (thường EME/DRM) -> protected.
-    isProtected: encryption === 'sample-aes' || encryption === 'other',
+    isProtected:
+      drmName !== null || encryption === 'sample-aes' || encryption === 'other',
+    ...(drmName ? { drmName } : {}),
     totalDuration: segments.reduce((sum, s) => sum + s.duration, 0),
     hasInit: segments.some((s) => s.initUri !== undefined),
     discontinuityCount: countDiscontinuities(raw, manifest.discontinuityStarts),

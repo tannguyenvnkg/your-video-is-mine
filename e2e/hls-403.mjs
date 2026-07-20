@@ -138,6 +138,301 @@ async function runDownload({ gate, segmentHost }) {
 }
 
 /**
+ * W3.1 — tải trọn một stream HLS **MÃ HOÁ AES-128** rồi kiểm file ra.
+ *
+ * VÌ SAO CA NÀY ĐÁNG TIỀN: AES-128 là nhánh giải mã duy nhất §7 cho phép, nhưng suốt BA phiên
+ * chưa lần nào có máy đo chạm vào — cả 502 unit test lẫn 17 ca e2e đều chạy stream KHÔNG mã hoá.
+ * `utils/crypto.test.ts` chứng minh `decryptAes128Cbc()` giải đúng, nhưng KHÔNG thể thấy
+ * `downloadTrack()` có gọi nó với đúng khoá và đúng IV hay không — đúng lớp lỗi mà cổng tĩnh mù.
+ *
+ * VÌ SAO 100 KHUNG LÀ CHỨNG CỨ ĐỦ MẠNH (cho KHOÁ): segment ở đây là ĐÚNG 10 segment plaintext
+ * của ca `happy` đem mã hoá, nên đường đi đúng phải cho ra file trùng khít ca đó. Sai KHOÁ thì ra
+ * byte ngẫu nhiên — MPEG-TS mất đồng bộ, không có đường nào ra đúng 100 khung.
+ *
+ * 🔴 NHƯNG KHÔNG PHẢI CHO IV — ĐÃ ĐO, đừng tin ngược lại: đột biến thay `seg.seq` bằng chỉ số mảng,
+ * và đột biến bỏ qua `#EXT-X-KEY:IV=`, đều để mấy ca này VẪN XANH. CBC chỉ cho IV chi phối 16 byte
+ * đầu mỗi segment: lệch đúng 10/143.444 byte, cùng 100 khung, cùng md5 luồng hình, file .mp4 ra
+ * GIỐNG HỆT TỪNG BYTE. Lưới cho IV nằm ở `utils/crypto.test.ts`, KHÔNG nằm ở đây.
+ *
+ * ⚠️ Cố tình KHÔNG dùng chung thân với runDownload(): 17 ca đang xanh chạy qua hàm đó, và món nợ
+ * đang trả là "thiếu lưới", không phải "thiếu gọn". Gộp lại thì lần sửa nào ở đây cũng thành rủi
+ * ro cho cả 17 ca kia.
+ */
+async function runAesDownload({
+  variant,
+  gate = 'none',
+  wantKeyFetches = 1,
+  keyHost = null,
+}) {
+  const srv = await startFixtureServer({ gate, keyHost });
+  try {
+    return await withBrowser(async ({ page }) => {
+      const start = await page.evaluate(
+        ([variantUrl, mediaUrl]) =>
+          chrome.runtime.sendMessage({
+            kind: 'hls/download',
+            variantUrl,
+            mediaUrl,
+            tabId: -1,
+          }),
+        [srv.aesUrl(variant), srv.masterUrl],
+      );
+      if (!start?.ok) {
+        return {
+          ok: false,
+          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+        };
+      }
+      const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
+      if (!job) return { ok: false, detail: 'job TREO (không done/error)' };
+      if (job.phase !== 'done') {
+        const b = srv.blocked().length;
+        return {
+          ok: false,
+          detail:
+            `job ${job.phase}: ${job.error ?? '?'}` +
+            `${b ? ` — server đã chặn ${b} request vì thiếu Referer` : ''}`,
+        };
+      }
+      const file = await waitDownloadedFile(page, 30_000);
+      if (!file)
+        return { ok: false, detail: 'job done nhưng KHÔNG có file trên đĩa' };
+      if (file.state !== 'complete')
+        return {
+          ok: false,
+          detail: `download ${file.state}: ${file.error ?? '?'}`,
+        };
+      if (!existsSync(file.filename))
+        return {
+          ok: false,
+          detail: `downloads báo complete nhưng file không tồn tại: ${file.filename}`,
+        };
+
+      // Cổng SỐ MỘT: khoá có được kéo về ĐÚNG số lần không.
+      //   THIẾU  -> playlist không được nhận là mã hoá, hoặc cụm khoá thứ hai bị bôi bằng khoá đầu.
+      //   THỪA   -> cache khoá thủng, mỗi segment lại đi xin khoá một lần (CDN hay giới hạn nhịp
+      //             đúng endpoint này, nên request thừa là rủi ro thật, không phải chuyện thẩm mỹ).
+      // Ghim BẰNG ĐÚNG chứ không phải >=: con số này TẤT ĐỊNH sau bản vá cache-promise (đã đo —
+      // trước bản vá nó chạy 3-5 và đổi theo từng lượt chạy, đúng dấu hiệu của cache thủng).
+      const keyHits = srv.aesKeyHits();
+      if (keyHits !== wantKeyFetches) {
+        return {
+          ok: false,
+          detail:
+            `${keyHits} lượt fetch khoá AES, mong đợi ĐÚNG ${wantKeyFetches} ` +
+            (keyHits < wantKeyFetches
+              ? '-> thiếu khoá: nhánh giải mã không chạy, hoặc khoá đầu bị bôi ra cả stream'
+              : '-> cache khoá thủng: mỗi segment lại đi xin khoá một lần'),
+        };
+      }
+
+      const size = statSync(file.filename).size;
+      const probe = probeFile(file.filename);
+      if (probe.error) {
+        return {
+          ok: false,
+          detail:
+            `ffprobe không đọc được file ra: ${probe.error} ` +
+            '-> nhiều khả năng giải mã SAI (byte rác vẫn ghi ra file được)',
+        };
+      }
+      if (!probe.codecs.includes('video')) {
+        return {
+          ok: false,
+          detail:
+            `file ra KHÔNG có track hình (streams: ${probe.codecs.join(',') || 'rỗng'}) ` +
+            '-> giải mã sai làm mất đồng bộ MPEG-TS',
+        };
+      }
+      if (Math.abs(probe.videoFrames - FIXTURE_FRAMES) > 2) {
+        return {
+          ok: false,
+          detail:
+            `thiếu khung hình: đọc được ${probe.videoFrames}, mong đợi ${FIXTURE_FRAMES} ` +
+            '-> giải mã sai ở MỘT SỐ segment (sai IV/sai khoá cụm sau), phần còn lại vẫn đúng ' +
+            'nên file vẫn mở được — đây chính là dạng hỏng ÂM THẦM',
+        };
+      }
+      return {
+        ok: true,
+        detail:
+          `file ${(size / 1024).toFixed(0)}KB, ${probe.duration.toFixed(2)}s, ` +
+          `${probe.videoFrames} khung, ${keyHits} lượt fetch khoá, track: ${probe.codecs.join('+')}`,
+      };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
+/**
+ * W3.1 — KHOÁ AES HỎNG thì lỗi phải NÓI ĐƯỢC THÀNH LỜI.
+ *
+ * 🔴 ĐÃ ĐO (2026-07-19) trên chính bản đang chạy: cho khoá sai -> job kết thúc `phase: 'error'`
+ * với **`error: ""`** — chuỗi RỖNG. Popup hiện một dòng đỏ TRỐNG KHÔNG. Nguyên nhân: WebCrypto
+ * ném `DOMException(OperationError)` mà `message` của nó rỗng trong Chromium, và đường lỗi chỉ
+ * chuyển tiếp `e.message`.
+ *
+ * Đây đúng dạng lỗi dự án cấm: hỏng mà KHÔNG NÓI GÌ. Người dùng không thể phân biệt "sai khoá"
+ * với "mất mạng" với "hết đĩa". Ca này đòi thông báo phải NHẮC TỚI khoá/giải mã.
+ *
+ * Hai biến thể vì hai đường ném KHÁC NHAU, đừng gộp:
+ *   `bad`    khoá đúng 16 byte nhưng SAI giá trị -> ném ở bước bỏ padding (decrypt).
+ *   `badlen` server trả trang HTML thay khoá     -> ném ở GUARD ĐỘ DÀI trong `decryptSegment`,
+ *            TRƯỚC khi `importKey` được gọi. Guard đó không thừa: thiếu nó thì user nhận câu
+ *            tiếng Anh "AES key data must be 128 or 256 bits" thay vì lời đọc được.
+ */
+async function runAesBadKey({ variant, wantMessage }) {
+  const srv = await startFixtureServer({ gate: 'none' });
+  try {
+    return await withBrowser(async ({ page }) => {
+      const start = await page.evaluate(
+        ([variantUrl, mediaUrl]) =>
+          chrome.runtime.sendMessage({
+            kind: 'hls/download',
+            variantUrl,
+            mediaUrl,
+            tabId: -1,
+          }),
+        [srv.aesUrl(variant), srv.masterUrl],
+      );
+      if (!start?.ok) {
+        return {
+          ok: false,
+          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+        };
+      }
+      const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
+      if (!job) return { ok: false, detail: 'job TREO (không done/error)' };
+
+      // Giao file ra khi khoá sai còn TỆ HƠN báo lỗi: user nhận .mp4 rác kèm dấu tích xanh.
+      if (job.phase !== 'error') {
+        return {
+          ok: false,
+          detail:
+            `khoá SAI mà job kết thúc '${job.phase}' — lẽ ra phải 'error'. ` +
+            'Giao file rác kèm dấu tích xanh là hỏng nặng hơn báo lỗi.',
+        };
+      }
+      const msg = String(job.error ?? '');
+      if (!msg.trim()) {
+        return {
+          ok: false,
+          detail:
+            'job error nhưng THÔNG BÁO RỖNG — popup hiện dòng đỏ trống không, user không thể ' +
+            'phân biệt sai khoá / mất mạng / hết đĩa (WebCrypto OperationError có message rỗng)',
+        };
+      }
+      if (!/khoá|giải mã/i.test(msg)) {
+        return {
+          ok: false,
+          detail: `thông báo không nhắc tới khoá/giải mã nên vô nghĩa với user: "${msg}"`,
+        };
+      }
+      // Assertion RIÊNG mỗi biến thể. Nếu cả hai chỉ đòi /khoá|giải mã/ thì câu bọc lỗi chung đã
+      // thoả sẵn, và guard "khoá phải đúng 16 byte" xoá đi lúc nào cũng không ai biết (đã đo:
+      // gỡ guard -> ca vẫn xanh vì lỗi importKey rơi vào đúng câu bọc đó).
+      if (wantMessage && !wantMessage.test(msg)) {
+        return {
+          ok: false,
+          detail:
+            `thông báo không nói đúng NGUYÊN NHÂN của ca này (${wantMessage}): "${msg}"`,
+        };
+      }
+      // Chống giao file rác: báo lỗi rồi mà vẫn thả file xuống đĩa thì user vẫn nhận .mp4 hỏng.
+      const file = await waitDownloadedFile(page, 3_000);
+      if (file) {
+        return {
+          ok: false,
+          detail: `báo lỗi ĐÚNG nhưng vẫn giao file xuống đĩa: ${file.filename}`,
+        };
+      }
+      return { ok: true, detail: `báo lỗi rõ ràng: "${msg}"` };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
+/**
+ * §7 — PLAYLIST KHAI DRM PHẢI BỊ TỪ CHỐI, VÀ KHÔNG ĐƯỢC TẢI LẤY MỘT SEGMENT.
+ *
+ * 🔴 LỖ HỔNG THẬT ĐÃ ĐO 2026-07-19 (trước bản vá): FairPlay/PlayReady/Widevine đều cho
+ * `isProtected=false` vì m3u8-parser nuốt `segment.key` khi KEYFORMAT không phải identity. Ranh
+ * giới cứng §7 — thứ CLAUDE.md gọi là "KHÔNG VƯỢT" — khi đó thủng với đúng ba hệ phổ biến nhất.
+ *
+ * Ca này ghim HAI thứ, và thứ hai mới là thứ khó:
+ *   1. job phải kết thúc `error` với thông báo NÊU TÊN HÃNG (user cần biết vì sao, không phải một
+ *      câu "không hỗ trợ" trống không).
+ *   2. server phải KHÔNG phục vụ một segment nào. Nếu chỉ kiểm thông báo thì bản nào tải xong rồi
+ *      mới từ chối vẫn xanh — mà tải nội dung được bảo vệ về máy CHÍNH LÀ điều §7 cấm.
+ */
+async function runDrmPlaylistRefused({ system, wantName }) {
+  const srv = await startFixtureServer({ gate: 'none' });
+  try {
+    return await withBrowser(async ({ page }) => {
+      const start = await page.evaluate(
+        ([variantUrl, mediaUrl]) =>
+          chrome.runtime.sendMessage({
+            kind: 'hls/download',
+            variantUrl,
+            mediaUrl,
+            tabId: -1,
+          }),
+        [srv.drmUrl(system), srv.masterUrl],
+      );
+      // Từ chối ngay ở cửa cũng hợp lệ — miễn là có lý do rõ.
+      if (!start?.ok) {
+        const msg = String(start?.error ?? '');
+        if (!/bảo vệ|DRM/i.test(msg)) {
+          return {
+            ok: false,
+            detail: `bị từ chối nhưng không nói lý do DRM: ${JSON.stringify(start)}`,
+          };
+        }
+        return { ok: true, detail: `từ chối ngay ở cửa: "${msg}"` };
+      }
+      const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
+      if (!job) return { ok: false, detail: 'job TREO (không done/error)' };
+      if (job.phase !== 'error') {
+        return {
+          ok: false,
+          detail:
+            `RANH GIỚI §7 THỦNG: job kết thúc '${job.phase}' trên playlist ${system}. ` +
+            'Extension vừa tải nội dung được bảo vệ và giao file kèm dấu tích xanh.',
+        };
+      }
+      const msg = String(job.error ?? '');
+      if (!/bảo vệ|DRM/i.test(msg)) {
+        return {
+          ok: false,
+          detail: `job lỗi nhưng không nói là nội dung được bảo vệ: "${msg}"`,
+        };
+      }
+      if (wantName && !msg.includes(wantName)) {
+        return {
+          ok: false,
+          detail: `thông báo không nêu tên hãng "${wantName}": "${msg}"`,
+        };
+      }
+      // Cổng THẬT SỰ khó: có byte nội dung nào bị kéo về không.
+      const hits = srv.plainSegmentHits();
+      if (hits > 0) {
+        return {
+          ok: false,
+          detail:
+            `báo lỗi ĐÚNG nhưng đã kịp tải ${hits} segment nội dung được bảo vệ ` +
+            '-> vẫn là vượt ranh giới §7, chỉ là vượt xong mới xin lỗi',
+        };
+      }
+      return { ok: true, detail: `từ chối đúng, 0 segment bị tải: "${msg}"` };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
+/**
  * W2.6 — server NHẬN request segment rồi câm tuyệt đối (mô phỏng mất mạng giữa chừng).
  *
  * Tiêu chí: job phải kết thúc bằng `error` TRONG THỜI GIAN CÓ HẠN. Trước W2.6, `fetch` không có
@@ -1234,6 +1529,76 @@ const SCENARIOS = [
     pins: 'W4.3 (cổng chống đặt nhầm tên: thà thiếu tên còn hơn SAI tên)',
     run: () =>
       runTitleFromPage({ page: 'og', want: 'media', spaNavigate: true }),
+  },
+  // --- §7 — playlist DRM phải bị TỪ CHỐI (ba hệ phổ biến nhất từng đi lọt, đã đo) ---
+  {
+    id: 'drm-fairplay-refused',
+    title:
+      'Playlist FairPlay (KEYFORMAT com.apple.streamingkeydelivery) -> TỪ CHỐI, 0 segment bị tải',
+    expect: 'pass',
+    run: () => runDrmPlaylistRefused({ system: 'fairplay', wantName: 'FairPlay' }),
+  },
+  {
+    id: 'drm-playready-refused',
+    title: 'Playlist PlayReady -> TỪ CHỐI, 0 segment bị tải',
+    expect: 'pass',
+    run: () => runDrmPlaylistRefused({ system: 'playready', wantName: 'PlayReady' }),
+  },
+  {
+    id: 'drm-widevine-refused',
+    title: 'Playlist Widevine (KEYFORMAT urn:uuid) -> TỪ CHỐI, 0 segment bị tải',
+    expect: 'pass',
+    run: () => runDrmPlaylistRefused({ system: 'widevine', wantName: 'Widevine' }),
+  },
+
+  // --- W3.1 — HLS mã hoá AES-128 (nhánh giải mã chưa từng được máy đo chạm tới) ---
+  {
+    id: 'aes128-download',
+    title:
+      'HLS mã hoá AES-128, IV dẫn từ media sequence (MEDIA-SEQUENCE=7) -> file ra đủ 100 khung',
+    expect: 'pass',
+    run: () => runAesDownload({ variant: 'seq' }),
+  },
+  {
+    id: 'aes128-explicit-iv',
+    title: 'HLS mã hoá AES-128 với IV khai TƯỜNG MINH trong #EXT-X-KEY -> đủ 100 khung',
+    expect: 'pass',
+    run: () => runAesDownload({ variant: 'iv' }),
+  },
+  {
+    id: 'aes128-key-rotation',
+    title:
+      'HLS mã hoá AES-128 XOAY KHOÁ giữa playlist (đổi ở segment 5) -> đủ 100 khung, 2 khoá',
+    expect: 'pass',
+    // >= 2 lượt fetch khoá: cache theo URI phải lấy CẢ HAI khoá. Bản nào cache "một khoá cho cả
+    // stream" sẽ chỉ fetch 1 lần và nửa sau ra rác -> đỏ ở đây chứ không trôi im lặng.
+    run: () => runAesDownload({ variant: 'rot', wantKeyFetches: 2 }),
+  },
+  {
+    id: 'aes128-bad-key',
+    title:
+      'Khoá AES SAI GIÁ TRỊ -> job phải lỗi kèm thông báo NÓI RÕ là chuyện khoá/giải mã',
+    expect: 'pass',
+    run: () => runAesBadKey({ variant: 'bad', wantMessage: /không khớp/ }),
+  },
+  {
+    id: 'aes128-key-not-key',
+    title:
+      'Server trả TRANG HTML thay cho khoá AES (redirect đăng nhập) -> lỗi phải nói được thành lời',
+    expect: 'pass',
+    run: () =>
+      runAesBadKey({ variant: 'badlen', wantMessage: /16 byte|thay vì 16|đăng nhập/ }),
+  },
+  {
+    id: 'aes128-key-403',
+    title:
+      'Khoá AES ở HOST KHÁC + cổng 403 riêng đường khoá -> spoof phải phủ CẢ host khoá',
+    // 🔴 keyHost là thứ làm ca này có răng. ĐÃ ĐO: để khoá cùng host với segment thì rule DNR sinh
+    // từ URL segment đã phủ luôn khoá -> xoá `add(s.keyUri)` khỏi spoofTargetsFromSegments mà ca
+    // vẫn XANH, tức nó chẳng ghim gì. Ngoài đời khoá gần như LUÔN ở host khác.
+    expect: 'pass',
+    run: () =>
+      runAesDownload({ variant: 'seq', gate: 'key', keyHost: 'localhost' }),
   },
   {
     id: 'drm-refused',

@@ -103,3 +103,73 @@ export function drmSystemsInMpd(mpdText: string): string[] {
   if (found.size > 1) found.delete('DRM không rõ');
   return [...found];
 }
+
+// --- HLS: DRM khai báo ngay trong playlist qua #EXT-X-KEY / #EXT-X-SESSION-KEY --------------------
+//
+// 🔴 LỖ HỔNG THẬT ĐÃ ĐO (2026-07-19) — đọc trước khi "gọn hoá" phần này:
+// Ranh giới §7 trước đây suy DRM từ `segment.key.method` do m3u8-parser trả về. Đo trên
+// m3u8-parser@7.2.0 THẬT thì với FairPlay/PlayReady/Widevine, thư viện đẩy khoá sang
+// `manifest.contentProtection` và **KHÔNG gán `segment.key`** -> `firstKeyMethod()` trả undefined
+// -> `encryption='none'` -> `isProtected=FALSE`. Tức ba hệ DRM phổ biến NHẤT đi lọt ranh giới,
+// extension tải trọn nội dung được bảo vệ rồi giao ra file nhiễu KÈM DẤU TÍCH XANH.
+// Chỉ `METHOD=SAMPLE-AES` TRẦN (không KEYFORMAT) mới bị bắt — mà ngoài đời hầu như không ai khai vậy.
+//
+// => Soi THẲNG văn bản playlist, đừng tin cấu trúc đã qua tay thư viện.
+
+/** KEYFORMAT của HLS -> tên hãng. Khớp theo tiền tố vì có biến thể hậu tố phiên bản. */
+const HLS_KEYFORMAT_NAMES: ReadonlyArray<readonly [string, string]> = [
+  ['com.apple.streamingkeydelivery', 'FairPlay'],
+  ['com.microsoft.playready', 'PlayReady'],
+  ['org.w3.clearkey', 'Clear Key'],
+];
+
+/**
+ * Chỉ khớp DÒNG bắt đầu bằng đúng tag (cho phép thụt lề). Nếu tìm chữ "KEYFORMAT" ở bất cứ đâu thì
+ * một URL segment có chứa chuỗi đó cũng bị tính là DRM -> CHẶN OAN, mà chặn oan còn tệ hơn bỏ sót.
+ */
+const HLS_KEY_LINE_RE = /^[ \t]*#EXT-X-(?:SESSION-)?KEY:(.*)$/gm;
+const HLS_METHOD_RE = /(?:^|,)\s*METHOD\s*=\s*([A-Za-z0-9-]+)/i;
+const HLS_KEYFORMAT_RE = /(?:^|,)\s*KEYFORMAT\s*=\s*"([^"]*)"/i;
+
+/**
+ * Playlist HLS này có khai DRM không? Trả TÊN HÃNG để nói cho user, hoặc `null` nếu sạch.
+ *
+ * Ba luật, theo đúng thứ tự:
+ *   1. `METHOD=NONE` -> bỏ qua dòng đó (đoạn trong veo giữa một stream mã hoá — có thật).
+ *   2. `KEYFORMAT` khác `identity` -> DRM. RFC 8216 §4.3.2.4 nói `identity` là MẶC ĐỊNH và là
+ *      dạng AES-128 thường; mọi giá trị khác nghĩa là khoá nằm sau một hệ thống license.
+ *   3. `METHOD` thuộc họ `SAMPLE-AES*` -> DRM kể cả khi KEYFORMAT là identity.
+ *
+ * 🔴 MẶC ĐỊNH AN TOÀN: KEYFORMAT lạ vẫn CHẶN (trả 'DRM không rõ'). Danh sách trắng ở đây sẽ thủng
+ * ngay khi có hệ thống mới ra đời.
+ * 🔴 NỬA DỄ SAI: `METHOD=AES-128` (kèm hoặc không kèm `KEYFORMAT="identity"`) PHẢI trả `null` —
+ * đó chính là thứ §7 cho phép tải, vì khoá được máy chủ phát công khai cho bất kỳ ai xin.
+ */
+export function drmSystemFromHlsPlaylist(text: string): string | null {
+  let generic: string | null = null;
+  for (const m of text.matchAll(HLS_KEY_LINE_RE)) {
+    const attrs = m[1] ?? '';
+    const method = HLS_METHOD_RE.exec(attrs)?.[1]?.trim().toUpperCase();
+    if (!method || method === 'NONE') continue;
+
+    const keyFormat = HLS_KEYFORMAT_RE.exec(attrs)?.[1]?.trim().toLowerCase();
+    const isDrmFormat =
+      keyFormat !== undefined && keyFormat !== '' && keyFormat !== 'identity';
+    const isSampleAes = method.startsWith('SAMPLE-AES');
+    if (!isDrmFormat && !isSampleAes) continue;
+
+    if (keyFormat) {
+      const uuid = keyFormat.startsWith('urn:uuid:')
+        ? keyFormat.slice('urn:uuid:'.length)
+        : null;
+      if (uuid && DASH_SYSTEM_UUIDS[uuid]) return DASH_SYSTEM_UUIDS[uuid];
+      for (const [prefix, name] of HLS_KEYFORMAT_NAMES) {
+        if (keyFormat === prefix || keyFormat.startsWith(`${prefix}.`))
+          return name;
+      }
+    }
+    // Có DRM nhưng chưa biết hãng: nhớ lại rồi ĐI TIẾP, biết đâu dòng sau nói đích danh.
+    generic = 'DRM không rõ';
+  }
+  return generic;
+}

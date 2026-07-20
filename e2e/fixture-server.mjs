@@ -14,6 +14,7 @@
 //   host RIÊNG BIỆT -> dùng làm mẹo dựng ca "segment ở CDN khác host với manifest" (§2.4).
 
 import { createServer } from 'node:http';
+import { createCipheriv } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,7 +31,6 @@ const FIXTURES_PROGRESSIVE = resolve(
   dirname(fileURLToPath(import.meta.url)),
   'fixtures/progressive',
 );
-
 /**
  * W2.1 — token phiên do "player" của trang sinh ra. KHÔNG suy được từ URL/pageUrl/host, nên
  * extension chỉ có thể có nó bằng cách QUAN SÁT request thật của player (`onSendHeaders`).
@@ -45,11 +45,181 @@ function readFixture(name) {
   return readFileSync(join(FIXTURES, name));
 }
 
+// --- W3.1 — HLS MÃ HOÁ AES-128 -----------------------------------------------------------------
+//
+// VÌ SAO CÓ: AES-128 là nhánh giải mã DUY NHẤT dự án được phép có (§7 — khoá phát công khai, không
+// vượt kiểm soát truy cập nào), nhưng nó CHƯA HỀ được e2e chạm tới qua ba phiên. Đường ống mới
+// (libav.js + OPFS) giải mã TRƯỚC khi ghi đĩa, nên nếu nhánh này hỏng thì file ra là rác —
+// và rác thì `av_write_trailer` vẫn trả 0, y hệt bài học "moov thiếu mà ffprobe thoát mã 0".
+//
+// CÁCH CHỨNG MINH: segment ở đây là ĐÚNG 10 segment plaintext của /hls/ đem mã hoá tại chỗ. Nên
+// kỳ vọng hoàn toàn trùng ca `happy` đã hiệu chuẩn: **100 khung hình**. Sai KHOÁ thì ra byte ngẫu
+// nhiên, MPEG-TS mất đồng bộ, không có đường nào ra đúng 100 khung.
+//
+// Mã hoá bằng `node:crypto` (OpenSSL) trong khi extension giải bằng WebCrypto -> HAI cài đặt độc
+// lập, nên không có kiểu "cùng sai một cách" làm ca này xanh giả.
+//
+// 🔴 GIỚI HẠN ĐÃ ĐO CỦA CHÍNH BỘ CA NÀY — ĐỌC TRƯỚC KHI TIN NÓ PHỦ NHIỀU HƠN THỰC TẾ:
+// Mấy ca tải ở đây ghim được đường LẤY KHOÁ + phép giải CBC, **KHÔNG ghim được phép dẫn IV**.
+// Đo bằng đột biến trên build thật (2026-07-19): thay `seg.seq` bằng chỉ số mảng -> ca VẪN XANH;
+// bỏ qua `#EXT-X-KEY:IV=` -> ca VẪN XANH. Lý do là tính chất của CBC: IV chỉ chi phối khối 16 byte
+// ĐẦU mỗi segment. Đo trên chính fixture này: IV sai làm lệch ĐÚNG 10/143.444 byte, vẫn 100 khung,
+// md5 luồng hình GIỐNG HỆT, stderr ffmpeg RỖNG, và file .mp4 ra GIỐNG HỆT TỪNG BYTE (đã `cmp`).
+// => KHÔNG assertion nào dựa trên nội dung file bắt được lỗi IV với MPEG-TS. Lưới cho IV nằm ở
+// unit test `utils/crypto.test.ts` (mục "vector IV lấy từ chính fixture e2e"), không nằm ở đây. Đừng thêm ca
+// e2e mới với hy vọng bắt lỗi IV — đã thử, không được.
+//
+// 🔴 ĐÃ ĐO (2026-07-19, đừng đo lại) — utils/hls.ts + m3u8-parser@7.2.0:
+//   - Không khai IV  -> `iv` VẮNG; IV = `seq` (media sequence TUYỆT ĐỐI) dạng 128-bit big-endian.
+//   - `#EXT-X-MEDIA-SEQUENCE:7` -> segment đầu có `seq = 7`, KHÔNG phải 0.
+//   - Khai `IV=0x...` -> parser trả Uint32Array, utils đổi ra đúng 16 byte.
+//   - Hai `#EXT-X-KEY` -> mỗi segment mang đúng `keyUri` của cụm nó thuộc về.
+//   - node aes-128-cbc + PKCS7 <-> `decryptAes128Cbc` khớp TỪNG BYTE (thử cỡ 18612 B, không bội 16).
+
+/** Khoá 16 byte CỐ ĐỊNH (tất định để ca e2e lặp lại được). Hai khoá khác nhau -> ca xoay khoá. */
+const AES_KEY_0 = Buffer.from('59564956494d2d6b65792d302d616573', 'hex');
+const AES_KEY_1 = Buffer.from('59564956494d2d6b65792d312d616573', 'hex');
+
+/**
+ * IV tường minh — CỐ Ý không phải toàn số 0 và không trùng IV nào dẫn được từ `seq`.
+ * ⚠️ Giá trị này được UNIT TEST dùng lại làm vector kỳ vọng; e2e KHÔNG phân biệt được IV đúng/sai
+ * (xem "GIỚI HẠN ĐÃ ĐO" ở đầu mục). Đổi số ở đây thì phải đổi cả trong `utils/crypto.test.ts`.
+ */
+const AES_EXPLICIT_IV = Buffer.from('a1b2c3d4e5f60718293a4b5c6d7e8f90', 'hex');
+
+/**
+ * MEDIA-SEQUENCE khác 0 để `seq` KHÔNG trùng chỉ số mảng — nhờ vậy unit test phân biệt được bản
+ * dùng `seg.seq` với bản dùng nhầm chỉ số vòng lặp.
+ * ⚠️ Đừng "dọn về 0 cho gọn", và cũng đừng tin là e2e bắt được chuyện này: ĐO RỒI, e2e KHÔNG bắt
+ * (xem "GIỚI HẠN ĐÃ ĐO" ở đầu mục). Thứ bắt được là `utils/crypto.test.ts`.
+ */
+const AES_MEDIA_SEQUENCE = 7;
+
+/** MEDIA-SEQUENCE của playlist IV-tường-minh: khác 0 để phân biệt được với IV dẫn từ seq. */
+const AES_IV_MEDIA_SEQUENCE = 3;
+
+/** Segment nào bắt đầu dùng khoá thứ hai (ca xoay khoá). */
+const AES_ROTATE_AT = 5;
+
+/** IV mặc định của HLS: media sequence dạng 128-bit big-endian (12 byte 0 + uint32). */
+function seqIv(seq) {
+  const iv = Buffer.alloc(16);
+  iv.writeUInt32BE(seq >>> 0, 12);
+  return iv;
+}
+
+/** AES-128-CBC + PKCS7 — đúng chuẩn HLS (RFC 8216 §5.2). */
+function aesEncrypt(plain, key, iv) {
+  const c = createCipheriv('aes-128-cbc', key, iv);
+  c.setAutoPadding(true);
+  return Buffer.concat([c.update(plain), c.final()]);
+}
+
+/**
+ * Ba biến thể playlist mã hoá, mỗi biến thể có KHÔNG GIAN TÊN segment riêng (`seq`/`iv`/`rot`) vì
+ * cùng một segment plaintext được mã hoá bằng IV/khoá khác nhau ở mỗi biến thể.
+ */
+const AES_VARIANTS = {
+  // IV mặc định (dẫn từ seq) + MEDIA-SEQUENCE=7 -> ghim luật "IV theo seq tuyệt đối".
+  seq: { mediaSequence: AES_MEDIA_SEQUENCE, explicitIv: false, rotate: false },
+  // IV tường minh -> ghim rằng `#EXT-X-KEY:IV=` thật sự được dùng.
+  iv: { mediaSequence: AES_IV_MEDIA_SEQUENCE, explicitIv: true, rotate: false },
+  // Hai khoá trong một playlist -> ghim rằng cache khoá KHÔNG bôi khoá đầu ra cả stream.
+  rot: { mediaSequence: 0, explicitIv: false, rotate: true },
+  // Segment mã hoá BÌNH THƯỜNG nhưng server phát KHOÁ SAI (16 byte khác) -> giải mã ném lỗi.
+  // Có thật ngoài đời: CDN xoay khoá mà quên cập nhật, hoặc URI khoá trỏ nhầm bản cũ.
+  bad: { mediaSequence: 0, explicitIv: false, rotate: false, badKey: 'wrong' },
+  // Server phát TRANG HTML thay cho khoá (403/redirect về trang đăng nhập — dạng RẤT hay gặp).
+  // Đây là ca khoá KHÔNG PHẢI 16 byte -> `importKey` ném, không phải lỗi padding.
+  badlen: { mediaSequence: 0, explicitIv: false, rotate: false, badKey: 'html' },
+};
+
+/** Khoá SAI 16 byte (ca `bad`) — đúng độ dài nên qua được importKey, chết ở bước bỏ padding. */
+const AES_KEY_DECOY = Buffer.from('00112233445566778899aabbccddeeff', 'hex');
+
+// --- W7.1/§7 — PLAYLIST DRM (ranh giới cứng: phải TỪ CHỐI, không được tải) -----------------------
+//
+// 🔴 LỖ HỔNG THẬT ĐÃ ĐO 2026-07-19: ba hệ DRM phổ biến nhất đi LỌT ranh giới §7. m3u8-parser đẩy
+// khoá có KEYFORMAT lạ sang `manifest.contentProtection` và KHÔNG gán `segment.key`, nên
+// `parseHlsSegments` thấy playlist DRM là "không mã hoá" -> isProtected=FALSE -> extension tải
+// trọn nội dung được bảo vệ. SAMPLE-AES chỉ mã hoá payload NAL nên khung TS còn nguyên và libav
+// remux THÀNH CÔNG -> user nhận .mp4 nhiễu KÈM DẤU TÍCH XANH.
+//
+// Segment ở đây dùng lại đúng segment thường: ca này đo QUYẾT ĐỊNH TỪ CHỐI, không đo giải mã.
+// Nếu guard thủng thì job sẽ chạy tới cùng và ra file -> ca ĐỎ. Đó chính là điều cần ghim.
+const DRM_VARIANTS = {
+  fairplay:
+    '#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://key-id",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1"',
+  playready:
+    '#EXT-X-KEY:METHOD=SAMPLE-AES,URI="data:text/plain;base64,AAAA",KEYFORMAT="com.microsoft.playready"',
+  widevine:
+    '#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,URI="data:text/plain;base64,AAAA",KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"',
+};
+
+/** Media playlist khai DRM, trỏ về ĐÚNG 10 segment thường của /hls/. */
+function drmPlaylist(system) {
+  const lines = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:5',
+    '#EXT-X-TARGETDURATION:1',
+    '#EXT-X-MEDIA-SEQUENCE:0',
+    DRM_VARIANTS[system],
+  ];
+  for (let i = 0; i < 10; i++) {
+    lines.push('#EXTINF:1.0,', `http://127.0.0.1:__PORT__/hls/seg${i}.ts`);
+  }
+  lines.push('#EXT-X-ENDLIST', '');
+  return lines.join('\n');
+}
+
+/** Khoá + IV của segment thứ `i` trong biến thể `name`. Một nguồn sự thật cho cả playlist lẫn byte. */
+function aesParamsFor(name, i) {
+  const v = AES_VARIANTS[name];
+  const seq = v.mediaSequence + i;
+  return {
+    key: v.rotate && i >= AES_ROTATE_AT ? AES_KEY_1 : AES_KEY_0,
+    iv: v.explicitIv ? AES_EXPLICIT_IV : seqIv(seq),
+  };
+}
+
+/** Sinh media playlist mã hoá cho biến thể `name` (10 segment, khớp đúng /hls/media.m3u8). */
+function aesPlaylist(name, keyHost, port) {
+  const v = AES_VARIANTS[name];
+  // `keyHost` cho khoá ra host KHÁC manifest/segment. Cần thiết vì rule DNR gom THEO HOST:
+  // khoá cùng host với segment thì rule sinh từ URL segment đã phủ luôn khoá, nên ca "cổng 403
+  // riêng đường khoá" không phân biệt nổi có/không có `add(s.keyUri)` trong spoofTargets.
+  // ĐÃ ĐO: '127.0.0.1' và 'localhost' là HAI host riêng với DNR (xem đầu file).
+  const keyBase = keyHost ? `http://${keyHost}:${port}/hls-aes/${name}/` : '';
+  const lines = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:3',
+    '#EXT-X-TARGETDURATION:1',
+    `#EXT-X-MEDIA-SEQUENCE:${v.mediaSequence}`,
+  ];
+  for (let i = 0; i < 10; i++) {
+    // #EXT-X-KEY phát lại ở đúng chỗ đổi khoá; ngoài ra chỉ khai một lần ở đầu (như CDN thật).
+    if (i === 0 || (v.rotate && i === AES_ROTATE_AT)) {
+      const keyFile =
+        keyBase +
+        (v.rotate && i >= AES_ROTATE_AT ? 'key1.bin' : 'key0.bin');
+      const ivAttr = v.explicitIv
+        ? `,IV=0x${AES_EXPLICIT_IV.toString('hex')}`
+        : '';
+      lines.push(`#EXT-X-KEY:METHOD=AES-128,URI="${keyFile}"${ivAttr}`);
+    }
+    lines.push('#EXTINF:1.0,', `seg${i}.ts`);
+  }
+  lines.push('#EXT-X-ENDLIST', '');
+  return lines.join('\n');
+}
+
 /**
  * @param {object} opts
  * @param {'none'|'manifest'|'segments'|'all'} [opts.gate] path nào đòi Referer (thiếu -> 403).
  * @param {string|null} [opts.segmentHost] nếu set, media.m3u8 trả URI segment TUYỆT ĐỐI trỏ host
  *   này (dựng ca segment khác host với manifest). Null -> URI tương đối như manifest thật.
+ * @param {string|null} [opts.keyHost] W3.1 — nếu set, URI khoá AES là TUYỆT ĐỐI trỏ host này
+ *   (dựng ca "khoá nằm ở CDN khác host với segment" — hình dạng gần như luôn đúng ngoài đời).
  * @param {boolean} [opts.stallSegments] W2.6 — segment KHÔNG BAO GIỜ trả lời (giữ socket mở, câm
  *   tuyệt đối). Mô phỏng "mất mạng giữa chừng"/server treo: đây là ca mà trước W2.6 làm job kẹt
  *   'fetching' VĨNH VIỄN, không lỗi, không huỷ nổi, và jobChain tắc kéo mọi job sau chết theo.
@@ -59,6 +229,7 @@ export async function startFixtureServer({
   segmentHost = null,
   stallSegments = false,
   tokenGate = false,
+  keyHost = null,
 } = {}) {
   /** @type {{url:string, referer:string|undefined, token:string|undefined, status:number}[]} */
   const requests = [];
@@ -66,10 +237,17 @@ export async function startFixtureServer({
   const isSegment = (p) => /\/seg\d+\.ts$/.test(p);
   const isManifest = (p) => p.endsWith('.m3u8');
   const isProgressive = (p) => p === '/prog/sample.mp4';
+  /**
+   * W3.1 — khoá AES là một đường FETCH RIÊNG (fetchWithRetry với label khác), không đi chung
+   * đường segment. Cổng `key` cô lập đúng đường đó: nó chứng minh cú fetch khoá CŨNG được
+   * phát lại header, chứ không phải "segment qua được thì khoá đương nhiên qua".
+   */
+  const isAesKey = (p) => /^\/hls-aes\/\w+\/key\d\.bin$/.test(p);
   const needsReferer = (p) =>
     gate === 'all' ||
     (gate === 'manifest' && isManifest(p)) ||
     (gate === 'segments' && isSegment(p)) ||
+    (gate === 'key' && isAesKey(p)) ||
     (gate === 'progressive' && isProgressive(p));
 
   const server = createServer((req, res) => {
@@ -103,6 +281,75 @@ export async function startFixtureServer({
         send(403, `Forbidden: token sai/thiếu (${token ?? 'NONE'})`, 'text/plain');
         return;
       }
+    }
+
+    // W3.1 — HLS MÃ HOÁ AES-128. Đặt TRƯỚC nhánh isSegment() chung: `/hls-aes/seq/seg0.ts` cũng
+    // khớp regex segment, để rơi xuống dưới là đi đọc nhầm file plaintext trong e2e/fixtures/hls.
+    const aesKey = /^\/hls-aes\/(\w+)\/key(\d)\.bin$/.exec(path);
+    if (aesKey) {
+      if (!AES_VARIANTS[aesKey[1]]) {
+        send(404, 'biến thể AES không có', 'text/plain');
+        return;
+      }
+      // Khoá HLS phát công khai qua HTTP — đúng như CDN thật, và đúng chỗ §7 vạch ranh giới:
+      // không có kiểm soát truy cập nào để mà vượt.
+      const badKey = AES_VARIANTS[aesKey[1]].badKey;
+      if (badKey === 'wrong') {
+        send(200, AES_KEY_DECOY, 'application/octet-stream');
+        return;
+      }
+      if (badKey === 'html') {
+        // 200 kèm HTML: CDN chuyển hướng về trang đăng nhập. Trả 200 là CỐ Ý — lỗi này KHÔNG bị
+        // tầng fetch bắt, nó chỉ lộ ra ở bước dựng khoá, nên nó ghim đúng chỗ ta cần ghim.
+        send(200, '<!doctype html><title>login</title>Vui lòng đăng nhập', 'text/html');
+        return;
+      }
+      send(
+        200,
+        aesKey[2] === '1' ? AES_KEY_1 : AES_KEY_0,
+        'application/octet-stream',
+      );
+      return;
+    }
+    const aesSeg = /^\/hls-aes\/(\w+)\/seg(\d+)\.ts$/.exec(path);
+    if (aesSeg) {
+      const [, variant, idx] = aesSeg;
+      const i = Number(idx);
+      if (!AES_VARIANTS[variant] || i < 0 || i > 9) {
+        send(404, 'segment AES không có', 'text/plain');
+        return;
+      }
+      const { key, iv } = aesParamsFor(variant, i);
+      // Plaintext là ĐÚNG segment của ca `happy` -> kỳ vọng ra file trùng khít: 100 khung.
+      send(200, aesEncrypt(readFixture(`seg${i}.bin`), key, iv), 'video/mp2t');
+      return;
+    }
+    const drmPl = /^\/hls-drm\/(\w+)\/media\.m3u8$/.exec(path);
+    if (drmPl) {
+      if (!DRM_VARIANTS[drmPl[1]]) {
+        send(404, 'hệ DRM không có', 'text/plain');
+        return;
+      }
+      send(
+        200,
+        drmPlaylist(drmPl[1]).replaceAll('__PORT__', String(server.address().port)),
+        'application/vnd.apple.mpegurl',
+      );
+      return;
+    }
+
+    const aesPl = /^\/hls-aes\/(\w+)\/media\.m3u8$/.exec(path);
+    if (aesPl) {
+      if (!AES_VARIANTS[aesPl[1]]) {
+        send(404, 'biến thể AES không có', 'text/plain');
+        return;
+      }
+      send(
+        200,
+        aesPlaylist(aesPl[1], keyHost, server.address().port),
+        'application/vnd.apple.mpegurl',
+      );
+      return;
     }
 
     if (path === '/hls/master.m3u8') {
@@ -289,6 +536,20 @@ export async function startFixtureServer({
     mediaUrl: `http://127.0.0.1:${port}/hls/media.m3u8`,
     /** W1.4 — playlist y hệt mediaUrl nhưng có 2 chỗ nối (stream chèn quảng cáo). */
     discontinuityUrl: `http://127.0.0.1:${port}/hls/media-disc.m3u8`,
+    /**
+     * W3.1 — playlist MÃ HOÁ AES-128, cùng 10 segment plaintext với mediaUrl nên kỳ vọng ra file
+     * TRÙNG KHÍT ca `happy` (100 khung). Ba biến thể ghim ba luật khác nhau:
+     *   `seq` IV dẫn từ media sequence (MEDIA-SEQUENCE=7, lệch chỉ số mảng);
+     *   `iv`  IV khai tường minh trong #EXT-X-KEY;
+     *   `rot` hai khoá trong một playlist (đổi ở segment 5).
+     */
+    aesUrl: (variant) =>
+      `http://127.0.0.1:${port}/hls-aes/${variant}/media.m3u8`,
+    /** §7 — playlist khai DRM (fairplay/playready/widevine). Extension PHẢI từ chối, không tải. */
+    drmUrl: (system) => `http://127.0.0.1:${port}/hls-drm/${system}/media.m3u8`,
+    /** Số lần khoá AES thật sự được phục vụ -> bằng chứng đường fetch khoá có chạy. */
+    aesKeyHits: () =>
+      requests.filter((r) => /^\/hls-aes\/\w+\/key\d\.bin$/.test(r.url)).length,
     /** W2.5 — URL mp4 progressive (host 127.0.0.1). */
     progressiveUrl: `http://127.0.0.1:${port}/prog/sample.mp4`,
     /** W2.7 — URL mp4 CÂM (server nhận rồi im) để giữ lượt tải đứng yên mà giết offscreen. */
