@@ -355,6 +355,197 @@ async function runAesBadKey({ variant, wantMessage }) {
 }
 
 /**
+ * GÓI A — HLS **fMP4/CMAF** (`#EXT-X-MAP`), có/không mã hoá AES-128.
+ *
+ * VÌ SAO CA NÀY TỒN TẠI: phiên 2026-07-20 vá chỗ "init segment không được giải mã" theo RFC 8216
+ * §4.3.2.5, nhưng **chưa có máy đo nào chạy bản vá đó** — mọi ca AES đang có đều là MPEG-TS, mà TS
+ * không có `#EXT-X-MAP` nên nhánh init không bao giờ được đụng tới. Nợ này là món rõ nhất còn lại
+ * của W3.1.
+ *
+ * 🔬 VÌ SAO fMP4 CÓ RĂNG TRONG KHI TS THÌ KHÔNG — đây là điểm cốt lõi, đã đo bằng node:
+ * 16 byte đầu của init (sau giải mã) là `0000001c 66747970 69736f35 00000200`, tức box `ftyp`.
+ * AES-CBC cho IV chi phối ĐÚNG khối 16 byte đầu — trên TS thì 16 byte đó chỉ là một gói TS và
+ * ffmpeg tự đồng bộ lại (đo được: lệch 10/143.444 byte, file .mp4 ra GIỐNG HỆT TỪNG BYTE). Trên
+ * fMP4 thì 16 byte đó là magic + kích thước box, hỏng là libav không nhận ra định dạng.
+ * => ĐÂY là chỗ duy nhất trong bộ e2e mà lỗi tầng init/IV trở nên QUAN SÁT ĐƯỢC.
+ *
+ * `wantKeyHits` là cổng độc lập với nội dung file: 0 cho biến thể không mã hoá (chống "giải mã
+ * oan"), đúng 1 mỗi track cho biến thể mã hoá (chống cache khoá thủng).
+ */
+async function runFmp4Download({
+  variant,
+  demuxed = false,
+  wantKeyHits = 0,
+  wantAudio = false,
+}) {
+  const srv = await startFixtureServer({ gate: 'none' });
+  try {
+    return await withBrowser(async ({ page }) => {
+      // Biến thể tách tiếng đi TRỌN đường popup (master -> variant -> audioUrl), vì chính khâu
+      // parse master là nơi luồng tiếng hay bốc hơi (bài học W1.1).
+      let variantUrl = srv.fmp4Url(variant, 'v');
+      let audioUrl;
+      const mediaUrl = demuxed
+        ? srv.fmp4MasterUrl(variant)
+        : srv.fmp4Url(variant, 'v');
+      if (demuxed) {
+        const vres = await page.evaluate(
+          (url) =>
+            chrome.runtime.sendMessage({
+              kind: 'manifest/variants',
+              url,
+              mediaType: 'hls',
+            }),
+          mediaUrl,
+        );
+        if (!vres?.ok) {
+          return {
+            ok: false,
+            detail: `manifest/variants hỏng: ${JSON.stringify(vres)}`,
+          };
+        }
+        const v = vres.variants?.[0];
+        if (!v) return { ok: false, detail: 'master fMP4 không ra variant nào' };
+        variantUrl = v.uri;
+        audioUrl = v.audioRenditions?.find((r) => r.selected)?.uri;
+        if (!audioUrl) {
+          return {
+            ok: false,
+            detail:
+              'master khai #EXT-X-MEDIA:TYPE=AUDIO nhưng variant không mang rendition tiếng nào ' +
+              '-> job sẽ chạy một-input và file ra CÂM',
+          };
+        }
+      }
+
+      const start = await page.evaluate(
+        ([vUrl, aUrl, mUrl]) =>
+          chrome.runtime.sendMessage({
+            kind: 'hls/download',
+            variantUrl: vUrl,
+            ...(aUrl ? { audioUrl: aUrl } : {}),
+            mediaUrl: mUrl,
+            tabId: -1,
+          }),
+        [variantUrl, audioUrl ?? null, mediaUrl],
+      );
+      if (!start?.ok) {
+        return {
+          ok: false,
+          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+        };
+      }
+      const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
+      if (!job) return { ok: false, detail: 'job TREO (không done/error)' };
+      if (job.phase !== 'done') {
+        // Lời chẩn đoán phải ĐÚNG với biến thể đang chạy. Câu "init không được giải mã" mà dán
+        // lên cả biến thể KHÔNG mã hoá thì chính nó là một khẳng định sai — đúng thứ luật dự án
+        // gọi là lỗi (đã đo: đột biến bỏ #EXT-X-MAP làm ca `plain` đỏ kèm câu chẩn đoán sai này).
+        const hint = wantKeyHits
+          ? 'init (#EXT-X-MAP) nhiều khả năng KHÔNG được giải mã: ciphertext nằm đúng chỗ ' +
+            'ftyp/moov nên libav không nhận ra định dạng'
+          : 'stream KHÔNG mã hoá mà vẫn hỏng -> nhiều khả năng init (#EXT-X-MAP) bị bỏ qua ' +
+            'hoặc ghi sai vị trí (init phải nằm TRƯỚC segment đầu)';
+        return {
+          ok: false,
+          detail: `job ${job.phase}: ${job.error ?? '?'} -> ${hint}`,
+        };
+      }
+
+      // Cổng 1: init có thật sự được kéo về không. Bản nào bỏ qua #EXT-X-MAP sẽ ra file thiếu
+      // header — và với fMP4 thì thiếu header là mất TOÀN BỘ mô tả track, không phải lỗi mép.
+      const initHits = srv.fmp4InitHits();
+      if (initHits < (demuxed ? 2 : 1)) {
+        return {
+          ok: false,
+          detail: `chỉ ${initHits} lượt fetch init (#EXT-X-MAP) — nhánh init không chạy`,
+        };
+      }
+      // Cổng 2: số lượt lấy khoá. 0 = không giải mã oan trên stream sạch; đúng N = cache khoá lành.
+      const keyHits = srv.fmp4KeyHits();
+      if (keyHits !== wantKeyHits) {
+        return {
+          ok: false,
+          detail:
+            `${keyHits} lượt fetch khoá AES, mong đợi ĐÚNG ${wantKeyHits}` +
+            (wantKeyHits === 0
+              ? ' -> stream KHÔNG mã hoá mà vẫn đi xin khoá: giải mã oan'
+              : keyHits < wantKeyHits
+                ? ' -> thiếu khoá: track nào đó không được giải mã (hoặc bị bôi khoá của track kia)'
+                : ' -> cache khoá thủng'),
+        };
+      }
+      if (demuxed) {
+        // Ghim nhánh "mỗi track một #EXT-X-KEY RIÊNG": hai khoá KHÁC NHAU, mỗi bên đúng 1 lượt.
+        const kv = srv.fmp4KeyHits('v');
+        const ka = srv.fmp4KeyHits('a');
+        if (kv !== 1 || ka !== 1) {
+          return {
+            ok: false,
+            detail: `khoá hình ${kv} lượt / khoá tiếng ${ka} lượt — mỗi bên phải ĐÚNG 1`,
+          };
+        }
+      }
+
+      const file = await waitDownloadedFile(page, 30_000);
+      if (!file)
+        return { ok: false, detail: 'job done nhưng KHÔNG có file trên đĩa' };
+      if (file.state !== 'complete')
+        return {
+          ok: false,
+          detail: `download ${file.state}: ${file.error ?? '?'}`,
+        };
+      if (!existsSync(file.filename))
+        return {
+          ok: false,
+          detail: `downloads báo complete nhưng file không tồn tại: ${file.filename}`,
+        };
+      const size = statSync(file.filename).size;
+      const probe = probeFile(file.filename);
+      if (probe.error) {
+        return {
+          ok: false,
+          detail:
+            `ffprobe không đọc được file ra: ${probe.error} ` +
+            '-> init hỏng thì mọi mô tả track biến mất, file chỉ còn là đống byte',
+        };
+      }
+      if (!probe.codecs.includes('video')) {
+        return {
+          ok: false,
+          detail: `file ra KHÔNG có track hình (streams: ${probe.codecs.join(',') || 'rỗng'})`,
+        };
+      }
+      if (wantAudio && !probe.codecs.includes('audio')) {
+        return {
+          ok: false,
+          detail:
+            `file ra KHÔNG có track tiếng (streams: ${probe.codecs.join(',')}) ` +
+            '-> luồng tiếng có khoá RIÊNG bị rơi',
+        };
+      }
+      if (Math.abs(probe.videoFrames - FIXTURE_FRAMES) > 2) {
+        return {
+          ok: false,
+          detail:
+            `thiếu khung hình: đọc được ${probe.videoFrames}, mong đợi ${FIXTURE_FRAMES} ` +
+            '-> mất segment .m4s, hoặc một phần giải mã sai',
+        };
+      }
+      return {
+        ok: true,
+        detail:
+          `file ${(size / 1024).toFixed(0)}KB, ${probe.duration.toFixed(2)}s, ` +
+          `${probe.videoFrames} khung, ${initHits} lượt init, ${keyHits} lượt khoá, ` +
+          `track: ${probe.codecs.join('+')}`,
+      };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
+/**
  * §7 — PLAYLIST KHAI DRM PHẢI BỊ TỪ CHỐI, VÀ KHÔNG ĐƯỢC TẢI LẤY MỘT SEGMENT.
  *
  * 🔴 LỖ HỔNG THẬT ĐÃ ĐO 2026-07-19 (trước bản vá): FairPlay/PlayReady/Widevine đều cho
@@ -1599,6 +1790,63 @@ const SCENARIOS = [
     expect: 'pass',
     run: () =>
       runAesDownload({ variant: 'seq', gate: 'key', keyHost: 'localhost' }),
+  },
+
+  // --- GÓI A — HLS fMP4/CMAF: nhánh #EXT-X-MAP + giải mã init (chưa máy nào chạy) ---
+  {
+    id: 'fmp4-plain',
+    title:
+      'fMP4/CMAF KHÔNG mã hoá (#EXT-X-MAP) -> tải bình thường, KHÔNG đi xin khoá (chống chặn oan)',
+    // Ca CHIỀU NGƯỢC LẠI của gói A. Bản vá nào "cứ thấy #EXT-X-MAP là giải mã" sẽ đỏ ở đây.
+    expect: 'pass',
+    pins: 'GÓI A (fMP4 sạch phải đi lọt: chặn/giải mã oan tệ hơn bỏ sót)',
+    run: () => runFmp4Download({ variant: 'plain', wantKeyHits: 0 }),
+  },
+  {
+    id: 'fmp4-aes-init',
+    title:
+      'fMP4/CMAF MÃ HOÁ AES-128 phủ CẢ init (#EXT-X-MAP) + IV tường minh -> đủ 100 khung',
+    // 🔴 Ca CHÍNH của gói A. Trước bản vá RFC 8216 §4.3.2.5, init được ghi thẳng KHÔNG giải mã ->
+    // ciphertext nằm đúng chỗ ftyp/moov -> libav chết với lỗi đổ tội khâu GHÉP. Đây là ca đầu tiên
+    // trong dự án chạm được nhánh đó.
+    expect: 'pass',
+    pins: 'GÓI A (bản vá giải mã init chưa có máy đo nào chạy)',
+    run: () => runFmp4Download({ variant: 'enc', wantKeyHits: 1 }),
+  },
+  {
+    id: 'fmp4-clear-init',
+    title:
+      '#EXT-X-MAP TRƯỚC #EXT-X-KEY (init TRONG SÁNG, segment mã hoá) -> phải tải được, KHÔNG giải mã oan init',
+    // 🔴 LỖI THẬT DO REVIEW ĐỐI KHÁNG BẮT ĐƯỢC, và là HỒI QUY do chính bản vá giải mã init gây ra.
+    // RFC 8216 §4.3.2.5 phân phạm vi khoá theo VỊ TRÍ TAG; MAP đứng trước KEY = init để trần —
+    // hình dạng hợp lệ và phổ biến (init trong sáng cho player đọc codec trước khi xin khoá).
+    // Bản cũ suy khoá init từ `segment.key` nên đem giải mã một init vốn đã trong sáng -> WebCrypto
+    // ném lỗi padding -> job chết kèm câu ĐỔ TỘI MÁY CHỦ. Giết oan một lượt tải khoẻ là hạng lỗi
+    // dự án xếp nặng hơn treo. ĐÃ ĐO: m3u8-parser mô hình đúng phạm vi qua `segment.map.key`.
+    expect: 'pass',
+    pins: 'GÓI A (phạm vi khoá của #EXT-X-MAP — bản vá init từng giết oan hình dạng này)',
+    run: () => runFmp4Download({ variant: 'clear-init', wantKeyHits: 1 }),
+  },
+  {
+    id: 'fmp4-aes-demuxed',
+    title:
+      'fMP4 tách tiếng, mỗi track có #EXT-X-KEY + #EXT-X-MAP RIÊNG -> file ra đủ hình + tiếng',
+    // ĐO ĐƯỢC nó ghim gì (đừng ghi quá lời — phản biện đã bác bản mô tả đầu):
+    //   CÓ ghim: init THỨ HAI (của track tiếng) được fetch VÀ giải mã bằng khoá RIÊNG của nó;
+    //            track tiếng thật sự có mặt trong file ra.
+    //   KHÔNG ghim: phạm vi per-track của `keyCache`. Hai track dùng hai keyUri KHÁC NHAU, mà cache
+    //            đánh chỉ mục theo URI, nên cache dùng chung (vẫn theo URI) vẫn cho kết quả ĐÚNG.
+    //            Đột biến M-A3 làm ca này đỏ là nhờ nửa "đánh chỉ mục bằng hằng số", và nửa đó thì
+    //            `aes128-key-rotation` đã ghim sẵn từ trước.
+    expect: 'pass',
+    pins: 'GÓI A (init thứ hai + khoá riêng của track tiếng — chưa từng được đo)',
+    run: () =>
+      runFmp4Download({
+        variant: 'aud',
+        demuxed: true,
+        wantKeyHits: 2,
+        wantAudio: true,
+      }),
   },
   {
     id: 'drm-refused',

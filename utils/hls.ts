@@ -240,6 +240,25 @@ export interface HlsSegment {
   /** URL tuyệt đối của init segment (fMP4) nếu có #EXT-X-MAP. */
   initUri?: string;
   /**
+   * 🔴 KHOÁ CỦA RIÊNG INIT — KHÔNG được suy từ `keyMethod`/`keyUri` của segment.
+   *
+   * RFC 8216 §4.3.2.5 phân phạm vi khoá theo VỊ TRÍ TAG: một `#EXT-X-KEY` phủ các Media
+   * Initialization Section do `#EXT-X-MAP` khai giữa nó và `#EXT-X-KEY` kế tiếp. Nên:
+   *     KEY rồi tới MAP  -> init ĐƯỢC mã hoá bằng khoá đó
+   *     MAP rồi tới KEY  -> init TRONG SÁNG, chỉ segment mới mã hoá (hợp lệ và phổ biến:
+   *                         init trong sáng cho player đọc codec trước khi đi xin khoá)
+   *
+   * ĐÃ ĐO (2026-07-20, m3u8-parser@7.2.0): parser mô hình ĐÚNG phạm vi này qua `segment.map.key`
+   * — có mặt ở thứ tự thứ nhất, VẮNG ở thứ tự thứ hai. Bản trước dùng khoá của segment nên đem
+   * giải mã một init vốn trong sáng -> lỗi padding -> giết oan một stream khoẻ kèm câu đổ tội máy
+   * chủ. Ca e2e `fmp4-clear-init` ghim chuyện này. **Đừng gộp mấy trường này về khoá của segment.**
+   */
+  initKeyMethod?: string;
+  /** URL tuyệt đối của khoá init (có thể KHÁC khoá segment). */
+  initKeyUri?: string;
+  /** IV tường minh của init. RFC bắt buộc khai IV khi khoá phủ init. */
+  initIv?: Uint8Array;
+  /**
    * Đoạn byte của segment trong file lớn (#EXT-X-BYTERANGE). Có mặt = MỌI segment thường trỏ
    * CÙNG một `uri`, chỉ khác đoạn -> tầng fetch BẮT BUỘC gửi header `Range`, nếu không sẽ tải
    * nguyên file lớn một lần cho MỖI segment (đo thật: Apple fMP4 = 27MB x 101 lần).
@@ -338,6 +357,9 @@ export function spoofTargetsFromSegments(segments: HlsSegment[]): string[] {
     add(s.uri);
     add(s.keyUri);
     add(s.initUri);
+    // Khoá của init có thể là URI KHÁC khoá segment (và khoá AES gần như luôn ở host khác) —
+    // bỏ sót nó là job đi tới 'fetching' rồi chết 403 ở đúng bước lấy khoá init.
+    add(s.initKeyUri);
   }
   return [...byHost.values()];
 }
@@ -377,6 +399,9 @@ export function parseHlsSegments(
     //    §4.3.2.5: vắng `@offset` nghĩa là bắt đầu từ byte 0 — KHÔNG phải nối tiếp gì cả.
     const br = s.byterange;
     const mapBr = s.map?.byterange;
+    // Khoá của INIT lấy từ `s.map.key`, KHÔNG phải `s.key` — xem chú thích ở HlsSegment.initKeyMethod.
+    // Vắng `map.key` nghĩa là init nằm NGOÀI phạm vi mọi #EXT-X-KEY, tức để trần.
+    const mapKey = s.map?.key;
     return {
       uri: resolveUri(s.uri, manifestUrl),
       duration: typeof s.duration === 'number' ? s.duration : 0,
@@ -385,6 +410,9 @@ export function parseHlsSegments(
       keyUri: key?.uri ? resolveUri(key.uri, manifestUrl) : undefined,
       iv: ivToBytes(key?.iv),
       initUri: s.map?.uri ? resolveUri(s.map.uri, manifestUrl) : undefined,
+      initKeyMethod: mapKey?.method,
+      initKeyUri: mapKey?.uri ? resolveUri(mapKey.uri, manifestUrl) : undefined,
+      initIv: ivToBytes(mapKey?.iv),
       ...(br ? { byterange: { length: br.length, offset: br.offset } } : {}),
       ...(mapBr
         ? { initByterange: { length: mapBr.length, offset: mapBr.offset ?? 0 } }

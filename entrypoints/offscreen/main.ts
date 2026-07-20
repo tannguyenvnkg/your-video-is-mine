@@ -382,9 +382,32 @@ async function downloadTrack(o: {
   // khai IV tường minh cho ca này). Trước bản vá, init được ghi THẲNG không giải mã -> ciphertext
   // nằm đúng chỗ `ftyp`/`moov`, tức byte ĐẦU TIÊN của file, trong khi mọi segment phía sau lại
   // đúng -> libav không nhận ra định dạng và job chết với thông báo đổ tội cho khâu GHÉP.
-  if (initBytes && firstInitSeg?.keyMethod === 'AES-128' && firstInitSeg.keyUri) {
-    const key = await getKey(firstInitSeg.keyUri);
-    const iv = segmentIv(firstInitSeg);
+  //
+  // 🔴 NHƯNG PHẠM VI KHOÁ ĐI THEO VỊ TRÍ TAG, KHÔNG THEO SEGMENT (lỗi do review đối kháng bắt,
+  // 2026-07-20). Dùng `firstInitSeg.keyMethod/keyUri` (khoá của SEGMENT) là SAI: playlist khai
+  // `#EXT-X-MAP` TRƯỚC `#EXT-X-KEY` có init TRONG SÁNG — hình dạng hợp lệ và phổ biến, vì init
+  // trong sáng cho player đọc codec trước khi đi xin khoá. Bản cũ đem giải mã init đó -> WebCrypto
+  // ném lỗi padding -> **giết oan một stream khoẻ** kèm câu đổ tội máy chủ phát nhầm khoá. Nay đọc
+  // khoá RIÊNG của init (`initKeyMethod/initKeyUri/initIv`, lấy từ `segment.map.key` — đã đo là
+  // m3u8-parser mô hình đúng phạm vi). Ca `fmp4-clear-init` ghim chiều này, `fmp4-aes-init` ghim
+  // chiều kia. **Đừng suy khoá init từ khoá segment nữa.**
+  const initMethod = firstInitSeg?.initKeyMethod;
+  if (initMethod && initMethod !== 'NONE' && initMethod !== 'AES-128') {
+    throw new Error(`Init segment dùng mã hoá không hỗ trợ: ${initMethod}`);
+  }
+  // Khai AES-128 cho init mà thiếu URI khoá: ném thay vì âm thầm ghi ciphertext làm header.
+  if (initMethod === 'AES-128' && !firstInitSeg?.initKeyUri) {
+    throw new Error(
+      'Phần đầu tệp (init) khai mã hoá AES-128 nhưng playlist không cho biết địa chỉ khoá ' +
+        '(#EXT-X-KEY thiếu URI).',
+    );
+  }
+  if (initBytes && initMethod === 'AES-128' && firstInitSeg?.initKeyUri) {
+    const key = await getKey(firstInitSeg.initKeyUri);
+    const iv = segmentIv({
+      seq: firstInitSeg.seq,
+      ...(firstInitSeg.initIv ? { iv: firstInitSeg.initIv } : {}),
+    });
     initBytes = new Uint8Array(
       await decryptSegment(
         initBytes.buffer as ArrayBuffer,

@@ -32,6 +32,16 @@ const FIXTURES_PROGRESSIVE = resolve(
   'fixtures/progressive',
 );
 /**
+ * GÓI A — byte fMP4/CMAF mượn từ fixture DASH (đã commit, sinh bằng ffmpeg -f dash).
+ * Dùng lại thay vì sinh fixture mới: đây là fMP4 THẬT do ffmpeg đóng gói, và track hình của nó
+ * cho đúng 100 khung — trùng khít hằng số FIXTURE_FRAMES mà bộ e2e đã hiệu chuẩn từ trước.
+ */
+const FIXTURES_DASH_SRC = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  'fixtures/dash',
+);
+
+/**
  * W2.1 — token phiên do "player" của trang sinh ra. KHÔNG suy được từ URL/pageUrl/host, nên
  * extension chỉ có thể có nó bằng cách QUAN SÁT request thật của player (`onSendHeaders`).
  */
@@ -213,6 +223,131 @@ function aesPlaylist(name, keyHost, port) {
   return lines.join('\n');
 }
 
+// --- GÓI A — HLS fMP4/CMAF MÃ HOÁ (#EXT-X-MAP + AES-128 áp CẢ init) ----------------------------
+//
+// VÌ SAO CÓ: phiên 2026-07-20 vá chỗ "init segment (#EXT-X-MAP) không được giải mã" theo
+// RFC 8216 §4.3.2.5 — nhưng bản vá đó CHƯA CÓ MÁY ĐO NÀO CHẠY vì dự án không có fixture fMP4 mã
+// hoá. Mọi ca AES-128 đang có đều chạy MPEG-TS, mà TS thì KHÔNG có #EXT-X-MAP nên nhánh giải mã
+// init không bao giờ được đụng tới.
+//
+// 🔴 VÌ SAO FIXTURE NÀY CÓ RĂNG TRONG KHI FIXTURE TS THÌ KHÔNG (khác biệt cốt lõi, đã đo ở mục
+// AES-128 phía trên): với MPEG-TS, IV chỉ chi phối 16 byte ĐẦU mỗi segment và 16 byte đó chỉ là
+// một gói TS — ffmpeg tự đồng bộ lại, file ra GIỐNG HỆT TỪNG BYTE. Với fMP4 thì 16 byte đầu của
+// init là header `ftyp` (kích thước + magic) và ngay sau đó là `moov` chứa toàn bộ mô tả track.
+// Hỏng ở đó thì KHÔNG có gì để đồng bộ lại: libav không nhận ra định dạng và job chết hẳn.
+// => đây là chỗ DUY NHẤT trong bộ e2e mà lỗi tầng init/IV trở nên QUAN SÁT ĐƯỢC.
+//
+// Byte mượn từ e2e/fixtures/dash/ (sinh bằng ffmpeg -f dash, đã commit): track 0 là hình h264,
+// init-0.mp4 + chunk-0-00001..5.m4s = ĐÚNG 100 khung / 10,0s — trùng khít kỳ vọng của ca `happy`,
+// nên dùng lại được hằng số FIXTURE_FRAMES mà không phải hiệu chuẩn lại. Track 1 là tiếng aac.
+
+/** Khoá của luồng HÌNH fMP4. Khác mọi khoá TS ở trên để không có đường lẫn khoá giữa hai bộ ca. */
+const FMP4_KEY_V = Buffer.from('59564956494d2d666d7034762d6b6579', 'hex');
+/** Khoá RIÊNG của luồng TIẾNG — ghim nhánh "mỗi track một #EXT-X-KEY" chưa chạy lần nào. */
+const FMP4_KEY_A = Buffer.from('59564956494d2d666d7034612d6b6579', 'hex');
+
+/**
+ * IV TƯỜNG MINH — RFC 8216 §4.3.2.5 BẮT BUỘC khai IV khi khoá áp cho Media Initialization Section,
+ * vì init không có số thứ tự nào để dẫn IV ra.
+ * ⚠️ CỐ Ý khác mọi IV dẫn được từ `seq` (xem FMP4_MEDIA_SEQUENCE): nhờ vậy đột biến "bỏ qua IV
+ * tường minh" làm hỏng ĐÚNG 16 byte đầu init = header `ftyp` -> ca ĐỎ. Trên TS thì đột biến y hệt
+ * để ca XANH (đã đo). Đừng đổi giá trị này về 0 hay về thứ trùng seq.
+ */
+const FMP4_EXPLICIT_IV = Buffer.from('7f3e1c0b9a8d6f4e2c1a0b9d8e7f6a5b', 'hex');
+
+/**
+ * MEDIA-SEQUENCE khác 0 để IV-dẫn-từ-seq KHÔNG trùng IV tường minh -> đột biến phân biệt được.
+ * (Với TS thì chi tiết này vô nghĩa vì e2e mù với IV; với fMP4 thì nó chính là thứ tạo ra răng.)
+ */
+const FMP4_MEDIA_SEQUENCE = 11;
+
+/** Số segment .m4s của mỗi track fMP4 (khớp số file chunk-N-* trong e2e/fixtures/dash). */
+const FMP4_SEGMENTS = { v: 5, a: 6 };
+
+/**
+ * Biến thể fMP4:
+ *   `plain` KHÔNG mã hoá  -> ca CHIỀU NGƯỢC LẠI: chống giải mã oan / chặn oan.
+ *   `enc`   AES-128 áp CẢ init lẫn .m4s, IV tường minh -> ca chính của gói A.
+ *   `aud`   TÁCH TIẾNG, mỗi track một khoá RIÊNG -> nhánh keyCache per-track chưa chạy lần nào.
+ */
+const FMP4_VARIANTS = {
+  plain: { encrypted: false },
+  enc: { encrypted: true },
+  aud: { encrypted: true, demuxed: true },
+  // 🔴 INIT TRONG SÁNG, SEGMENT MÃ HOÁ — `#EXT-X-MAP` đứng TRƯỚC `#EXT-X-KEY`.
+  //
+  // RFC 8216 §4.3.2.5 phân phạm vi khoá theo VỊ TRÍ TAG: một `#EXT-X-KEY` phủ các Media
+  // Initialization Section do `#EXT-X-MAP` khai giữa nó và `#EXT-X-KEY` kế tiếp. Nên MAP đứng
+  // TRƯỚC key nghĩa là "init để trần, segment mã hoá" — playlist HỢP LỆ và phổ biến: init trong
+  // sáng cho phép player đọc codec/khởi tạo decoder TRƯỚC khi xin khoá.
+  //
+  // 🔴 ĐÃ ĐO (2026-07-20) — m3u8-parser@7.2.0 mô hình ĐÚNG phạm vi này, code ta mới là bên sai:
+  //     key TRƯỚC map -> segment.map.key = {method:'AES-128',...}
+  //     map TRƯỚC key -> segment.map = {uri} và KHÔNG có .key
+  // Bản trước bản vá suy khoá init từ `segment.key` (khoá của SEGMENT) nên nó giải mã một init
+  // vốn đã trong sáng -> WebCrypto ném lỗi padding -> job chết kèm câu đổ tội máy chủ
+  // "khoá không khớp / máy chủ phát nhầm khoá". Một stream KHOẺ bị giết oan — đúng hạng lỗi dự án
+  // xếp nặng hơn cả treo. Và đó là HỒI QUY: trước bản vá giải mã init, hình dạng này tải được.
+  'clear-init': { encrypted: true, keyAfterMap: true },
+};
+
+/** Đọc byte fMP4 gốc từ fixture DASH. `track` là 'v' (0) hoặc 'a' (1). */
+function readFmp4(track, name) {
+  const t = track === 'a' ? 1 : 0;
+  const file =
+    name === 'init'
+      ? `init-${t}.mp4`
+      : `chunk-${t}-${String(Number(name) + 1).padStart(5, '0')}.m4s`;
+  return readFileSync(join(FIXTURES_DASH_SRC, file));
+}
+
+/** Khoá của một track trong biến thể fMP4 (tách tiếng -> hai khoá khác nhau). */
+function fmp4Key(variant, track) {
+  return FMP4_VARIANTS[variant].demuxed && track === 'a'
+    ? FMP4_KEY_A
+    : FMP4_KEY_V;
+}
+
+/**
+ * Media playlist fMP4: `#EXT-X-MAP:URI="init.mp4"` + N segment `.m4s`.
+ * Khi mã hoá, `#EXT-X-KEY` đặt TRƯỚC `#EXT-X-MAP` — đúng thứ tự RFC đòi để khoá phủ được init.
+ */
+function fmp4Playlist(variant, track) {
+  const v = FMP4_VARIANTS[variant];
+  const n = FMP4_SEGMENTS[track];
+  const lines = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:7',
+    '#EXT-X-TARGETDURATION:2',
+    `#EXT-X-MEDIA-SEQUENCE:${FMP4_MEDIA_SEQUENCE}`,
+  ];
+  // THỨ TỰ TAG LÀ NGỮ NGHĨA, KHÔNG PHẢI THẨM MỸ (RFC 8216 §4.3.2.5):
+  //   KEY trước MAP -> khoá phủ CẢ init  (biến thể `enc`, `aud`)
+  //   MAP trước KEY -> init TRONG SÁNG   (biến thể `clear-init`)
+  // Cả hai đều hợp lệ và đều gặp ngoài đời. Đừng "dọn" hai nhánh này về một.
+  const keyLine = `#EXT-X-KEY:METHOD=AES-128,URI="key-${track}.bin",IV=0x${FMP4_EXPLICIT_IV.toString('hex')}`;
+  if (v.encrypted && !v.keyAfterMap) lines.push(keyLine);
+  lines.push(`#EXT-X-MAP:URI="init-${track}.mp4"`);
+  if (v.encrypted && v.keyAfterMap) lines.push(keyLine);
+  for (let i = 0; i < n; i++) {
+    lines.push('#EXTINF:2.0,', `seg-${track}${i}.m4s`);
+  }
+  lines.push('#EXT-X-ENDLIST', '');
+  return lines.join('\n');
+}
+
+/** Master của biến thể TÁCH TIẾNG: hình một playlist, tiếng một playlist, mỗi bên khoá riêng. */
+function fmp4Master() {
+  return [
+    '#EXTM3U',
+    '#EXT-X-VERSION:7',
+    '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="vi",LANGUAGE="vi",URI="media-a.m3u8"',
+    '#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=128x96,CODECS="avc1.42c00d,mp4a.40.2",AUDIO="aud"',
+    'media-v.m3u8',
+    '',
+  ].join('\n');
+}
+
 /**
  * @param {object} opts
  * @param {'none'|'manifest'|'segments'|'all'} [opts.gate] path nào đòi Referer (thiếu -> 403).
@@ -349,6 +484,64 @@ export async function startFixtureServer({
         aesPlaylist(aesPl[1], keyHost, server.address().port),
         'application/vnd.apple.mpegurl',
       );
+      return;
+    }
+
+    // --- GÓI A — HLS fMP4/CMAF (#EXT-X-MAP), có/không mã hoá AES-128 ---
+    //
+    // Đặt TRƯỚC mọi nhánh /hls/ chung: mấy path này dùng tiền tố riêng nên không đụng, nhưng để
+    // gần nhau cho dễ đọc và tránh lặp lại bài học "isSegment nuốt path AES" ở trên.
+    // Tên biến thể CÓ THỂ chứa gạch nối (`clear-init`) -> `[\w-]+`, đừng thu về `\w+`: sai chỗ này
+    // thì route trả 404 và ca e2e đỏ vì lý do HOÀN TOÀN KHÁC với thứ nó định ghim (đã dính một lần).
+    const fmp4 = /^\/hls-fmp4\/([\w-]+)\/([\w-]+)\.(m3u8|mp4|m4s|bin)$/.exec(path);
+    if (fmp4) {
+      const [, variant, name, ext] = fmp4;
+      const v = FMP4_VARIANTS[variant];
+      if (!v) {
+        send(404, 'biến thể fMP4 không có', 'text/plain');
+        return;
+      }
+      // Khoá AES của track (tách tiếng -> hai khoá khác nhau, đó là điểm ghim của biến thể `aud`).
+      const keyM = /^key-([va])$/.exec(name);
+      if (keyM && ext === 'bin') {
+        send(200, fmp4Key(variant, keyM[1]), 'application/octet-stream');
+        return;
+      }
+      if (name === 'master' && ext === 'm3u8') {
+        send(200, fmp4Master(), 'application/vnd.apple.mpegurl');
+        return;
+      }
+      const plM = /^media-([va])$/.exec(name);
+      if (plM && ext === 'm3u8') {
+        send(
+          200,
+          fmp4Playlist(variant, plM[1]),
+          'application/vnd.apple.mpegurl',
+        );
+        return;
+      }
+      // init + segment: mã hoá TẠI CHỖ nếu biến thể khai mã hoá. IV là IV TƯỜNG MINH cho CẢ HAI —
+      // đúng RFC 8216 §4.3.2.5 (khoá phủ init thì phải khai IV, vì init không có seq để dẫn IV).
+      const initM = /^init-([va])$/.exec(name);
+      const segM = /^seg-([va])(\d+)$/.exec(name);
+      if ((initM && ext === 'mp4') || (segM && ext === 'm4s')) {
+        const track = initM ? initM[1] : segM[1];
+        if (segM && Number(segM[2]) >= FMP4_SEGMENTS[track]) {
+          send(404, 'segment fMP4 không có', 'text/plain');
+          return;
+        }
+        const plain = readFmp4(track, initM ? 'init' : segM[2]);
+        // `keyAfterMap` -> init nằm NGOÀI phạm vi khoá nên phục vụ TRONG SÁNG, segment vẫn mã hoá.
+        // Đây là điểm mấu chốt của biến thể `clear-init`: server nói sự thật theo đúng RFC, phía
+        // nào giải mã init ở đây là phía đó sai.
+        const encryptThis = v.encrypted && !(initM && v.keyAfterMap);
+        const body = encryptThis
+          ? aesEncrypt(plain, fmp4Key(variant, track), FMP4_EXPLICIT_IV)
+          : plain;
+        send(200, body, initM ? 'video/mp4' : 'video/iso.segment');
+        return;
+      }
+      send(404, 'tài nguyên fMP4 không có', 'text/plain');
       return;
     }
 
@@ -547,6 +740,37 @@ export async function startFixtureServer({
       `http://127.0.0.1:${port}/hls-aes/${variant}/media.m3u8`,
     /** §7 — playlist khai DRM (fairplay/playready/widevine). Extension PHẢI từ chối, không tải. */
     drmUrl: (system) => `http://127.0.0.1:${port}/hls-drm/${system}/media.m3u8`,
+    /**
+     * GÓI A — playlist HLS **fMP4/CMAF** (có `#EXT-X-MAP`). `track` mặc định 'v' (hình).
+     *   `plain` không mã hoá  -> ca chiều ngược lại;
+     *   `enc`   AES-128 phủ CẢ init lẫn .m4s, IV tường minh -> ca chính;
+     *   `aud`   tách tiếng, mỗi track một khoá riêng.
+     */
+    fmp4Url: (variant, track = 'v') =>
+      `http://127.0.0.1:${port}/hls-fmp4/${variant}/media-${track}.m3u8`,
+    /** GÓI A — master của biến thể tách tiếng (hình + tiếng, hai khoá khác nhau). */
+    fmp4MasterUrl: (variant) =>
+      `http://127.0.0.1:${port}/hls-fmp4/${variant}/master.m3u8`,
+    /**
+     * Số lần init segment fMP4 được phục vụ -> bằng chứng nhánh `#EXT-X-MAP` có chạy.
+     * ⚠️ `[\w-]+` chứ KHÔNG phải `\w+`: tên biến thể có gạch nối (`clear-init`). Dùng `\w+` thì bộ
+     * đếm luôn trả 0 và ca đỏ vì lý do hoàn toàn khác thứ nó định ghim (đã dính đúng một lần).
+     */
+    fmp4InitHits: () =>
+      requests.filter((r) =>
+        /^\/hls-fmp4\/[\w-]+\/init-[va]\.mp4$/.test(r.url),
+      ).length,
+    /** Số lượt fetch khoá fMP4, tách theo track -> ghim "mỗi track lấy đúng khoá của mình". */
+    fmp4KeyHits: (track) =>
+      requests.filter((r) =>
+        new RegExp(`^/hls-fmp4/[\\w-]+/key-${track ?? '[va]'}\\.bin$`).test(
+          r.url,
+        ),
+      ).length,
+    /** Số segment /hls/ đã phục vụ -> nếu > 0 ở ca DRM nghĩa là guard THỦNG, đã tải thật. */
+    plainSegmentHits: () =>
+      requests.filter((r) => /^\/hls\/seg\d+\.ts$/.test(r.url) && r.status < 400)
+        .length,
     /** Số lần khoá AES thật sự được phục vụ -> bằng chứng đường fetch khoá có chạy. */
     aesKeyHits: () =>
       requests.filter((r) => /^\/hls-aes\/\w+\/key\d\.bin$/.test(r.url)).length,

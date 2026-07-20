@@ -1005,3 +1005,69 @@ describe('parseHlsSegments — ranh giới §7 với playlist DRM', () => {
     expect(r.isProtected ?? false).toBe(false);
   });
 });
+
+// --- GÓI A: PHẠM VI KHOÁ CỦA #EXT-X-MAP (RFC 8216 §4.3.2.5) --------------
+//
+// 🔴 LỖI THẬT (review đối kháng, 2026-07-20): khoá của init phải suy từ VỊ TRÍ TAG, không phải từ
+// khoá của segment. `#EXT-X-KEY` phủ các Media Initialization Section do `#EXT-X-MAP` khai GIỮA nó
+// và `#EXT-X-KEY` kế tiếp. Nên:
+//     KEY rồi MAP -> init MÃ HOÁ
+//     MAP rồi KEY -> init TRONG SÁNG (hợp lệ, phổ biến: player đọc codec trước khi xin khoá)
+// Bản cũ dùng `segment.key` cho cả init nên đem giải mã một init vốn trong sáng -> lỗi padding ->
+// GIẾT OAN một stream khoẻ kèm câu đổ tội máy chủ. Lưới e2e là `fmp4-clear-init`; đây là lưới rẻ.
+//
+// ĐÃ ĐO m3u8-parser@7.2.0: `segment.map.key` CÓ ở thứ tự thứ nhất, VẮNG ở thứ tự thứ hai.
+const KEY_BEFORE_MAP = `#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:11
+#EXT-X-KEY:METHOD=AES-128,URI="k.bin",IV=0x7f3e1c0b9a8d6f4e2c1a0b9d8e7f6a5b
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:2.0,
+s0.m4s
+#EXT-X-ENDLIST`;
+
+const MAP_BEFORE_KEY = `#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:11
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-KEY:METHOD=AES-128,URI="k.bin",IV=0x7f3e1c0b9a8d6f4e2c1a0b9d8e7f6a5b
+#EXTINF:2.0,
+s0.m4s
+#EXT-X-ENDLIST`;
+
+describe('GÓI A — phạm vi khoá của #EXT-X-MAP đi theo VỊ TRÍ TAG', () => {
+  it('KEY trước MAP -> init MANG khoá riêng (mã hoá), IV tường minh đi kèm', () => {
+    const r = parseHlsSegments(KEY_BEFORE_MAP, 'https://cdn.example.com/d/x.m3u8');
+    const s = r.segments[0]!;
+    expect(s.initUri).toBe('https://cdn.example.com/d/init.mp4');
+    expect(s.initKeyMethod).toBe('AES-128');
+    expect(s.initKeyUri).toBe('https://cdn.example.com/d/k.bin');
+    expect(s.initIv).toBeInstanceOf(Uint8Array);
+    expect(Buffer.from(s.initIv!).toString('hex')).toBe(
+      '7f3e1c0b9a8d6f4e2c1a0b9d8e7f6a5b',
+    );
+  });
+
+  it('MAP trước KEY -> init KHÔNG có khoá (để trần), dù SEGMENT vẫn mã hoá', () => {
+    const r = parseHlsSegments(MAP_BEFORE_KEY, 'https://cdn.example.com/d/x.m3u8');
+    const s = r.segments[0]!;
+    expect(s.initUri).toBe('https://cdn.example.com/d/init.mp4');
+    // Đây là assertion CHỐNG GIẾT OAN: có giá trị ở đây = đường ống sẽ giải mã một init trong sáng.
+    expect(s.initKeyMethod).toBeUndefined();
+    expect(s.initKeyUri).toBeUndefined();
+    // ... trong khi segment thì VẪN mã hoá — hai thứ khác nhau, đừng suy cái này ra cái kia.
+    expect(s.keyMethod).toBe('AES-128');
+    expect(s.keyUri).toBe('https://cdn.example.com/d/k.bin');
+  });
+
+  it('khoá init nằm host khác -> spoofTargetsFromSegments phải phủ host đó', () => {
+    const segs = parseHlsSegments(
+      KEY_BEFORE_MAP.replace('URI="k.bin"', 'URI="https://keys.example.net/k.bin"'),
+      'https://cdn.example.com/d/x.m3u8',
+    ).segments;
+    const hosts = spoofTargetsFromSegments(segs).map((u) => new URL(u).hostname);
+    expect(hosts).toContain('keys.example.net');
+  });
+});
