@@ -6,13 +6,12 @@
   "packageManager": "pnpm@11.11.0",
   "type": "module",
   "scripts": {
-    "dev": "node scripts/copy-ffmpeg-core.mjs && wxt",
-    "dev:firefox": "node scripts/copy-ffmpeg-core.mjs && wxt -b firefox",
-    "build": "node scripts/copy-ffmpeg-core.mjs && wxt build",
-    "build:firefox": "node scripts/copy-ffmpeg-core.mjs && wxt build -b firefox",
-    "zip": "node scripts/copy-ffmpeg-core.mjs && wxt zip",
-    "zip:firefox": "node scripts/copy-ffmpeg-core.mjs && wxt zip -b firefox",
-    "copy:ffmpeg": "node scripts/copy-ffmpeg-core.mjs",
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build",
+    "build:firefox": "wxt build -b firefox",
+    "zip": "wxt zip",
+    "zip:firefox": "wxt zip -b firefox",
     "e2e": "node e2e/smoke.mjs",
     "e2e:fixture": "node e2e/hls-403.mjs",
     "e2e:demuxed": "node e2e/real-demuxed.mjs",
@@ -25,12 +24,9 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "postinstall": "node scripts/copy-ffmpeg-core.mjs && wxt prepare"
+    "postinstall": "wxt prepare"
   },
   "dependencies": {
-    "@ffmpeg/core": "^0.12.10",
-    "@ffmpeg/ffmpeg": "^0.12.15",
-    "@ffmpeg/util": "^0.12.2",
     "m3u8-parser": "^7.2.0",
     "mpd-parser": "^1.4.0",
     "react": "^19.2.4",

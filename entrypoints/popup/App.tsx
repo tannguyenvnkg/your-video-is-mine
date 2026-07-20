@@ -112,8 +112,8 @@ function HlsProgress({ job, now }: { job: HlsJob; now: number }) {
     );
   }
   if (job.phase === 'loading') {
-    // Nhãn phải nói ĐÚNG việc đang chạy: ở phase này offscreen tải playlist VÀ nạp ffmpeg song song.
-    // Nhãn cũ chỉ nói "nạp bộ xử lý" -> khi playlist treo, người dùng lại đi nghi oan ffmpeg.
+    // Nhãn phải nói ĐÚNG việc đang chạy: ở phase này offscreen tải playlist VÀ dựng bộ ghép song song.
+    // Nhãn cũ chỉ nói "nạp bộ xử lý" -> khi playlist treo, người dùng lại đi nghi oan bộ ghép.
     return (
       <div className="hls-progress">
         <span className="hls-label">

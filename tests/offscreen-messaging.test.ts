@@ -15,18 +15,29 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing';
 import { browser } from 'wxt/browser';
 
-// @ffmpeg/ffmpeg không nạp được trong Node (và ta KHÔNG đo ffmpeg ở đây, chỉ đo hợp đồng nhắn tin).
-vi.mock('@ffmpeg/ffmpeg', () => ({
-  FFmpeg: class FakeFFmpeg {
-    on(): void {}
-    async load(): Promise<void> {}
-    async exec(): Promise<void> {}
-    async writeFile(): Promise<void> {}
-    async deleteFile(): Promise<void> {}
-    async readFile(): Promise<Uint8Array> {
-      return new Uint8Array([0]);
-    }
+// W3.1 — Worker ghép video không dựng được trong Node (không có OPFS/SyncAccessHandle), và ta
+// KHÔNG đo việc ghép ở đây, chỉ đo HỢP ĐỒNG NHẮN TIN. Nên thay `MuxSession` bằng bản giả.
+vi.mock('@/entrypoints/offscreen/libav-mux', () => ({
+  MuxSession: {
+    start: async () => ({
+      appendSegment: async () => undefined,
+      mux: async () => ({
+        outName: 'x.mp4',
+        outBytes: 1,
+        packets: 1,
+        seams: 0,
+        moovAtFront: true,
+        attempts: 1,
+      }),
+      cleanup: async () => undefined,
+      cancel: async () => undefined,
+      dispose: () => undefined,
+    }),
+    openOutput: async () => new Blob([new Uint8Array([0])]),
   },
+  MuxCancelledError: class extends Error {},
+  removeOpfsFile: async () => undefined,
+  sweepOrphanOpfsFiles: async () => 0,
 }));
 
 type SendResponse = (response?: unknown) => void;
@@ -68,15 +79,15 @@ describe('offscreen onMessage — hợp đồng Chrome gốc (W0.1)', () => {
     listener = await loadOffscreenListener();
   });
 
-  it('ffmpeg/demo trả `true` ĐỒNG BỘ rồi mới sendResponse', async () => {
+  it('engine/selftest trả `true` ĐỒNG BỘ rồi mới sendResponse', async () => {
     const sendResponse = vi.fn();
     const ret = listener(
-      { target: 'offscreen', kind: 'ffmpeg/demo' },
+      { target: 'offscreen', kind: 'engine/selftest' },
       {},
       sendResponse,
     );
 
-    // Dòng bắt lỗi: trả Promise -> Chrome <148 đóng kênh -> nút "Kiểm tra ffmpeg" treo mãi.
+    // Dòng bắt lỗi: trả Promise -> Chrome <148 đóng kênh -> nút kiểm tra bộ ghép treo mãi.
     expect(ret).toBe(true);
     expect(ret).not.toBeInstanceOf(Promise);
 

@@ -1,0 +1,12 @@
+--enable-protocol=data --enable-protocol=file
+--enable-demuxer=mpegts
+--enable-demuxer=mov
+--enable-muxer=ipod
+--enable-muxer=mov
+--enable-muxer=mp4
+--enable-parser=h264
+--enable-parser=aac
+--enable-decoder=aac
+--enable-bsf=extract_extradata
+--enable-bsf=aac_adtstoasc
+--enable-bsf=h264_mp4toannexb

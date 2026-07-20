@@ -24,7 +24,7 @@ export type DownloadStartResponse =
 /** ACK cho 'download/progress' — offscreen await để giữ đúng thứ tự cập nhật (như hls/progress). */
 export type DownloadProgressResponse = { ok: true };
 
-export type FfmpegDemoResponse =
+export type EngineSelfTestResponse =
   { ok: true; size: number } | { ok: false; error: string };
 
 export type HlsEstimateResponse =
@@ -68,7 +68,7 @@ export type RuntimeMessage =
       tabId?: number;
     }
   | { kind: 'download/progressive'; url: string; tabId: number }
-  | { kind: 'ffmpeg/demo' }
+  | { kind: 'engine/selftest' }
   // popup -> background: ước tính dung lượng + kiểm tra DRM trước khi tải HLS.
   | {
       kind: 'hls/estimate';
@@ -155,7 +155,7 @@ export type RuntimeMessage =
 
 /** Message gửi TỪ background TỚI offscreen (có `target: 'offscreen'` để phân biệt). */
 export type OffscreenRequest =
-  | { target: 'offscreen'; kind: 'ffmpeg/demo' }
+  | { target: 'offscreen'; kind: 'engine/selftest' }
   | {
       target: 'offscreen';
       kind: 'hls/run';
@@ -247,10 +247,10 @@ export async function requestDownload(
   }
 }
 
-export async function requestFfmpegDemo(): Promise<FfmpegDemoResponse> {
+export async function requestEngineSelfTest(): Promise<EngineSelfTestResponse> {
   try {
-    const res = await browser.runtime.sendMessage({ kind: 'ffmpeg/demo' });
-    return res as FfmpegDemoResponse;
+    const res = await browser.runtime.sendMessage({ kind: 'engine/selftest' });
+    return res as EngineSelfTestResponse;
   } catch {
     return { ok: false, error: 'Không kết nối được background.' };
   }

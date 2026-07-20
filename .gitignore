@@ -10,8 +10,8 @@ lerna-debug.log*
 node_modules
 .output
 
-# ffmpeg core đóng gói local (32MB, sinh lại từ node_modules qua scripts/copy-ffmpeg-core.mjs)
-public/ffmpeg
+# ⚠️ public/libav/ CỐ Ý KHÔNG bị ignore. Nó KHÔNG có trên npm: variant `ts2mp4d` là bản TỰ DỰNG
+# từ mã nguồn và KHÔNG có trên npm, nên binary phải nằm trong git. Xem public/libav/BUILD.md.
 stats.html
 stats-*.json
 .wxt

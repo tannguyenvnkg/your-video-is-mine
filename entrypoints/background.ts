@@ -65,7 +65,7 @@ import type { MediaItem } from '@/utils/types';
 import type {
   DownloadProgressResponse,
   DownloadStartResponse,
-  FfmpegDemoResponse,
+  EngineSelfTestResponse,
   HlsDownloadResponse,
   HlsEstimateResponse,
   HlsProgressResponse,
@@ -357,8 +357,8 @@ export default defineBackground(() => {
       if (message.kind === 'download/progressive') {
         return respond(handleDownload(message.url, message.tabId));
       }
-      if (message.kind === 'ffmpeg/demo') {
-        return respond(handleFfmpegDemo());
+      if (message.kind === 'engine/selftest') {
+        return respond(handleEngineSelfTest());
       }
       if (message.kind === 'hls/estimate') {
         return respond(
@@ -1410,15 +1410,15 @@ async function handleDownloadCancel(key: string): Promise<void> {
   await updateDownload(key, { state: 'interrupted', error: 'Đã huỷ' });
 }
 
-async function handleFfmpegDemo(): Promise<FfmpegDemoResponse> {
+async function handleEngineSelfTest(): Promise<EngineSelfTestResponse> {
   try {
     await ensureOffscreen();
     const res = await browser.runtime.sendMessage({
       target: 'offscreen',
-      kind: 'ffmpeg/demo',
+      kind: 'engine/selftest',
     });
     // W2.7 — offscreen chết/chưa đăng ký listener thì `sendMessage` resolve UNDEFINED chứ không ném.
-    // Trả thẳng cái đó ra là đưa `undefined` cho popup -> nút "Kiểm tra ffmpeg" im lìm không nói gì.
+    // Trả thẳng cái đó ra là đưa `undefined` cho popup -> nút kiểm tra im lìm không nói gì.
     // Hợp đồng của hàm này là LUÔN trả một object đọc được.
     if (!res || typeof res !== 'object') {
       return {
@@ -1427,7 +1427,7 @@ async function handleFfmpegDemo(): Promise<FfmpegDemoResponse> {
           'Bộ xử lý video không trả lời (có thể đã bị trình duyệt thu hồi).',
       };
     }
-    return res as FfmpegDemoResponse;
+    return res as EngineSelfTestResponse;
   } catch (e) {
     return {
       ok: false,
@@ -1494,7 +1494,7 @@ const ensureOffscreen = singleFlight(async (): Promise<void> => {
       url: 'offscreen.html',
       reasons: ['WORKERS'],
       justification:
-        'Chạy ffmpeg.wasm để ghép/remux video và tạo blob URL để tải.',
+        'Chạy libav.wasm để ghép/remux video và tạo blob URL để tải.',
     });
   } catch (e) {
     // Mỗi extension chỉ được 1 offscreen document -> "đã tồn tại" là BÌNH THƯỜNG, bỏ qua.

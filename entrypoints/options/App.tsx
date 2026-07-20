@@ -17,7 +17,7 @@ import {
   buildDownloadFilename,
   DEFAULT_FILENAME_TEMPLATE,
 } from '@/utils/filename';
-import { requestFfmpegDemo } from '@/utils/messages';
+import { requestEngineSelfTest } from '@/utils/messages';
 import type { MediaType } from '@/utils/types';
 
 const GB = 1024 * 1024 * 1024;
@@ -67,16 +67,16 @@ function App() {
     await setEnabledTypes(next);
   };
 
-  const testFfmpeg = async () => {
+  const testEngine = async () => {
     setFfBusy(true);
     setFfStatus(
-      'Đang khởi tạo ffmpeg (lần đầu nạp core ~30MB, có thể mất vài giây)…',
+      'Đang ghép thử một đoạn video mẫu…',
     );
-    const res = await requestFfmpegDemo();
+    const res = await requestEngineSelfTest();
     setFfBusy(false);
     setFfStatus(
       res.ok
-        ? `✓ ffmpeg chạy tốt — xuất ${res.size.toLocaleString('vi-VN')} bytes video demo.`
+        ? `✓ Bộ ghép video chạy tốt — ghép thử ra ${res.size.toLocaleString('vi-VN')} bytes.`
         : `✗ Lỗi: ${res.error}`,
     );
   };
@@ -226,15 +226,15 @@ function App() {
       >
         <h2 style={{ fontSize: 16, margin: '0 0 6px' }}>Chẩn đoán</h2>
         <p style={{ fontSize: 13, opacity: 0.7, margin: '0 0 8px' }}>
-          Kiểm tra ffmpeg.wasm (offscreen) có khởi tạo và chạy được không.
+          Ghép thử một đoạn video mẫu để kiểm bộ ghép (libav.wasm trong offscreen) có chạy được không.
         </p>
         <button
           type="button"
           disabled={ffBusy}
-          onClick={() => void testFfmpeg()}
+          onClick={() => void testEngine()}
           style={{ padding: '8px 16px' }}
         >
-          {ffBusy ? 'Đang chạy…' : 'Kiểm tra ffmpeg'}
+          {ffBusy ? 'Đang chạy…' : 'Kiểm tra bộ ghép video'}
         </button>
         {ffStatus && (
           <p style={{ fontSize: 13, marginTop: 10, whiteSpace: 'pre-wrap' }}>

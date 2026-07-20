@@ -91,7 +91,7 @@ const ASYNC_KINDS: Array<{ name: string; message: Record<string, unknown> }> = [
       tabId: 1,
     },
   },
-  { name: 'ffmpeg/demo', message: { kind: 'ffmpeg/demo' } },
+  { name: 'engine/selftest', message: { kind: 'engine/selftest' } },
   {
     name: 'hls/estimate',
     message: {
@@ -190,7 +190,7 @@ describe('background onMessage — hợp đồng Chrome gốc (W0.1)', () => {
   it('message của offscreen (target:offscreen) -> KHÔNG chiếm kênh', () => {
     const sendResponse = vi.fn();
     const ret = listener(
-      { target: 'offscreen', kind: 'ffmpeg/demo' },
+      { target: 'offscreen', kind: 'engine/selftest' },
       SENDER,
       sendResponse,
     );

@@ -78,7 +78,7 @@ try {
   const options = await ctx.newPage();
   watch(options, 'options');
   await options.goto(`chrome-extension://${extId}/options.html`);
-  await options.getByRole('button', { name: 'Kiểm tra ffmpeg' }).click();
+  await options.getByRole('button', { name: 'Kiểm tra bộ ghép video' }).click();
 
   const status = options.locator('.ff-status, [class*="status"]').first();
   let ffText = '';
