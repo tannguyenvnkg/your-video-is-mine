@@ -683,10 +683,24 @@ describe('the streaming scanner must match the array version on ALL THREE fixed 
 
   it('S2 (B2): the rebase marker is the min first-PTS, not the min first-DTS', () => {
     const video: TimedPacket[] = [
-      { streamIndex: 0, pts: 7200, dts: 0, duration: 3000, timeBase: TB90, mediaType: 'video' },
+      {
+        streamIndex: 0,
+        pts: 7200,
+        dts: 0,
+        duration: 3000,
+        timeBase: TB90,
+        mediaType: 'video',
+      },
     ];
     const audio: TimedPacket[] = [
-      { streamIndex: 1, pts: 5280, dts: 5280, duration: 1920, timeBase: TB90, mediaType: 'audio' },
+      {
+        streamIndex: 1,
+        pts: 5280,
+        dts: 5280,
+        duration: 1920,
+        timeBase: TB90,
+        mediaType: 'audio',
+      },
     ];
     const want = buildTimelinePlan([video, audio]);
     expect(want.rebaseOffsetUs).toBe(-58_667); // matches ffmpeg on the bf.ts fixture
