@@ -1,19 +1,21 @@
-// Cầu nối giữa luồng chính offscreen và Worker ghép video.
+// Bridge between the offscreen main thread and the muxing Worker.
 //
-// Phân vai (đã ĐO, đừng đổi):
-//   - Luồng chính offscreen: fetch mạng (giữ nguyên ngữ cảnh DNR spoof header của W2.1/W2.4),
-//     `URL.createObjectURL` (Worker không có `chrome`, service worker KHÔNG có createObjectURL).
-//   - Worker: `FileSystemSyncAccessHandle` (chỉ có ở đây) + libav.wasm.
+// Role split (MEASURED, do not change):
+//   - Offscreen main thread: network fetch (keeps the DNR header-spoof context from W2.1/W2.4
+//     intact), `URL.createObjectURL` (the Worker has no `chrome`, and the service worker has NO
+//     createObjectURL).
+//   - Worker: `FileSystemSyncAccessHandle` (only available here) + libav.wasm.
 //
-// Byte segment đi thẳng từ fetch sang Worker bằng TRANSFER (zero-copy), rồi Worker ghi
-// xuống OPFS. Không có bản sao nào nằm lại: đây là chỗ bỏ được trần RAM của bản ffmpeg cũ.
+// Segment bytes go straight from fetch to the Worker via TRANSFER (zero-copy), then the Worker
+// writes them to OPFS. No copy is left behind: this is what drops the RAM ceiling the old ffmpeg
+// build had.
 
 import type { MuxTrackSpec } from './mux-worker';
 
 /**
- * Bản dựng libav.js tự biên dịch (variant `ts2mp4d`, LGPL, 0 encoder).
- * ⚠️ Đổi phiên bản thì phải đổi cả ở đây và `scripts/libav-vendor.test.ts` — ratchet đó
- * khoá đúng tên file để một lần nâng cấp hụt không biến thành lỗi lúc chạy.
+ * Self-compiled libav.js build (`ts2mp4d` variant, LGPL, 0 encoders).
+ * ⚠️ Changing the version requires changing it both here and in `scripts/libav-vendor.test.ts` —
+ * that ratchet locks the exact filename so a botched upgrade doesn't turn into a runtime error.
  */
 const LIBAV_ENTRY = '/libav/libav-6.9.8.1-ts2mp4d.mjs' as const;
 
@@ -22,7 +24,7 @@ export interface MuxOutcome {
   outBytes: number;
   packets: number;
   seams: number;
-  /** false = phải lùi về moov-ở-cuối (mất faststart nhưng file vẫn đúng). */
+  /** false = had to fall back to moov-at-end (loses faststart but the file is still correct). */
   moovAtFront: boolean;
   attempts: number;
 }
@@ -38,7 +40,7 @@ interface WorkerReply {
   [key: string]: unknown;
 }
 
-/** Lỗi từ Worker do người dùng bấm Huỷ, phân biệt với lỗi thật. */
+/** Error from the Worker caused by the user pressing Cancel, distinguished from a real error. */
 export class MuxCancelledError extends Error {
   constructor(message = 'Đã huỷ') {
     super(message);
@@ -76,8 +78,8 @@ export class MuxSession {
       else if (msg.cancelled) w.reject(new MuxCancelledError(msg.error));
       else w.reject(new Error(msg.error ?? 'Worker ghép video lỗi không rõ.'));
     });
-    // Worker chết (OOM, crash wasm) KHÔNG tự báo về qua rid nào cả — job sẽ treo vĩnh viễn
-    // nếu không bắt ở đây. Đánh thức mọi lời gọi đang chờ bằng lỗi rõ ràng.
+    // Worker death (OOM, wasm crash) does NOT report back through any rid — the job would hang
+    // forever if this isn't caught here. Wake up every waiting call with a clear error.
     this.worker.addEventListener('error', (ev: ErrorEvent) => {
       this.failAll(new Error(`Bộ ghép video dừng đột ngột: ${ev.message}`));
     });
@@ -89,14 +91,15 @@ export class MuxSession {
   }
 
   static async start(jobKey: string): Promise<MuxSession> {
-    // Vite/WXT gói file này thành một chunk worker riêng; URL trỏ vào chính extension nên
-    // CSP `script-src 'self'` chấp nhận.
+    // Vite/WXT bundles this file into a separate worker chunk; the URL points into the extension
+    // itself so the CSP `script-src 'self'` accepts it.
     const worker = new Worker(new URL('./mux-worker.ts', import.meta.url), {
       type: 'module',
     });
     const s = new MuxSession(worker);
-    // `base` của libav.js là THƯ MỤC chứa 3 file (.mjs + .wasm.mjs + .wasm) — nó tự ghép
-    // tên file còn lại vào. Cắt từ chính URL entry để không phải khai một PublicPath thư mục.
+    // libav.js's `base` is the DIRECTORY containing 3 files (.mjs + .wasm.mjs + .wasm) — it
+    // appends the remaining filenames itself. Sliced from the entry URL so we don't have to
+    // declare a directory PublicPath.
     const libavEntry = browser.runtime.getURL(LIBAV_ENTRY);
     const libavBase = libavEntry.slice(0, libavEntry.lastIndexOf('/'));
     await s.call({ cmd: 'init', jobKey, libavBase, libavEntry });
@@ -118,11 +121,12 @@ export class MuxSession {
   }
 
   /**
-   * Nối byte của MỘT segment vào file track trên OPFS.
+   * Appends the bytes of ONE segment to the track file on OPFS.
    *
-   * ⚠️ `bytes` bị TRANSFER (detach) sang Worker — y hệt `ffmpeg.writeFile` ngày trước.
-   * Bên gọi tuyệt đối không được dùng lại buffer sau lời gọi này, và phải "xí phần" chỉ số
-   * TRƯỚC khi await (nếu không, hai worker fetch song song sẽ ghi trùng một buffer đã detach).
+   * ⚠️ `bytes` gets TRANSFERRED (detached) to the Worker — exactly like `ffmpeg.writeFile` used
+   * to. The caller must absolutely not reuse the buffer after this call, and must "claim" its
+   * index slot BEFORE awaiting (otherwise two parallel fetch workers would write into the same
+   * already-detached buffer).
    */
   async appendSegment(prefix: string, bytes: Uint8Array): Promise<void> {
     const buf = bytes.buffer.slice(
@@ -153,12 +157,13 @@ export class MuxSession {
   }
 
   /**
-   * Lấy file kết quả từ OPFS ra dạng `File`.
+   * Retrieves the result file from OPFS as a `File`.
    *
-   * 🔬 ĐO ĐƯỢC (2026-07-19, Edge 150, extension thật): với file 1,2 GB thì `getFile()` mất
-   * 0,0 ms và `createObjectURL()` mất 0,1 ms, RSS KHÔNG nhúc nhích và JS heap không đổi —
-   * blob này là THAM CHIẾU TỚI FILE TRÊN ĐĨA, không phải bản sao trong RAM. Đây chính là
-   * điều làm cho cả kiến trúc OPFS có ý nghĩa; nếu nó nạp hết vào RAM thì vô ích.
+   * 🔬 MEASURED (2026-07-19, Edge 150, real extension): for a 1.2 GB file, `getFile()` takes
+   * 0.0 ms and `createObjectURL()` takes 0.1 ms, RSS DOES NOT budge and the JS heap doesn't
+   * change — this blob is a REFERENCE TO THE FILE ON DISK, not a copy in RAM. This is exactly
+   * what makes the whole OPFS architecture meaningful; if it loaded everything into RAM it would
+   * be pointless.
    */
   static async openOutput(outName: string): Promise<File> {
     const dir = await navigator.storage.getDirectory();
@@ -166,24 +171,25 @@ export class MuxSession {
     return await fh.getFile();
   }
 
-  /** Báo Worker dừng vòng ghép ở lô packet kế tiếp. */
+  /** Tells the Worker to stop the mux loop at the next packet batch. */
   async cancel(): Promise<void> {
     try {
       await this.call({ cmd: 'cancel' });
     } catch {
-      // Worker có thể đã chết — huỷ thì không cần ồn ào
+      // Worker may already be dead — cancellation doesn't need to be noisy about it
     }
   }
 
   /**
-   * Đóng handle + xoá file OPFS của job. Gọi trong `finally`, kể cả khi lỗi/huỷ.
-   * `keep` = tên file kết quả đã giao cho background (đừng xoá, blob URL đang trỏ vào nó).
+   * Closes handles + removes the job's OPFS file. Called in `finally`, including on error/cancel.
+   * `keep` = name of the output file already handed to background (don't delete it, the blob URL
+   * still points to it).
    */
   async cleanup(keep?: string | null): Promise<void> {
     try {
       await this.call({ cmd: 'cleanup', keep: keep ?? null });
     } catch {
-      // Worker chết trước khi dọn: file mồ côi sẽ do lượt quét lúc khởi động dọn hộ
+      // Worker died before cleaning up: the startup orphan sweep will clean it up instead
     }
   }
 
@@ -195,25 +201,26 @@ export class MuxSession {
   }
 }
 
-/** Xoá một file OPFS theo tên. Dùng khi lượt tải đã xong và blob URL được thu hồi. */
+/** Removes an OPFS file by name. Used once a download has finished and the blob URL is revoked. */
 export async function removeOpfsFile(name: string): Promise<void> {
   try {
     const dir = await navigator.storage.getDirectory();
     await dir.removeEntry(name);
   } catch {
-    // đã biến mất hoặc đang bị khoá — lượt quét lúc khởi động sẽ dọn nốt
+    // already gone or currently locked — the startup sweep will clean it up next time
   }
 }
 
-/** Tiền tố mọi file OPFS của extension này — dùng để quét dọn file mồ côi. */
+/** Prefix for every OPFS file belonging to this extension — used to sweep orphan files. */
 export const OPFS_PREFIX = 'ymv-';
 
 /**
- * Xoá file OPFS còn sót của các job đã chết (offscreen bị giết giữa chừng, trình duyệt tắt
- * ngang…). Chạy lúc offscreen khởi động: job đang chạy thì không tồn tại ở thời điểm đó, nên
- * không có gì để xoá nhầm.
+ * Removes leftover OPFS files from dead jobs (offscreen killed mid-flight, browser closed
+ * abruptly…). Runs at offscreen startup: at that point no job can be running, so there's nothing
+ * to accidentally delete.
  *
- * File đang bị một `SyncAccessHandle` khoá sẽ ném khi xoá — nuốt lỗi, lượt sau dọn tiếp.
+ * A file locked by a `SyncAccessHandle` throws on delete — swallow the error, a later sweep will
+ * finish the job.
  */
 export async function sweepOrphanOpfsFiles(): Promise<number> {
   let removed = 0;
@@ -232,11 +239,11 @@ export async function sweepOrphanOpfsFiles(): Promise<number> {
         await dir.removeEntry(n);
         removed++;
       } catch {
-        // đang bị khoá hoặc đã biến mất
+        // currently locked or already gone
       }
     }
   } catch {
-    // OPFS không dùng được: không phải lý do để giết offscreen
+    // OPFS unavailable: not a reason to kill offscreen
   }
   return removed;
 }

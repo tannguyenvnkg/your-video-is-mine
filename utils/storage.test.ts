@@ -28,82 +28,82 @@ function item(url: string, extra: Partial<MediaItem> = {}): MediaItem {
   return { id: url, type: 'hls', url, tabId: 1, detectedAt: 0, ...extra };
 }
 
-describe('storage media theo tab', () => {
+describe('per-tab media storage', () => {
   beforeEach(() => {
     fakeBrowser.reset();
   });
 
-  it('tab rỗng trả []', async () => {
+  it('empty tab returns []', async () => {
     expect(await getTabMedia(1)).toEqual([]);
   });
 
-  it('thêm & đọc lại', async () => {
+  it('add & read back', async () => {
     const n = await addTabMedia(1, item('https://a.com/x.m3u8'));
     expect(n).toBe(1);
     expect(await getTabMedia(1)).toHaveLength(1);
   });
 
-  it('trùng url không có field mới -> null, không tăng', async () => {
+  it('duplicate url with no new field -> null, no increment', async () => {
     await addTabMedia(1, item('https://a.com/x.m3u8'));
     const dup = await addTabMedia(1, item('https://a.com/x.m3u8'));
     expect(dup).toBeNull();
     expect(await getTabMedia(1)).toHaveLength(1);
   });
 
-  it('bổ sung size khi phát hiện lại cùng url (merge)', async () => {
-    await addTabMedia(1, item('https://a.com/x.m3u8')); // chưa có size
+  it('fills in size when the same url is re-detected (merge)', async () => {
+    await addTabMedia(1, item('https://a.com/x.m3u8')); // no size yet
     const changed = await addTabMedia(
       1,
       item('https://a.com/x.m3u8', { size: 999 }),
     );
-    expect(changed).toBe(1); // có thay đổi -> trả count
+    expect(changed).toBe(1); // changed -> returns the count
     const list = await getTabMedia(1);
     expect(list[0]!.size).toBe(999);
   });
 
-  it('media các tab độc lập', async () => {
+  it('media across tabs is independent', async () => {
     await addTabMedia(1, item('https://a.com/1.m3u8'));
     await addTabMedia(2, item('https://a.com/2.m3u8'));
     expect(await getTabMedia(1)).toHaveLength(1);
     expect(await getTabMedia(2)).toHaveLength(1);
   });
 
-  it('reset điều hướng: loại media của request cũ (timeStamp < navStartedAt)', async () => {
-    await resetTab(1, 1000); // điều hướng lúc t=1000
+  it('navigation reset: discards media from old requests (timeStamp < navStartedAt)', async () => {
+    await resetTab(1, 1000); // navigated at t=1000
     const stale = await addTabMedia(1, item('https://a.com/old.m3u8'), 500);
-    expect(stale).toBeNull(); // request bắt đầu t=500 < 1000 -> bỏ
+    expect(stale).toBeNull(); // request started at t=500 < 1000 -> discarded
     const fresh = await addTabMedia(1, item('https://a.com/new.m3u8'), 1500);
-    expect(fresh).toBe(1); // request t=1500 > 1000 -> nhận
+    expect(fresh).toBe(1); // request at t=1500 > 1000 -> accepted
     expect(await getTabMedia(1)).toHaveLength(1);
   });
 
-  it('clear xoá danh sách của tab', async () => {
+  it('clear wipes the tab list', async () => {
     await addTabMedia(1, item('https://a.com/x.m3u8'));
     await clearTabMedia(1);
     expect(await getTabMedia(1)).toEqual([]);
   });
 });
 
-describe('cài đặt preferredHeight (local)', () => {
+describe('preferredHeight setting (local)', () => {
   beforeEach(() => {
     fakeBrowser.reset();
   });
 
-  it('mặc định null, set rồi get lại', async () => {
+  it('defaults to null, set then read back', async () => {
     expect(await getPreferredHeight()).toBeNull();
     await setPreferredHeight(720);
     expect(await getPreferredHeight()).toBe(720);
   });
 });
 
-describe('allocateSpoofRuleId (id rule DNR theo từng download — W2.4)', () => {
+describe('allocateSpoofRuleId (per-download DNR rule id — W2.4)', () => {
   beforeEach(() => {
     fakeBrowser.reset();
   });
 
-  it('mỗi lần cấp một id KHÁC NHAU, đều >= ngưỡng dải spoof', async () => {
-    // §2.10: id cũ = hash(host) nên hai download cùng CDN trùng id -> giật rule của nhau. Nay mỗi
-    // lần cấp một id mới => hai download không bao giờ đụng nhau.
+  it('each call allocates a DIFFERENT id, always >= the spoof range floor', async () => {
+    // §2.10: the old id = hash(host), so two downloads on the same CDN collided on the same id ->
+    // stealing each other's rule. Now each allocation returns a fresh id => two downloads never clash.
     const ids = [
       await allocateSpoofRuleId(),
       await allocateSpoofRuleId(),
@@ -113,28 +113,28 @@ describe('allocateSpoofRuleId (id rule DNR theo từng download — W2.4)', () =
     for (const id of ids) expect(id).toBeGreaterThanOrEqual(SPOOF_RULE_ID_MIN);
   });
 
-  it('bộ đếm nằm trong storage.session (sống qua SW hồi sinh, không phải biến toàn cục)', async () => {
+  it('the counter lives in storage.session (survives SW revival, not a global variable)', async () => {
     const first = await allocateSpoofRuleId();
-    // Đọc thẳng storage.session: bộ đếm PHẢI được ghi lại (SW MV3 ephemeral, biến toàn cục bốc hơi).
+    // Read storage.session directly: the counter MUST be persisted (MV3 SW is ephemeral, globals evaporate).
     const raw = await browser.storage.session.get('settings:dnrRuleCounter');
     expect(typeof raw['settings:dnrRuleCounter']).toBe('number');
     const second = await allocateSpoofRuleId();
     expect(second).toBe(first + 1);
   });
 
-  it('id luôn nằm trong dải [MIN, MIN+SPAN) — không tràn sang dải rule khác', async () => {
+  it('id always falls within [MIN, MIN+SPAN) — never spills into another rule range', async () => {
     const id = await allocateSpoofRuleId();
     expect(id).toBeGreaterThanOrEqual(SPOOF_RULE_ID_MIN);
     expect(id).toBeLessThan(SPOOF_RULE_ID_MIN + SPOOF_RULE_ID_SPAN);
   });
 });
 
-describe('DownloadEntry — khoá ỔN ĐỊNH theo jobId (W2.5), chromeDownloadId có ở phase LƯU', () => {
+describe('DownloadEntry — STABLE key by jobId (W2.5), chromeDownloadId appears at the SAVE phase', () => {
   beforeEach(() => {
     fakeBrowser.reset();
   });
 
-  it('put rồi get lại theo khoá string; KHÔNG cần chrome downloadId lúc bắt đầu (fetch trong offscreen)', async () => {
+  it('put then get back by string key; does NOT need a chrome downloadId at start (fetch happens in offscreen)', async () => {
     await putDownload({
       key: 'job-1',
       mediaUrl: 'https://cdn.example.com/v.mp4',
@@ -148,14 +148,14 @@ describe('DownloadEntry — khoá ỔN ĐỊNH theo jobId (W2.5), chromeDownload
     expect(all['job-1']!.spoofRuleIds).toEqual([2000]);
   });
 
-  it('updateDownload theo khoá MERGE, không mất field cũ (spoofRuleIds giữ nguyên khi gắn chromeDownloadId)', async () => {
+  it('updateDownload MERGES by key, no old field is lost (spoofRuleIds stays intact when chromeDownloadId is attached)', async () => {
     await putDownload({
       key: 'job-1',
       mediaUrl: 'https://cdn.example.com/v.mp4',
       state: 'in_progress',
       spoofRuleIds: [2000, 2001],
     });
-    // Phase lưu: offscreen ghép xong -> background gắn id thật của chrome.downloads vào cùng entry.
+    // Save phase: offscreen finishes muxing -> background attaches the real chrome.downloads id to the same entry.
     await updateDownload('job-1', { chromeDownloadId: 42, blobUrl: 'blob:x' });
     const e = (await getDownloads())['job-1']!;
     expect(e.chromeDownloadId).toBe(42);
@@ -164,7 +164,7 @@ describe('DownloadEntry — khoá ỔN ĐỊNH theo jobId (W2.5), chromeDownload
     expect(e.state).toBe('in_progress');
   });
 
-  it('getDownloadByChromeId tra ngược từ id chrome (dùng cho downloads.onChanged)', async () => {
+  it('getDownloadByChromeId looks up in reverse from the chrome id (used by downloads.onChanged)', async () => {
     await putDownload({
       key: 'job-1',
       mediaUrl: 'https://cdn.example.com/v.mp4',
@@ -178,11 +178,11 @@ describe('DownloadEntry — khoá ỔN ĐỊNH theo jobId (W2.5), chromeDownload
     });
     const found = await getDownloadByChromeId(7);
     expect(found?.key).toBe('job-2');
-    // Chưa gắn id thật -> không tra được (đúng: entry job-1 mới ở phase fetch).
+    // No real id attached yet -> not found (correct: job-1 is still fresh in the fetch phase).
     expect(await getDownloadByChromeId(999)).toBeUndefined();
   });
 
-  it('updateDownload khoá chưa tồn tại -> upsert tối thiểu (không mất trạng thái do race onChanged)', async () => {
+  it('updateDownload on a nonexistent key -> minimal upsert (avoids losing state to an onChanged race)', async () => {
     await updateDownload('ghost', { state: 'complete' });
     const e = (await getDownloads())['ghost']!;
     expect(e.key).toBe('ghost');
@@ -190,7 +190,7 @@ describe('DownloadEntry — khoá ỔN ĐỊNH theo jobId (W2.5), chromeDownload
   });
 });
 
-describe('W2.7 — phase kết thúc là CHUNG THẨM, không hồi sinh được', () => {
+describe('W2.7 — a terminal phase is FINAL, cannot be revived', () => {
   beforeEach(() => {
     fakeBrowser.reset();
   });
@@ -207,17 +207,19 @@ describe('W2.7 — phase kết thúc là CHUNG THẨM, không hồi sinh đượ
     };
   }
 
-  it('job đã "cancelled" KHÔNG bị offscreen kéo ngược về "loading"', async () => {
-    // Ca thật: user bấm Huỷ -> background ghi 'cancelled'; nhưng runHlsJob trong offscreen còn đang
-    // chạy dở và kịp ghi 'loading' đè lên -> popup hiện job huỷ rồi lại quay tiếp. Vô lý với user.
+  it('a "cancelled" job is NOT pulled back to "loading" by offscreen', async () => {
+    // Real scenario: user clicks Cancel -> background writes 'cancelled'; but runHlsJob in offscreen
+    // is still mid-run and manages to overwrite it with 'loading' -> popup shows the job as cancelled
+    // then spinning again. Confusing for the user.
     await putHlsJob(job({ phase: 'cancelled', error: 'Đã huỷ' }));
     await updateHlsJob('j1', { phase: 'loading' });
     expect((await getHlsJobs())['j1']!.phase).toBe('cancelled');
   });
 
-  it('job đã "error" KHÔNG bị kéo ngược về "fetching"', async () => {
-    // Ca thật W2.7: tick chốt job chết; nếu offscreen hồi sinh muộn và ghi tiếp thì spoof rule đã bị
-    // dọn -> job chạy tiếp chỉ để 403, user nhận LỖI THỨ HAI khó hiểu hơn lỗi đầu.
+  it('an "error" job is NOT pulled back to "fetching"', async () => {
+    // Real W2.7 scenario: a tick finalizes a dead job; if offscreen revives late and keeps writing,
+    // the spoof rule has already been cleaned up -> the job keeps running only to hit 403, and the
+    // user gets a SECOND error more confusing than the first.
     await putHlsJob(
       job({ phase: 'error', error: 'Bộ xử lý video đã dừng đột ngột' }),
     );
@@ -227,7 +229,7 @@ describe('W2.7 — phase kết thúc là CHUNG THẨM, không hồi sinh đượ
     expect(j.error).toBe('Bộ xử lý video đã dừng đột ngột');
   });
 
-  it('vẫn cho ghi các field KHÁC lên job đã kết thúc (chỉ khoá phase + error)', async () => {
+  it('still allows writing OTHER fields on a terminal job (only phase + error are locked)', async () => {
     await putHlsJob(job({ phase: 'done' }));
     await updateHlsJob('j1', { filename: 'x.mp4' });
     const j = (await getHlsJobs())['j1']!;
@@ -235,13 +237,13 @@ describe('W2.7 — phase kết thúc là CHUNG THẨM, không hồi sinh đượ
     expect(j.phase).toBe('done');
   });
 
-  it('job đang chạy vẫn đổi phase bình thường (không khoá nhầm)', async () => {
+  it('a running job still changes phase normally (not wrongly locked)', async () => {
     await putHlsJob(job({ phase: 'fetching' }));
     await updateHlsJob('j1', { phase: 'muxing' });
     expect((await getHlsJobs())['j1']!.phase).toBe('muxing');
   });
 
-  it('job đang chạy vẫn vào được phase kết thúc', async () => {
+  it('a running job can still transition into a terminal phase', async () => {
     await putHlsJob(job({ phase: 'fetching' }));
     await updateHlsJob('j1', { phase: 'done' });
     expect((await getHlsJobs())['j1']!.phase).toBe('done');
@@ -255,39 +257,40 @@ describe('settings:filenameTemplate', () => {
     fakeBrowser.reset();
   });
 
-  it('mặc định là mẫu giữ nguyên hành vi cũ', async () => {
+  it('default is the template preserving the old behavior', async () => {
     expect(await getFilenameTemplate()).toBe('{title}{res}');
   });
 
-  it('lưu rồi đọc lại', async () => {
+  it('save then read back', async () => {
     await setFilenameTemplate('{title}');
     expect(await getFilenameTemplate()).toBe('{title}');
   });
 
-  it('mẫu rỗng -> lùi về mặc định', async () => {
+  it('empty template -> falls back to default', async () => {
     await setFilenameTemplate('   ');
     expect(await getFilenameTemplate()).toBe('{title}{res}');
   });
 
-  // 🔴 Mẫu không có {title}/{basename} dồn MỌI video về một tên; conflictAction 'uniquify' lặng lẽ
-  // thêm ' (1)', ' (2)'... nên user không bao giờ thấy lỗi — chỉ thấy một đống file vô danh.
-  it('mẫu không phân biệt được video -> từ chối, lùi về mặc định', async () => {
+  // 🔴 A template without {title}/{basename} collapses EVERY video onto the same name;
+  // conflictAction 'uniquify' silently appends ' (1)', ' (2)'... so the user never sees an error —
+  // just a pile of nameless files.
+  it('a template that cannot distinguish videos -> rejected, falls back to default', async () => {
     await setFilenameTemplate('{date}');
     expect(await getFilenameTemplate()).toBe('{title}{res}');
   });
 });
 
-describe('W4.3 navUrl theo tab', () => {
+describe('W4.3 per-tab navUrl', () => {
   beforeEach(() => {
     fakeBrowser.reset();
   });
 
-  it('resetTab ghi navUrl của trang mới', async () => {
+  it('resetTab records the new page navUrl', async () => {
     await resetTab(1, 100, 'https://a.com/p');
     expect((await getTabState(1)).navUrl).toBe('https://a.com/p');
   });
 
-  it('setTabNavUrl chỉ đổi navUrl, KHÔNG đụng items/navStartedAt', async () => {
+  it('setTabNavUrl only changes navUrl, does NOT touch items/navStartedAt', async () => {
     await resetTab(1, 100, 'https://a.com/p');
     await addTabMedia(1, item('https://a.com/v.m3u8'));
     await setTabNavUrl(1, 'https://a.com/q');
@@ -297,35 +300,36 @@ describe('W4.3 navUrl theo tab', () => {
     expect(st.items).toHaveLength(1);
   });
 
-  // 🔴 GHIM CÁI BẪY XOÁ SẠCH: getTabState dựng lại object literal, field nào không được liệt kê
-  // trong đó sẽ bị lần read-modify-write kế tiếp nuốt mất. Triệu chứng: tải ngay thì đúng, phát
-  // hiện thêm một media nữa là mất tên. tsc/eslint/vitest hiện có ĐỀU KHÔNG THẤY.
-  it('navUrl SỐNG SÓT qua lần ghi media kế tiếp', async () => {
+  // 🔴 PINS THE WIPEOUT TRAP: getTabState rebuilds an object literal, so any field not listed in it
+  // gets swallowed by the next read-modify-write cycle. Symptom: downloading right away works, but
+  // detecting one more piece of media loses the title. Current tsc/eslint/vitest see NONE of this.
+  it('navUrl SURVIVES the next media write', async () => {
     await setTabNavUrl(1, 'https://a.com/q');
     await addTabMedia(1, item('https://a.com/v.m3u8'));
     expect((await getTabState(1)).navUrl).toBe('https://a.com/q');
   });
 
-  it('điều hướng thật (resetTab không kèm URL) xoá navUrl', async () => {
+  it('a real navigation (resetTab without a URL) clears navUrl', async () => {
     await resetTab(1, 100, 'https://a.com/p');
     await resetTab(1, 200);
     expect((await getTabState(1)).navUrl).toBeUndefined();
   });
 
-  // 🔴 Đây là mấu chốt để cổng sameDocument có dữ liệu THẬT trên đường phát hiện MẠNG: media bắt
-  // qua webRequest không mang theo URL trang nào cả.
-  it('media mới được đóng dấu URL trang LÚC PHÁT HIỆN', async () => {
+  // 🔴 This is the key to giving the sameDocument gate REAL data on the NETWORK detection path:
+  // media captured via webRequest carries no page URL at all.
+  it('new media is stamped with the page URL AT DETECTION TIME', async () => {
     await resetTab(1, 100, 'https://a.com/p');
     await addTabMedia(1, item('https://a.com/v.m3u8'));
     expect((await getTabMedia(1))[0]!.detectPageUrl).toBe('https://a.com/p');
   });
 
-  // 🔴 CA NÀY TỪNG KHOÁ CHẶT MỘT HÀNH VI SAI — review đối kháng bắt được, nay đã lật lại.
-  // Bản cũ ăn mừng việc `detectPageUrl` được điền ở nhánh MERGE. Nhưng điền muộn = đóng dấu media
-  // của trang A bằng URL trang B: cùng một URL media hay được báo lại SAU khi user đã chuyển trang
-  // SPA. Khi đó cổng sameDocument quay ra XÁC NHẬN cái sai -> tên video B nằm trên file video A.
-  // Đúng, không đóng dấu thì mất tên đẹp — nhưng thà thiếu tên còn hơn SAI tên.
-  it('KHÔNG điền detectPageUrl muộn ở nhánh MERGE (dấu là của LẦN ĐẦU)', async () => {
+  // 🔴 THIS CASE USED TO LOCK IN A WRONG BEHAVIOR — an adversarial review caught it, now reversed.
+  // The old version celebrated `detectPageUrl` being filled in on the MERGE branch. But filling it
+  // in late = stamping page A's media with page B's URL: the same media URL is often reported again
+  // AFTER the user has navigated within an SPA. At that point the sameDocument gate turns around and
+  // CONFIRMS the wrong stamp -> video B's title ends up on video A's file. True, not stamping means
+  // losing a nice title — but a missing title beats a WRONG one.
+  it('does NOT backfill detectPageUrl late on the MERGE branch (the stamp belongs to the FIRST time)', async () => {
     await addTabMedia(1, item('https://a.com/v.m3u8'));
     expect((await getTabMedia(1))[0]!.detectPageUrl).toBeUndefined();
     await setTabNavUrl(1, 'https://b.com/khac');
@@ -333,7 +337,7 @@ describe('W4.3 navUrl theo tab', () => {
     expect((await getTabMedia(1))[0]!.detectPageUrl).toBeUndefined();
   });
 
-  it('KHÔNG ghi đè detectPageUrl đã có sẵn', async () => {
+  it('does NOT overwrite an existing detectPageUrl', async () => {
     await resetTab(1, 100, 'https://a.com/p');
     await addTabMedia(
       1,

@@ -1,21 +1,24 @@
-// Harness W1.1 — BỆNH CÂM (§2.1) đo trên fixture TÁCH TIẾNG cục bộ.
+// Harness W1.1 — MUTE BUG (§2.1) measured on a local DEMUXED fixture.
 //
-// ĐÂY LÀ CÂU HỎI TRUNG TÂM CỦA TOÀN DỰ ÁN: "file tải về có tiếng không?"
-// Chủ dự án đã đo tay trên site thật (2026-07-17) -> CÂM. File này biến câu trả lời đó thành thứ
-// máy tự đo được, tất định, offline, chạy trong 30 giây.
+// THIS IS THE CENTRAL QUESTION OF THE WHOLE PROJECT: "does the downloaded file have audio?"
+// The project owner measured this by hand on a real site (2026-07-17) -> MUTE. This file turns
+// that answer into something a machine can measure deterministically, offline, in 30 seconds.
 //
-// VÌ SAO KHÔNG DÙNG e2e/real-demuxed.mjs (Apple bipbop fMP4): stream đó chết vì lỗi #30
-// (fMP4/CMAF hỏng ở khâu ghép) TRƯỚC KHI ra file -> không bao giờ tới được câu hỏi câm.
-// Fixture ở đây là MPEG-TS — đường đã chứng minh chạy tốt ở W0.3 -> cô lập ĐÚNG một biến: tiếng.
+// WHY NOT USE e2e/real-demuxed.mjs (Apple bipbop fMP4): that stream dies from bug #30
+// (fMP4/CMAF broken during muxing) BEFORE producing a file -> it never reaches the mute question.
+// The fixture here is MPEG-TS — a path already proven to work in W0.3 -> isolates EXACTLY one
+// variable: audio.
 //
-// VÌ SAO KHÔNG CẦN VLC: lộ trình ghi nghiệm thu W1.1 là "mở VLC nghe có tiếng". `ffprobe` trả lời
-// đúng câu đó chắc chắn hơn tai người, nên nghiệm thu KHÔNG cần người bấm tay.
+// WHY VLC IS NOT NEEDED: the W1.1 roadmap acceptance note is "open VLC, listen for audio".
+// `ffprobe` answers that exact question more reliably than a human ear, so acceptance does NOT
+// need a manual click-through.
 //
-// 🔬 RATCHET TỰ BẬT (cùng cơ chế `it.fails` của W0.4 / `known-fail` của W0.3):
-//   Hôm nay ca `mute` ĐỎ = bug §2.1 còn sống. Khi W1.1 xong nó sẽ ĐẠT -> harness ĐỎ NGƯỢC, ép đổi
-//   nhãn `known-fail` -> `pass`. Không thể quên như TODO chết.
+// 🔬 SELF-FLIPPING RATCHET (same mechanism as `it.fails` in W0.4 / `known-fail` in W0.3):
+//   Today the `mute` case is RED = bug §2.1 is still alive. Once W1.1 is done it will PASS ->
+//   the harness flips RED, forcing the label `known-fail` -> `pass` to change. Can't be forgotten
+//   like a dead TODO.
 //
-// Chạy: pnpm e2e:demuxed-fixture   (cần `pnpm build` trước; cần ffprobe)
+// Run: pnpm e2e:demuxed-fixture   (needs `pnpm build` first; needs ffprobe)
 
 import { startDemuxedServer } from './fixture-server.mjs';
 import {
@@ -28,8 +31,8 @@ import {
 import { existsSync, statSync } from 'node:fs';
 
 const JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_MS ?? 120_000);
-// Hình: 10 segment x 1s x 10fps. Đếm KHUNG chứ không đo thời lượng — thời lượng MÙ với lỗi mất
-// segment (đã chứng minh bằng thực nghiệm ở W0.3, xem probeFile() trong lib.mjs).
+// Video: 10 segments x 1s x 10fps. Count FRAMES, not duration — duration is BLIND to a dropped
+// segment (proven experimentally in W0.3, see probeFile() in lib.mjs).
 const FIXTURE_FRAMES = 100;
 const FIXTURE_DURATION = 10;
 const DOWNLOAD_FOLDER = `yvim-demux-${process.pid}`;
@@ -39,11 +42,12 @@ requireBuild();
 const withBrowser = (fn) => withBrowserRaw(DOWNLOAD_FOLDER, fn);
 
 /**
- * Đi TRỌN đường của popup: bấm "Chất lượng" (manifest/variants) -> chọn variant -> "Tải .mp4".
+ * Walk the FULL popup path: click "Quality" (manifest/variants) -> pick variant -> "Download .mp4".
  *
- * Cố ý KHÔNG hardcode URL playlist hình: harness phải đi qua đúng cửa mà popup đi, nếu không nó
- * sẽ bỏ lọt chính khâu parse master (nơi tiếng bốc hơi). URL tiếng lấy từ variant theo đúng giao
- * thức W1.1 — hôm nay trường đó chưa tồn tại -> `undefined` -> job chạy một-input -> CÂM.
+ * Deliberately does NOT hardcode the video playlist URL: the harness must go through the exact
+ * gate the popup uses, otherwise it would skip right past the master-parsing step (where audio
+ * evaporates). The audio URL comes from the variant per the W1.1 protocol — today that field
+ * doesn't exist yet -> `undefined` -> the job runs single-input -> MUTE.
  */
 async function runDemuxedDownload() {
   const srv = await startDemuxedServer();
@@ -55,12 +59,12 @@ async function runDemuxedDownload() {
         srv.masterUrl,
       );
       if (!vres?.ok) {
-        return { ok: false, detail: `manifest/variants hỏng: ${JSON.stringify(vres)}` };
+        return { ok: false, detail: `manifest/variants broken: ${JSON.stringify(vres)}` };
       }
       const variant = vres.variants[0];
-      if (!variant) return { ok: false, detail: 'master không ra variant nào' };
+      if (!variant) return { ok: false, detail: 'master produced no variant' };
       if (variant.uri !== srv.videoUrl) {
-        return { ok: false, detail: `variant trỏ sai playlist: ${variant.uri}` };
+        return { ok: false, detail: `variant points to wrong playlist: ${variant.uri}` };
       }
 
       const start = await page.evaluate(
@@ -68,8 +72,8 @@ async function runDemuxedDownload() {
           chrome.runtime.sendMessage({
             kind: 'hls/download',
             variantUrl: v.uri,
-            // Giao thức W1.1: URL luồng tiếng mà variant THẬT SỰ dùng. Hôm nay parser chưa điền
-            // -> undefined -> đây chính là chỗ bệnh câm sinh ra.
+            // W1.1 protocol: the audio stream URL the variant ACTUALLY uses. Today the parser
+            // doesn't fill it in -> undefined -> this is exactly where the mute bug is born.
             audioUrl: v.audioRenditions?.find((r) => r.selected)?.uri,
             mediaUrl,
             tabId: -1,
@@ -78,46 +82,47 @@ async function runDemuxedDownload() {
         [variant, srv.masterUrl],
       );
       if (!start?.ok) {
-        return { ok: false, detail: `hls/download bị từ chối: ${JSON.stringify(start)}` };
+        return { ok: false, detail: `hls/download rejected: ${JSON.stringify(start)}` };
       }
 
       const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
       if (!job) {
-        return { ok: false, detail: `job TREO sau ${JOB_TIMEOUT_MS / 1000}s (không done/error)` };
+        return { ok: false, detail: `job HUNG after ${JOB_TIMEOUT_MS / 1000}s (no done/error)` };
       }
       if (job.phase !== 'done') {
         return { ok: false, detail: `job ${job.phase}: ${job.error ?? '?'}` };
       }
       const file = await waitDownloadedFile(page, 30_000);
-      if (!file) return { ok: false, detail: 'job done nhưng KHÔNG có file nào rơi xuống đĩa' };
+      if (!file) return { ok: false, detail: 'job done but NO file landed on disk' };
       if (!existsSync(file.filename)) {
-        return { ok: false, detail: `downloads báo complete nhưng file không tồn tại` };
+        return { ok: false, detail: `downloads reported complete but file does not exist` };
       }
 
       const size = statSync(file.filename).size;
       const probe = probeFile(file.filename);
-      if (probe.error) return { ok: false, detail: `ffprobe không đọc được file ra: ${probe.error}` };
+      if (probe.error) return { ok: false, detail: `ffprobe could not read the output file: ${probe.error}` };
 
       const has = (t) => probe.codecs.includes(t);
-      const tracks = probe.codecs.join('+') || 'rỗng';
+      const tracks = probe.codecs.join('+') || 'empty';
       const hits = srv.audioSegmentHits();
       const errLog = logs.filter((l) => l.includes('error:')).slice(-3);
       const suffix =
         `— file ${(size / 1024).toFixed(0)}KB, ${probe.duration.toFixed(2)}s, ` +
-        `${probe.videoFrames} khung, track: ${tracks}, đã fetch ${hits} segment tiếng` +
-        `${errLog.length ? ` (log lỗi: ${errLog.join(' | ')})` : ''}`;
+        `${probe.videoFrames} frames, track: ${tracks}, fetched ${hits} audio segments` +
+        `${errLog.length ? ` (error log: ${errLog.join(' | ')})` : ''}`;
 
-      if (!has('video')) return { ok: false, detail: `file ra KHÔNG có track hình ${suffix}` };
-      // ĐÂY LÀ CÂU HỎI. Hôm nay: không có audio -> CÂM -> ca đỏ như dự kiến.
-      if (!has('audio')) return { ok: false, detail: `CÂM: file ra KHÔNG có track tiếng ${suffix}` };
-      // Ghép hai nguồn mà lệch thời lượng = tiếng không khớp hình -> tệ ngang câm, phải bắt.
+      if (!has('video')) return { ok: false, detail: `output file has NO video track ${suffix}` };
+      // THIS IS THE QUESTION. Today: no audio -> MUTE -> case red as expected.
+      if (!has('audio')) return { ok: false, detail: `MUTE: output file has NO audio track ${suffix}` };
+      // Muxing two sources with mismatched duration = audio doesn't sync with video -> just as bad
+      // as mute, must be caught.
       if (Math.abs(probe.duration - FIXTURE_DURATION) > 0.5) {
-        return { ok: false, detail: `thời lượng lệch ${probe.duration.toFixed(2)}s ${suffix}` };
+        return { ok: false, detail: `duration mismatch ${probe.duration.toFixed(2)}s ${suffix}` };
       }
       if (Math.abs(probe.videoFrames - FIXTURE_FRAMES) > 2) {
-        return { ok: false, detail: `thiếu khung hình ${suffix}` };
+        return { ok: false, detail: `missing frames ${suffix}` };
       }
-      return { ok: true, detail: `có ĐỦ hình + tiếng ${suffix}` };
+      return { ok: true, detail: `has FULL video + audio ${suffix}` };
     });
   } finally {
     await srv.close();
@@ -127,19 +132,21 @@ async function runDemuxedDownload() {
 const SCENARIOS = [
   {
     id: 'mute',
-    title: 'Master tách tiếng -> file tải về phải có ĐỦ hình + tiếng',
-    // ✅ W1.1 (2026-07-17): 'known-fail' -> 'pass'. Ratchet đã TỰ BẬT đúng như thiết kế: ngay khi
-    // bản sửa chạy được, ca này ĐẠT và harness ĐỎ NGƯỢC đòi đổi nhãn — không cần ai nhớ.
-    // Trước bản sửa: "CÂM: file ra KHÔNG có track tiếng — 81KB, track: video, đã fetch 0 segment
-    // tiếng". Sau: "164KB, track: video+audio, đã fetch 11 segment tiếng".
-    // Từ đây ca này là LƯỚI CHỐNG TÁI PHÁT: bệnh câm quay lại -> đỏ ngay.
+    title: 'Demuxed master -> downloaded file must have FULL video + audio',
+    // ✅ W1.1 (2026-07-17): 'known-fail' -> 'pass'. The ratchet SELF-FLIPPED exactly as designed:
+    // as soon as the fix landed, this case passed and the harness flipped RED demanding the
+    // label change — nobody had to remember.
+    // Before the fix: "MUTE: output file has NO audio track — 81KB, track: video, fetched 0
+    // audio segments". After: "164KB, track: video+audio, fetched 11 audio segments".
+    // From here on this case is a REGRESSION SAFETY NET: if the mute bug comes back -> red
+    // immediately.
     expect: 'pass',
     run: runDemuxedDownload,
   },
 ];
 
 let failed = false;
-console.log('W1.1 — bệnh câm trên fixture tách tiếng cục bộ (extension thật)\n');
+console.log('W1.1 — mute bug on local demuxed fixture (real extension)\n');
 
 for (const s of SCENARIOS) {
   console.log(`▶ [${s.id}] ${s.title}`);
@@ -147,26 +154,26 @@ for (const s of SCENARIOS) {
   try {
     r = await s.run();
   } catch (e) {
-    r = { ok: false, detail: `harness lỗi: ${e?.message ?? e}` };
+    r = { ok: false, detail: `harness error: ${e?.message ?? e}` };
   }
 
   if (s.expect === 'pass') {
-    if (r.ok) console.log(`  ✓ ĐẠT — ${r.detail}\n`);
+    if (r.ok) console.log(`  ✓ PASS — ${r.detail}\n`);
     else {
       failed = true;
-      console.log(`  ✗ HỎNG — ${r.detail}\n`);
+      console.log(`  ✗ BROKEN — ${r.detail}\n`);
     }
   } else {
     if (!r.ok) {
-      console.log(`  ⊘ ĐỎ NHƯ DỰ KIẾN (bug còn sống, đã ghim) — ${r.detail}`);
-      console.log(`     ghim: ${s.pins}\n`);
+      console.log(`  ⊘ RED AS EXPECTED (bug still alive, pinned) — ${r.detail}`);
+      console.log(`     pinned: ${s.pins}\n`);
     } else {
       failed = true;
-      console.log(`  ✗ RATCHET BẬT — ca này LẼ RA phải đỏ nhưng đã ĐẠT: ${r.detail}`);
-      console.log(`     => ${s.pins} đã sửa xong. Đổi expect: 'known-fail' -> 'pass' trong e2e/demuxed.mjs.\n`);
+      console.log(`  ✗ RATCHET FLIPPED — this case was SUPPOSED to be red but PASSED: ${r.detail}`);
+      console.log(`     => ${s.pins} is fixed now. Change expect: 'known-fail' -> 'pass' in e2e/demuxed.mjs.\n`);
     }
   }
 }
 
-console.log(failed ? '✗ W1.1 harness THẤT BẠI' : '✓ W1.1 harness XANH (bug ghim vẫn đỏ đúng dự kiến)');
+console.log(failed ? '✗ W1.1 harness FAILED' : '✓ W1.1 harness GREEN (pinned bug still red as expected)');
 process.exit(failed ? 1 : 0);

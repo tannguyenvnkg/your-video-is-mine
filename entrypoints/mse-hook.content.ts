@@ -1,12 +1,12 @@
-// Content script chạy trong MAIN world (ngữ cảnh trang) để truy cập window.MediaSource THẬT.
-// Mục đích:
-//  - Phát hiện player MSE/blob tự chế (URL thật bị giấu) qua hook URL.createObjectURL(MediaSource).
-//  - Bỏ qua chặn UI: khôi phục chuột phải / bôi chọn / kéo thả bị trang chặn.
-// KHÔNG dùng chrome API ở đây (MAIN world không có) -> báo về content script isolated qua
-// window.postMessage; isolated sẽ forward tới background.
+// Content script running in the MAIN world (page context) to access the REAL window.MediaSource.
+// Purpose:
+//  - Detect custom-built MSE/blob players (real URL hidden) via a URL.createObjectURL(MediaSource) hook.
+//  - Bypass UI blocking: restore right-click / text selection / drag blocked by the page.
+// Does NOT use chrome API here (not available in the MAIN world) -> reports back to the isolated
+// content script via window.postMessage; isolated forwards it to background.
 //
-// Ghi chú: đây là PHÁT HIỆN. Việc dựng lại stream từ appendBuffer (bắt toàn bộ byte) rất nặng
-// và dễ vỡ -> để dành nâng cao; ở đây chỉ báo hiệu để user biết trang dùng MSE.
+// Note: this is DETECTION only. Reconstructing the stream from appendBuffer (capturing every byte)
+// is heavy and fragile -> deferred for later; here we only signal so the user knows the page uses MSE.
 
 export default defineContentScript({
   matches: ['<all_urls>'],
@@ -23,7 +23,7 @@ export default defineContentScript({
       }
     };
 
-    // Hook URL.createObjectURL: bắt blob URL tạo từ MediaSource (dấu hiệu player MSE).
+    // Hook URL.createObjectURL: catch blob URLs created from MediaSource (an MSE player signal).
     try {
       const orig = URL.createObjectURL.bind(URL);
       URL.createObjectURL = ((
@@ -46,29 +46,31 @@ export default defineContentScript({
       // ignore
     }
 
-    // ---- W7.1: PHÁT HIỆN DRM/EME — ranh giới cứng §7 ----
+    // ---- W7.1: DRM/EME DETECTION — hard boundary §7 ----
     //
-    // 🔴 ĐÂY LÀ MÃ TỪ CHỐI, KHÔNG PHẢI MÃ GIẢI MÃ. Ta CHỈ nghe xem trang có xin DRM hay không, để
-    // nói "không hỗ trợ" NGAY thay vì để user bấm tải rồi hỏng khó hiểu. Tuyệt đối không mở rộng
-    // thành đường moi khoá — đó là vượt biện pháp bảo vệ kỹ thuật, đúng thứ §7 cấm.
+    // 🔴 THIS IS REFUSAL CODE, NOT DECRYPTION CODE. We ONLY listen for whether the page requests
+    // DRM, so we can say "not supported" IMMEDIATELY instead of letting the user click download and
+    // hit a confusing failure. Never extend this into a key-extraction path — that would be
+    // circumventing a technical protection measure, exactly what §7 forbids.
     //
-    // Hai tín hiệu, bắt cả hai vì chúng bù nhau:
-    //  - `requestMediaKeySystemAccess`: trang XIN DRM (biết được ĐÍCH DANH hãng: Widevine/PlayReady/…)
-    //  - sự kiện `'encrypted'`: luồng CÓ dữ liệu khởi tạo DRM (bắt được cả khi trang xin từ trước
-    //    lúc hook kịp cài, ví dụ player nạp trong iframe/worker sớm).
-    // 🔴 PHẢI ĐỆM LẠI, KHÔNG ĐƯỢC BẮN RỒI QUÊN — đã ĐO: trang gọi EME lúc PARSE (document_start),
-    // trong khi content script isolated (bên nhận) chạy ở `document_idle`, tức MUỘN HƠN. Bắn thẳng
-    // thì `postMessage` rơi vào lúc chưa ai nghe -> tín hiệu DRM mất trắng, ranh giới §7 thủng im
-    // lặng. (Triệu chứng đo được: hook CÓ cài — thấy wrapper trong `navigator.…toString()` — mà
-    // `drmSystems` của tab vẫn rỗng.)
+    // Two signals, caught both because they complement each other:
+    //  - `requestMediaKeySystemAccess`: the page REQUESTS DRM (we learn the EXACT vendor: Widevine/PlayReady/…)
+    //  - the `'encrypted'` event: the stream HAS DRM init data (caught even when the page requested
+    //    it before the hook managed to install, e.g. a player loading early in an iframe/worker).
+    // 🔴 MUST BE BUFFERED, NOT FIRE-AND-FORGET — MEASURED: the page calls EME during PARSE
+    // (document_start), while the isolated content script (the receiver) runs at `document_idle`,
+    // i.e. LATER. Firing directly means `postMessage` lands while nobody is listening yet -> the DRM
+    // signal is lost entirely, silently breaching the §7 boundary. (Measured symptom: the hook WAS
+    // installed — visible as a wrapper in `navigator.…toString()` — yet the tab's `drmSystems`
+    // stayed empty.)
     const pendingDrm: Array<{ keySystem: string; source: string }> = [];
     const reportDrm = (keySystem: string, source: string) => {
       pendingDrm.push({ keySystem, source });
       post({ kind: 'drm-detected', keySystem, source });
     };
 
-    // Bắt tay: isolated vừa khởi động thì ping sang đây, ta PHÁT LẠI mọi thứ đã bắt trước đó.
-    // Bắt tay tất định hơn hẳn mẹo canh giờ (đặt lại timer bao lâu cũng chỉ là đoán).
+    // Handshake: as soon as isolated starts up it pings over here, and we REPLAY everything caught
+    // so far. A handshake is far more deterministic than a timing trick (any timer delay is just a guess).
     window.addEventListener('message', (e: MessageEvent) => {
       const d = e.data as { __yvim?: string; kind?: string } | null;
       if (!d || d.__yvim !== TAG || d.kind !== 'isolated-ready') return;
@@ -82,8 +84,8 @@ export default defineContentScript({
     });
 
     try {
-      // Cast ở cuối là BẮT BUỘC: TS mô tả `requestMediaKeySystemAccess` bằng overload, nên một
-      // wrapper cùng chữ ký runtime vẫn không gán thẳng được.
+      // The cast at the end is REQUIRED: TS describes `requestMediaKeySystemAccess` via overloads,
+      // so a wrapper with a matching runtime signature still can't be assigned directly.
       const nav = navigator;
       const origRMKSA = nav.requestMediaKeySystemAccess?.bind(navigator);
       if (origRMKSA) {
@@ -91,14 +93,14 @@ export default defineContentScript({
           keySystem: string,
           configs: MediaKeySystemConfiguration[],
         ) => {
-          // Báo TRƯỚC khi gọi tiếp: dù trang có bị từ chối quyền thì ý định vẫn đã rõ.
+          // Report BEFORE calling through: even if the page's permission request gets denied, its intent is already clear.
           try {
             reportDrm(String(keySystem), 'requestMediaKeySystemAccess');
           } catch {
             // ignore
           }
-          // KHÔNG chặn, KHÔNG sửa kết quả: trang vẫn phát video bình thường như không có extension.
-          // Ta chỉ từ chối TẢI, không phá trải nghiệm xem của user.
+          // Do NOT block, do NOT modify the result: the page still plays video normally as if the extension weren't there.
+          // We only refuse to DOWNLOAD, not break the user's viewing experience.
           return origRMKSA(keySystem, configs);
         }) as typeof navigator.requestMediaKeySystemAccess;
       }
@@ -106,33 +108,35 @@ export default defineContentScript({
       // ignore
     }
 
-    // Sự kiện 'encrypted' bắn trên chính phần tử media khi luồng có PSSH/init data.
+    // The 'encrypted' event fires on the media element itself when the stream has PSSH/init data.
     try {
       document.addEventListener(
         'encrypted',
         (e: Event) => {
           const ks = (e as Event & { initDataType?: string }).initDataType;
-          // Không có tên hệ thống ở đây (chỉ có initDataType như 'cenc'/'keyids'/'webm') -> báo
-          // chuỗi rỗng, phía nhận sẽ hiểu là "DRM không rõ hãng".
+          // No system name available here (only initDataType like 'cenc'/'keyids'/'webm') -> report
+          // an empty string, the receiver will interpret it as "DRM, vendor unknown".
           reportDrm('', `encrypted:${ks ?? '?'}`);
         },
-        true, // capture: bắt được cả khi sự kiện bắn trên <video> lồng sâu
+        true, // capture: also catches when the event fires on a deeply nested <video>
       );
     } catch {
       // ignore
     }
 
-    // ---- Sniff manifest HLS/DASH bị nguỵ trang (URL/đuôi/Content-Type giả) ----
-    // MV3 webRequest KHÔNG đọc được body -> mù với manifest giả đuôi (.jpg) / Content-Type giả.
-    // Nhưng player LUÔN phải fetch một playlist "#EXTM3U" (HLS) hoặc "<MPD" (DASH).
-    // => Hook fetch/XHR, đọc ~256 byte ĐẦU của response để nhận diện, rồi báo URL thật về isolated.
+    // ---- Sniff disguised HLS/DASH manifests (fake URL/extension/Content-Type) ----
+    // MV3 webRequest CANNOT read the body -> blind to manifests with a fake extension (.jpg) / fake
+    // Content-Type. But the player ALWAYS has to fetch a playlist starting with "#EXTM3U" (HLS) or
+    // "<MPD" (DASH).
+    // => Hook fetch/XHR, read the FIRST ~256 bytes of the response to identify it, then report the
+    // real URL back to isolated.
     const seen = new Set<string>();
 
-    // Nhận diện loại manifest từ phần đầu nội dung (đã cắt ~256 ký tự).
+    // Identify the manifest type from the start of the content (truncated to ~256 characters).
     const sniffManifest = (head: string): 'hls' | 'dash' | null => {
       const s = head.trimStart();
       if (s.startsWith('#EXTM3U')) return 'hls';
-      // DASH: tài liệu XML có phần tử gốc <MPD>.
+      // DASH: an XML document with an <MPD> root element.
       if (
         (s.startsWith('<?xml') || s.startsWith('<MPD')) &&
         s.includes('MPD')
@@ -142,7 +146,7 @@ export default defineContentScript({
       return null;
     };
 
-    // Báo manifest (dedupe theo URL tuyệt đối).
+    // Report a manifest (deduped by absolute URL).
     const reportManifest = (rawUrl: string, mediaType: 'hls' | 'dash') => {
       try {
         const url = new URL(rawUrl, location.href).href;
@@ -154,7 +158,7 @@ export default defineContentScript({
       }
     };
 
-    // Hook window.fetch: clone response, đọc CHUNK ĐẦU rồi cancel (không tiêu thụ body của player).
+    // Hook window.fetch: clone the response, read the FIRST CHUNK then cancel (doesn't consume the player's body).
     try {
       const origFetch = window.fetch.bind(window);
       window.fetch = (async (
@@ -171,7 +175,7 @@ export default defineContentScript({
                 : input.url;
           if (reqUrl && res.body) {
             const clone = res.clone();
-            // Fire-and-forget: KHÔNG chặn response trả về cho player.
+            // Fire-and-forget: does NOT block the response returned to the player.
             void (async () => {
               try {
                 const reader = clone.body?.getReader();
@@ -197,7 +201,7 @@ export default defineContentScript({
       // ignore
     }
 
-    // Hook XMLHttpRequest: lưu URL ở open(), kiểm 256 ký tự đầu responseText khi load xong.
+    // Hook XMLHttpRequest: save the URL at open(), check the first 256 characters of responseText on load.
     try {
       const XHRProto = XMLHttpRequest.prototype;
       const origOpen = XHRProto.open;
@@ -215,7 +219,7 @@ export default defineContentScript({
         } catch {
           // ignore
         }
-        // Mặc định async = true (đúng hành vi XHR khi bỏ tham số).
+        // Default async = true (matches real XHR behavior when the parameter is omitted).
         return origOpen.call(
           this,
           method,
@@ -234,7 +238,7 @@ export default defineContentScript({
         try {
           this.addEventListener('load', () => {
             try {
-              // responseText chỉ đọc được khi responseType là '' hoặc 'text'.
+              // responseText is only readable when responseType is '' or 'text'.
               if (this.responseType === '' || this.responseType === 'text') {
                 const text = this.responseText;
                 if (text) {
@@ -257,8 +261,8 @@ export default defineContentScript({
       // ignore
     }
 
-    // Bỏ qua chặn UI: khôi phục chuột phải + bôi chọn bị trang chặn.
-    // CHỈ contextmenu + selectstart (KHÔNG đụng copy/dragstart để tránh phá app không phải video).
+    // Bypass UI blocking: restore right-click + text selection blocked by the page.
+    // ONLY contextmenu + selectstart (does NOT touch copy/dragstart, to avoid breaking non-video apps).
     const reenable = (e: Event) => {
       e.stopImmediatePropagation();
     };

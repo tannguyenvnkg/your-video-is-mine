@@ -1,33 +1,34 @@
-// W7.1 — THI HÀNH RANH GIỚI CỨNG §7: phát hiện DRM/EME rồi DỪNG và báo rõ.
+// W7.1 — ENFORCE THE HARD BOUNDARY §7: detect DRM/EME then STOP and report it clearly.
 //
-// VÌ SAO GÓI NÀY TỒN TẠI: `CLAUDE.md` khai đây là ranh giới cứng "KHÔNG được vượt", nhưng grep
-// `requestMediaKeySystemAccess|MediaKeys|'encrypted'|keySystem` trong `entrypoints/ utils/` ra ĐÚNG
-// 0 HIT. Nghĩa là ranh giới được TUYÊN BỐ mà chưa hề được THI HÀNH: gặp Netflix/Disney+ extension
-// vẫn hì hục tải rồi mới hỏng một cách khó hiểu. Gói này biến lời tuyên bố thành sự thật.
+// WHY THIS MODULE EXISTS: `CLAUDE.md` declares this a hard boundary "MUST NOT be crossed", but
+// grepping `requestMediaKeySystemAccess|MediaKeys|'encrypted'|keySystem` in `entrypoints/ utils/`
+// gave EXACTLY 0 HITS. Meaning the boundary was DECLARED but never ENFORCED: hitting a
+// Netflix/Disney+ extension would still plow ahead and download, then fail in a confusing way.
+// This module turns the declaration into reality.
 //
-// 🔴 ĐÂY LÀ MÃ TỪ CHỐI, KHÔNG PHẢI MÃ GIẢI MÃ. Nó chỉ NHẬN DIỆN nội dung được bảo vệ để nói
-// "không hỗ trợ". Tuyệt đối KHÔNG được mở rộng thành đường moi khoá/giả mạo thiết bị — đó là vượt
-// biện pháp bảo vệ kỹ thuật, và đó chính là thứ §7 cấm.
+// 🔴 THIS IS REFUSAL CODE, NOT DECRYPTION CODE. It only DETECTS protected content in order to say
+// "unsupported". It must absolutely NEVER be extended into a key-extraction or device-spoofing path
+// — that would be circumventing a technical protection measure, which is exactly what §7 forbids.
 //
-// Logic thuần (không đụng DOM/browser API) để unit test được và để dùng được ở CẢ service worker —
-// nhớ: SW KHÔNG có `DOMParser`, nên MPD phải soi bằng regex chứ không parse XML.
+// Pure logic (no DOM/browser API access) so it's unit-testable and usable in BOTH the service
+// worker — remember: the SW has NO `DOMParser`, so the MPD must be inspected via regex, not XML parsing.
 
 /**
- * Tiền tố key system EME -> tên cho người đọc.
+ * EME key system prefix -> human-readable name.
  *
- * Khớp theo TIỀN TỐ vì site thật dùng biến thể có hậu tố: `com.apple.fps.1_0`,
+ * Matched by PREFIX because real sites use variants with a suffix: `com.apple.fps.1_0`,
  * `com.microsoft.playready.recommendation`, `com.widevine.alpha.experiment`.
  */
 const KEY_SYSTEM_PREFIXES: ReadonlyArray<readonly [string, string]> = [
   ['com.widevine.alpha', 'Widevine'],
   ['com.microsoft.playready', 'PlayReady'],
   ['com.apple.fps', 'FairPlay'],
-  // Clear Key: về kỹ thuật giải mã được, NHƯNG đi qua EME. Ta không đụng EME, chấm hết — dựng
-  // đường riêng cho nó là mở đúng cánh cửa §7 cấm.
+  // Clear Key: technically decryptable, BUT goes through EME. We do not touch EME, period —
+  // building a special path for it would open exactly the door §7 forbids.
   ['org.w3.clearkey', 'Clear Key'],
 ];
 
-/** Tên hệ thống DRM cho người đọc; `null` nếu không nhận ra (vẫn phải CHẶN — xem `isDrmKeySystem`). */
+/** Human-readable DRM system name; `null` if unrecognized (still must be BLOCKED — see `isDrmKeySystem`). */
 export function drmNameFromKeySystem(keySystem: string): string | null {
   const s = keySystem.trim().toLowerCase();
   for (const [prefix, name] of KEY_SYSTEM_PREFIXES) {
@@ -37,25 +38,26 @@ export function drmNameFromKeySystem(keySystem: string): string | null {
 }
 
 /**
- * Chuỗi này có phải một yêu cầu EME không?
+ * Is this string an EME request?
  *
- * 🔴 MẶC ĐỊNH AN TOÀN: hệ thống LẠ vẫn trả `true`. Trang gọi `requestMediaKeySystemAccess` tức là
- * nó đang xin DRM — ta không cần biết hãng nào mới được phép từ chối. Danh sách trắng ở đây sẽ là
- * một lỗ hổng: chỉ cần một key system mới ra đời là ranh giới thủng.
+ * 🔴 SAFE BY DEFAULT: an UNKNOWN system still returns `true`. A page calling
+ * `requestMediaKeySystemAccess` means it's asking for DRM — we don't need to know which vendor to
+ * be allowed to refuse. A whitelist here would be a hole: just one new key system appearing would
+ * punch through the boundary.
  */
 export function isDrmKeySystem(keySystem: string): boolean {
   return keySystem.trim().length > 0;
 }
 
-/** Thông báo từ chối — phải nói RÕ vì sao, đây là thứ user đọc thay cho một lần tải hỏng. */
+/** Refusal message — must state clearly WHY, this is what the user reads instead of a failed download. */
 export function DRM_UNSUPPORTED_ERROR(systemName?: string): string {
   const which = systemName ? ` (${systemName})` : '';
   return `Nội dung này được bảo vệ bằng DRM${which} nên không hỗ trợ tải. Đây là giới hạn có chủ đích của extension, không phải lỗi.`;
 }
 
-// --- DASH: DRM khai báo ngay trong manifest qua <ContentProtection> -------------------------------
+// --- DASH: DRM declared right in the manifest via <ContentProtection> -----------------------------
 
-/** UUID hệ thống DRM chuẩn trong DASH (`schemeIdUri="urn:uuid:<UUID>"`). */
+/** Standard DASH DRM system UUID (`schemeIdUri="urn:uuid:<UUID>"`). */
 const DASH_SYSTEM_UUIDS: Readonly<Record<string, string>> = {
   'edef8ba9-79d6-4ace-a3c8-27dcd51d21ed': 'Widevine',
   '9a04f079-9840-4286-ab92-e65be0885f95': 'PlayReady',
@@ -64,20 +66,22 @@ const DASH_SYSTEM_UUIDS: Readonly<Record<string, string>> = {
 };
 
 /**
- * Thẻ `<ContentProtection ...>` (có thể mang tiền tố namespace như `cenc:`), lấy cụm thuộc tính.
+ * `<ContentProtection ...>` tag (may carry a namespace prefix like `cenc:`), captures the attribute
+ * chunk.
  *
- * Vì sao KHỚP CẢ THẺ chứ không chỉ tìm chữ "ContentProtection": chuỗi đó xuất hiện được trong URL
- * hay comment, và chặn OAN một video thường còn tệ hơn bỏ sót — user mất tính năng mà không hiểu
- * vì sao. Phải thấy đúng một PHẦN TỬ XML mới tính.
+ * Why match the WHOLE TAG instead of just searching for the string "ContentProtection": that string
+ * can appear in a URL or a comment, and wrongly blocking a normal video is worse than missing one —
+ * the user loses a feature without understanding why. Must see an actual XML ELEMENT for it to count.
  */
 const CONTENT_PROTECTION_RE = /<[A-Za-z0-9_.-]*:?ContentProtection\b([^>]*)>/g;
 const SCHEME_ID_RE = /schemeIdUri\s*=\s*["']([^"']+)["']/i;
 
 /**
- * Các hệ thống DRM khai báo trong một MPD. Rỗng = manifest sạch.
+ * DRM systems declared in an MPD. Empty = clean manifest.
  *
- * 🔴 MẶC ĐỊNH AN TOÀN như `isDrmKeySystem`: có `<ContentProtection>` mà UUID lạ thì vẫn trả về một
- * mục ("DRM không rõ") — sự hiện diện của phần tử đó ĐÃ là lời khai "nội dung này được mã hoá".
+ * 🔴 SAFE BY DEFAULT like `isDrmKeySystem`: an `<ContentProtection>` with an unknown UUID still
+ * returns an entry ("DRM không rõ") — the element's mere presence IS a declaration that "this
+ * content is encrypted".
  */
 export function drmSystemsInMpd(mpdText: string): string[] {
   const found = new Set<string>();
@@ -95,28 +99,29 @@ export function drmSystemsInMpd(mpdText: string): string[] {
       found.add(DASH_SYSTEM_UUIDS[uuid]);
       continue;
     }
-    // `urn:mpeg:dash:mp4protection:2011` = khai báo CHUNG rằng luồng đã mã hoá (cenc/cbcs) mà chưa
-    // nói hãng nào. Vẫn là nội dung được bảo vệ -> vẫn chặn.
+    // `urn:mpeg:dash:mp4protection:2011` = a GENERIC declaration that the stream is encrypted
+    // (cenc/cbcs) without naming a vendor. Still protected content -> still blocked.
     found.add('DRM không rõ');
   }
-  // Biết đích danh hãng thì bỏ mục chung đi cho thông báo gọn.
+  // If a specific vendor is known, drop the generic entry to keep the message tidy.
   if (found.size > 1) found.delete('DRM không rõ');
   return [...found];
 }
 
-// --- HLS: DRM khai báo ngay trong playlist qua #EXT-X-KEY / #EXT-X-SESSION-KEY --------------------
+// --- HLS: DRM declared right in the playlist via #EXT-X-KEY / #EXT-X-SESSION-KEY -------------------
 //
-// 🔴 LỖ HỔNG THẬT ĐÃ ĐO (2026-07-19) — đọc trước khi "gọn hoá" phần này:
-// Ranh giới §7 trước đây suy DRM từ `segment.key.method` do m3u8-parser trả về. Đo trên
-// m3u8-parser@7.2.0 THẬT thì với FairPlay/PlayReady/Widevine, thư viện đẩy khoá sang
-// `manifest.contentProtection` và **KHÔNG gán `segment.key`** -> `firstKeyMethod()` trả undefined
-// -> `encryption='none'` -> `isProtected=FALSE`. Tức ba hệ DRM phổ biến NHẤT đi lọt ranh giới,
-// extension tải trọn nội dung được bảo vệ rồi giao ra file nhiễu KÈM DẤU TÍCH XANH.
-// Chỉ `METHOD=SAMPLE-AES` TRẦN (không KEYFORMAT) mới bị bắt — mà ngoài đời hầu như không ai khai vậy.
+// 🔴 REAL VULNERABILITY MEASURED (2026-07-19) — read before "simplifying" this section:
+// The §7 boundary used to infer DRM from `segment.key.method` as returned by m3u8-parser. Measured
+// against REAL m3u8-parser@7.2.0: for FairPlay/PlayReady/Widevine, the library pushes the key into
+// `manifest.contentProtection` and **does NOT set `segment.key`** -> `firstKeyMethod()` returns
+// undefined -> `encryption='none'` -> `isProtected=FALSE`. Meaning the three MOST common DRM systems
+// slip past the boundary, and the extension downloads the entire protected content and hands out a
+// garbled file WITH A GREEN CHECKMARK. Only a BARE `METHOD=SAMPLE-AES` (no KEYFORMAT) was caught —
+// and in practice almost nobody declares it that way.
 //
-// => Soi THẲNG văn bản playlist, đừng tin cấu trúc đã qua tay thư viện.
+// => Inspect the playlist text DIRECTLY, don't trust structure that's already passed through the library.
 
-/** KEYFORMAT của HLS -> tên hãng. Khớp theo tiền tố vì có biến thể hậu tố phiên bản. */
+/** HLS KEYFORMAT -> vendor name. Matched by prefix because version-suffix variants exist. */
 const HLS_KEYFORMAT_NAMES: ReadonlyArray<readonly [string, string]> = [
   ['com.apple.streamingkeydelivery', 'FairPlay'],
   ['com.microsoft.playready', 'PlayReady'],
@@ -124,26 +129,29 @@ const HLS_KEYFORMAT_NAMES: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /**
- * Chỉ khớp DÒNG bắt đầu bằng đúng tag (cho phép thụt lề). Nếu tìm chữ "KEYFORMAT" ở bất cứ đâu thì
- * một URL segment có chứa chuỗi đó cũng bị tính là DRM -> CHẶN OAN, mà chặn oan còn tệ hơn bỏ sót.
+ * Only match LINES starting with the exact tag (indentation allowed). Searching for "KEYFORMAT"
+ * anywhere would let a segment URL containing that string also count as DRM -> WRONGLY BLOCKED, and
+ * a wrong block is worse than a miss.
  */
 const HLS_KEY_LINE_RE = /^[ \t]*#EXT-X-(?:SESSION-)?KEY:(.*)$/gm;
 const HLS_METHOD_RE = /(?:^|,)\s*METHOD\s*=\s*([A-Za-z0-9-]+)/i;
 const HLS_KEYFORMAT_RE = /(?:^|,)\s*KEYFORMAT\s*=\s*"([^"]*)"/i;
 
 /**
- * Playlist HLS này có khai DRM không? Trả TÊN HÃNG để nói cho user, hoặc `null` nếu sạch.
+ * Does this HLS playlist declare DRM? Returns the VENDOR NAME to tell the user, or `null` if clean.
  *
- * Ba luật, theo đúng thứ tự:
- *   1. `METHOD=NONE` -> bỏ qua dòng đó (đoạn trong veo giữa một stream mã hoá — có thật).
- *   2. `KEYFORMAT` khác `identity` -> DRM. RFC 8216 §4.3.2.4 nói `identity` là MẶC ĐỊNH và là
- *      dạng AES-128 thường; mọi giá trị khác nghĩa là khoá nằm sau một hệ thống license.
- *   3. `METHOD` thuộc họ `SAMPLE-AES*` -> DRM kể cả khi KEYFORMAT là identity.
+ * Three rules, in order:
+ *   1. `METHOD=NONE` -> skip that line (a genuinely clear section within an otherwise encrypted
+ *      stream — this really happens).
+ *   2. `KEYFORMAT` other than `identity` -> DRM. RFC 8216 §4.3.2.4 says `identity` is the DEFAULT
+ *      and means plain AES-128; any other value means the key sits behind a license system.
+ *   3. `METHOD` in the `SAMPLE-AES*` family -> DRM even when KEYFORMAT is identity.
  *
- * 🔴 MẶC ĐỊNH AN TOÀN: KEYFORMAT lạ vẫn CHẶN (trả 'DRM không rõ'). Danh sách trắng ở đây sẽ thủng
- * ngay khi có hệ thống mới ra đời.
- * 🔴 NỬA DỄ SAI: `METHOD=AES-128` (kèm hoặc không kèm `KEYFORMAT="identity"`) PHẢI trả `null` —
- * đó chính là thứ §7 cho phép tải, vì khoá được máy chủ phát công khai cho bất kỳ ai xin.
+ * 🔴 SAFE BY DEFAULT: an unknown KEYFORMAT still gets BLOCKED (returns 'DRM không rõ'). A whitelist
+ * here would punch through the moment a new system appears.
+ * 🔴 EASY TO GET WRONG: `METHOD=AES-128` (with or without `KEYFORMAT="identity"`) MUST return
+ * `null` — that is exactly what §7 permits downloading, because the key is served publicly by the
+ * server to anyone who asks.
  */
 export function drmSystemFromHlsPlaylist(text: string): string | null {
   let generic: string | null = null;
@@ -168,7 +176,7 @@ export function drmSystemFromHlsPlaylist(text: string): string | null {
           return name;
       }
     }
-    // Có DRM nhưng chưa biết hãng: nhớ lại rồi ĐI TIẾP, biết đâu dòng sau nói đích danh.
+    // DRM present but vendor unknown: remember it and KEEP GOING, a later line might name it explicitly.
     generic = 'DRM không rõ';
   }
   return generic;

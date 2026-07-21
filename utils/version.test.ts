@@ -7,7 +7,7 @@ import {
 } from './version';
 
 describe('formatVersionLabel', () => {
-  it('ghép thành "<name> v<version>"', () => {
+  it('joins into "<name> v<version>"', () => {
     expect(formatVersionLabel('Your Video Is Mine', '0.1.0')).toBe(
       'Your Video Is Mine v0.1.0',
     );
@@ -15,7 +15,7 @@ describe('formatVersionLabel', () => {
 });
 
 describe('parseVersion', () => {
-  it('tách được dạng chuẩn', () => {
+  it('parses the standard format', () => {
     expect(parseVersion('0.5.0')).toEqual({
       major: 0,
       minor: 5,
@@ -24,7 +24,7 @@ describe('parseVersion', () => {
     });
   });
 
-  it('bỏ tiền tố "v" của tag GitHub', () => {
+  it('strips the "v" prefix of a GitHub tag', () => {
     expect(parseVersion('v1.2.3')).toEqual({
       major: 1,
       minor: 2,
@@ -33,11 +33,11 @@ describe('parseVersion', () => {
     });
   });
 
-  it('tách prerelease thành từng định danh', () => {
+  it('splits prerelease into individual identifiers', () => {
     expect(parseVersion('1.0.0-rc.1')?.prerelease).toEqual(['rc', '1']);
   });
 
-  it('bỏ qua build metadata', () => {
+  it('ignores build metadata', () => {
     expect(parseVersion('1.0.0+build.5')).toEqual({
       major: 1,
       minor: 0,
@@ -46,54 +46,54 @@ describe('parseVersion', () => {
     });
   });
 
-  it('cắt khoảng trắng thừa', () => {
+  it('trims extra whitespace', () => {
     expect(parseVersion('  v2.0.0 \n')?.major).toBe(2);
   });
 
-  it('trả null khi sai dạng', () => {
+  it('returns null on invalid format', () => {
     for (const bad of ['', 'v', '1.2', 'abc', '1.2.3.4', 'v1.2.x', '-1.0.0']) {
       expect(parseVersion(bad), bad).toBeNull();
     }
   });
 });
 
-// Helper gọn cho các case so sánh bên dưới.
+// Compact helper for the comparison cases below.
 function cmp(a: string, b: string): number {
   return compareVersions(parseVersion(a)!, parseVersion(b)!);
 }
 
 describe('compareVersions', () => {
-  it('so theo SỐ chứ không theo chuỗi (0.10.0 > 0.9.0)', () => {
+  it('compares by NUMBER not by string (0.10.0 > 0.9.0)', () => {
     expect(cmp('0.10.0', '0.9.0')).toBe(1);
     expect(cmp('0.9.0', '0.10.0')).toBe(-1);
-    // Bẫy kinh điển của so chuỗi: '0.10.0' < '0.9.0' theo thứ tự từ điển.
+    // Classic string-comparison trap: '0.10.0' < '0.9.0' in lexicographic order.
     expect('0.10.0' < '0.9.0').toBe(true);
   });
 
-  it('so major rồi minor rồi patch', () => {
+  it('compares major then minor then patch', () => {
     expect(cmp('1.0.0', '0.99.99')).toBe(1);
     expect(cmp('1.2.0', '1.1.99')).toBe(1);
     expect(cmp('1.1.2', '1.1.1')).toBe(1);
   });
 
-  it('bằng nhau trả 0, tiền tố v không ảnh hưởng', () => {
+  it('equal returns 0, the v prefix has no effect', () => {
     expect(cmp('1.2.3', '1.2.3')).toBe(0);
     expect(cmp('v1.2.3', '1.2.3')).toBe(0);
   });
 
-  it('prerelease NHỎ hơn bản chính thức cùng số', () => {
+  it('prerelease is SMALLER than the release version with the same numbers', () => {
     expect(cmp('1.0.0-rc.1', '1.0.0')).toBe(-1);
     expect(cmp('1.0.0', '1.0.0-rc.1')).toBe(1);
   });
 
-  it('so prerelease: số theo số, số < chữ, ít định danh < nhiều', () => {
-    expect(cmp('1.0.0-rc.2', '1.0.0-rc.10')).toBe(-1); // 2 < 10 theo số
-    expect(cmp('1.0.0-1', '1.0.0-alpha')).toBe(-1); // số < chữ
-    expect(cmp('1.0.0-rc', '1.0.0-rc.1')).toBe(-1); // ít định danh hơn
+  it('prerelease comparison: numeric by number, numeric < alpha, fewer identifiers < more', () => {
+    expect(cmp('1.0.0-rc.2', '1.0.0-rc.10')).toBe(-1); // 2 < 10 numerically
+    expect(cmp('1.0.0-1', '1.0.0-alpha')).toBe(-1); // numeric < alphanumeric
+    expect(cmp('1.0.0-rc', '1.0.0-rc.1')).toBe(-1); // fewer identifiers
     expect(cmp('1.0.0-alpha', '1.0.0-beta')).toBe(-1); // ASCII
   });
 
-  it('chuỗi SemVer mẫu §11 xếp đúng thứ tự tăng dần', () => {
+  it('the §11 sample SemVer strings sort in ascending order', () => {
     const order = [
       '1.0.0-alpha',
       '1.0.0-alpha.1',
@@ -114,22 +114,22 @@ describe('compareVersions', () => {
 });
 
 describe('isUpdateAvailable', () => {
-  it('tag mới hơn -> true', () => {
+  it('newer tag -> true', () => {
     expect(isUpdateAvailable('v0.6.0', '0.5.0')).toBe(true);
     expect(isUpdateAvailable('v0.10.0', '0.9.0')).toBe(true);
   });
 
-  it('bằng hoặc cũ hơn -> false', () => {
+  it('equal or older -> false', () => {
     expect(isUpdateAvailable('v0.5.0', '0.5.0')).toBe(false);
     expect(isUpdateAvailable('v0.4.1', '0.5.0')).toBe(false);
   });
 
-  it('bản cài là prerelease thì bản chính thức cùng số là mới hơn', () => {
+  it('when the installed version is a prerelease, the release with the same numbers is newer', () => {
     expect(isUpdateAvailable('v1.0.0', '1.0.0-rc.1')).toBe(true);
     expect(isUpdateAvailable('v1.0.0-rc.1', '1.0.0')).toBe(false);
   });
 
-  it('sai dạng -> false (thà không báo còn hơn báo nhầm)', () => {
+  it('invalid format -> false (better not to report than to report wrong)', () => {
     expect(isUpdateAvailable('latest', '0.5.0')).toBe(false);
     expect(isUpdateAvailable('v0.6.0', '')).toBe(false);
     expect(isUpdateAvailable('', '')).toBe(false);

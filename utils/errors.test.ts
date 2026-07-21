@@ -2,18 +2,18 @@ import { describe, expect, it } from 'vitest';
 import { describeError } from './errors';
 
 describe('describeError', () => {
-  it('lấy message từ Error', () => {
+  it('gets the message from an Error', () => {
     expect(describeError(new Error('hỏng rồi'))).toBe('hỏng rồi');
   });
 
-  it('bóc tiền tố "Error: " khi @ffmpeg/ffmpeg reject bằng string', () => {
-    // worker.js:153 gửi `e.toString()` -> classes.js:54 reject nguyên chuỗi này.
+  it('strips the "Error: " prefix when @ffmpeg/ffmpeg rejects with a string', () => {
+    // worker.js:153 sends `e.toString()` -> classes.js:54 rejects with this exact string.
     expect(describeError('Error: failed to import ffmpeg-core.js')).toBe(
       'failed to import ffmpeg-core.js',
     );
   });
 
-  it('bóc cả tên lỗi dẫn xuất và DOMException', () => {
+  it('also strips derived error names and DOMException', () => {
     expect(describeError('TypeError: x is not a function')).toBe(
       'x is not a function',
     );
@@ -22,22 +22,22 @@ describe('describeError', () => {
     );
   });
 
-  it('KHÔNG cắt nhầm chuỗi thường có dấu ":"', () => {
+  it('does NOT wrongly cut an ordinary string containing ":"', () => {
     expect(describeError('HTTP 403: forbidden')).toBe('HTTP 403: forbidden');
     expect(describeError('Tải segment lỗi sau 4 lần thử: HTTP 403')).toBe(
       'Tải segment lỗi sau 4 lần thử: HTTP 403',
     );
   });
 
-  it('giữ nguyên chuỗi chỉ có mỗi tiền tố', () => {
+  it('keeps a string that is just the prefix unchanged', () => {
     expect(describeError('Error: ')).toBe('Error: ');
   });
 
-  it('lấy message từ object giống Error (cross-realm)', () => {
+  it('gets the message from an Error-like object (cross-realm)', () => {
     expect(describeError({ message: 'lỗi lạ' })).toBe('lỗi lạ');
   });
 
-  it('fallback String() cho giá trị khác', () => {
+  it('falls back to String() for other value types', () => {
     expect(describeError(42)).toBe('42');
   });
 });

@@ -3,9 +3,9 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-// Ratchet cho bộ ghép libav.js tự dựng. Mỗi khẳng định dưới đây ứng với một lỗi ĐÃ ĐO
-// được, thuộc loại XANH-mà-chết-câm: tsc/eslint/vitest đều không thấy, chỉ runtime mới lộ.
-// Đừng nới lỏng cái nào mà không đo lại.
+// Ratchet for the self-built libav.js bundle. Each assertion below corresponds to a bug that was
+// ACTUALLY MEASURED, of the GREEN-but-silently-dead kind: tsc/eslint/vitest all miss it, only runtime reveals it.
+// Don't loosen any of them without re-measuring.
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dist = resolve(root, 'public/libav');
@@ -16,35 +16,35 @@ const loader = resolve(dist, `libav-${VER}-${VARIANT}.mjs`);
 const factory = resolve(dist, `libav-${VER}-${VARIANT}.wasm.mjs`);
 const wasm = resolve(dist, `libav-${VER}-${VARIANT}.wasm.wasm`);
 
-describe('libav.js variant tự dựng trong public/libav', () => {
-  it('có đủ bộ ba file, đúng tên phiên bản', () => {
-    // Loader tự ghép tên factory từ base + VER + CONFIG. Đổi tên file = loader đi tìm
-    // một URL không tồn tại rồi chết lúc chạy.
+describe('Self-built libav.js variant in public/libav', () => {
+  it('has all three files, with the correct version name', () => {
+    // The loader assembles the factory name itself from base + VER + CONFIG. Renaming a file =
+    // the loader looks up a nonexistent URL and dies at runtime.
     expect(
       existsSync(loader),
-      `Thiếu ${loader} — xem public/libav/BUILD.md`,
+      `Missing ${loader} — see public/libav/BUILD.md`,
     ).toBe(true);
     expect(existsSync(factory)).toBe(true);
     expect(existsSync(wasm)).toBe(true);
   });
 
-  it('loader và factory đều là ESM có `export default`', () => {
-    // @ffmpeg/core từng được đóng gói nhầm bản UMD: worker type:"module" nạp bằng
-    // import() nên cần export default; bản UMD không có -> .default undefined ->
-    // HLS chết 100% mà không một dòng lỗi. Đừng để tái diễn với libav.
+  it('loader and factory are both ESM with `export default`', () => {
+    // @ffmpeg/core was once mistakenly packaged as the UMD build: the @ffmpeg/ffmpeg worker is
+    // type:"module" and loads via import(), which requires export default; the UMD build doesn't have one ->
+    // .default is undefined -> HLS died 100% with not a single line of error. Don't let this recur with libav.
     expect(readFileSync(loader, 'utf8')).toContain('export default');
     expect(readFileSync(factory, 'utf8')).toContain('export default');
   });
 
-  it('loader khai đúng VER và CONFIG mà tên file phụ thuộc vào', () => {
+  it('loader declares the correct VER and CONFIG that the file name depends on', () => {
     const src = readFileSync(loader, 'utf8');
     expect(src).toContain(`libav.VER="${VER}"`);
     expect(src).toContain(`libav.CONFIG="${VARIANT}"`);
   });
 
-  it('mang theo văn bản LGPL-2.1 — nghĩa vụ giấy phép, không phải hình thức', () => {
-    // Ta phát hành binary dựng từ nguồn LGPL nên PHẢI kèm giấy phép. @ffmpeg/core trước
-    // đây không kèm gì cả, và đó là một vi phạm riêng bên cạnh chuyện dán nhãn sai.
+  it('carries the LGPL-2.1 license text — a legal obligation, not a formality', () => {
+    // We ship a binary built from LGPL sources so we MUST include the license. @ffmpeg/core
+    // previously shipped none at all, and that was a separate violation on top of the mislabeling.
     expect(existsSync(resolve(dist, 'LICENSE.txt'))).toBe(true);
     expect(readFileSync(resolve(dist, 'LICENSE.txt'), 'utf8')).toContain(
       'GNU LESSER GENERAL PUBLIC LICENSE',
@@ -54,9 +54,9 @@ describe('libav.js variant tự dựng trong public/libav', () => {
     );
   });
 
-  it('config KHÔNG kéo theo encoder hay thành phần GPL', () => {
-    // Lý do tồn tại của cả gói W3.1: @ffmpeg/core là GPL vì nó link libx264/libx265,
-    // trong khi extension chỉ stream-copy và không bao giờ gọi tới encoder nào.
+  it('config does NOT pull in any encoder or GPL component', () => {
+    // The whole reason the W3.1 package exists: @ffmpeg/core is GPL because it links
+    // libx264/libx265, whereas the extension only stream-copies and never calls any encoder.
     const components: string[] = JSON.parse(
       readFileSync(resolve(dist, 'config.json'), 'utf8'),
     );
@@ -66,17 +66,17 @@ describe('libav.js variant tự dựng trong public/libav', () => {
     }
   });
 
-  it('giữ hai component "thừa mà bắt buộc" — đã trả giá mới biết', () => {
+  it('keeps two "seemingly unnecessary but mandatory" components — learned the hard way', () => {
     const components: string[] = JSON.parse(
       readFileSync(resolve(dist, 'config.json'), 'utf8'),
     );
-    // decoder-aac: dù chỉ stream-copy, thiếu nó thì find_stream_info trả
-    // sample_rate=0/channels=0 -> mp4 muxer chết "sample rate not set" (divide by zero).
+    // decoder-aac: even though it's stream-copy only, without it find_stream_info returns
+    // sample_rate=0/channels=0 -> the mp4 muxer dies with "sample rate not set" (divide by zero).
     expect(components).toContain('decoder-aac');
-    // avbsf: thiếu fragment này thì av_bsf_* không được export sang JS, dù bsf đã được
-    // biên dịch vào libavcodec.
+    // avbsf: without this fragment av_bsf_* isn't exported to JS, even though bsf was already
+    // compiled into libavcodec.
     expect(components).toContain('avbsf');
-    // demuxer-mpegts là lý do phải tự dựng: KHÔNG bản npm dựng sẵn nào có nó.
+    // demuxer-mpegts is the whole reason for the self-build: NO prebuilt npm variant has it.
     expect(components).toContain('demuxer-mpegts');
     expect(components).toContain('format-mp4');
   });

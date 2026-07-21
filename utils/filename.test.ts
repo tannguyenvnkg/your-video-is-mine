@@ -13,21 +13,21 @@ import {
 
 const bytes = (s: string) => new TextEncoder().encode(s).length;
 
-// Surrogate ĐƠN ĐỘC = dấu vết của một nhát cắt chẻ đôi emoji. Lưu ý: KHÔNG được kiểm bằng
-// /[\uD800-\uDFFF]/ — mọi emoji hợp lệ đều là một CẶP surrogate nên regex đó luôn khớp.
+// A LONE surrogate = evidence of a cut that split an emoji in half. Note: must NOT check with
+// /[\uD800-\uDFFF]/ — every valid emoji is a surrogate PAIR so that regex always matches.
 const hasLoneSurrogate = (s: string) =>
   /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
     s,
   );
 
 describe('sanitizeFilename', () => {
-  it('thay ký tự cấm bằng _', () => {
+  it('replaces forbidden characters with _', () => {
     expect(sanitizeFilename('a/b:c*?"<>|d')).toBe('a_b_c_d');
   });
-  it('bỏ khoảng trắng/dấu chấm thừa 2 đầu', () => {
+  it('trims extra whitespace/dots on both ends', () => {
     expect(sanitizeFilename('  ..Tên video..  ')).toBe('Tên video');
   });
-  it('GIỮ NGUYÊN chữ hoa, chữ số, dấu cách và gạch nối', () => {
+  it('KEEPS uppercase letters, digits, spaces and hyphens', () => {
     expect(sanitizeFilename('My Video 2024 HD-1080p')).toBe(
       'My Video 2024 HD-1080p',
     );
@@ -35,29 +35,29 @@ describe('sanitizeFilename', () => {
 });
 
 describe('extForMedia', () => {
-  it('theo đuôi trong URL', () => {
+  it('uses the URL extension', () => {
     expect(extForMedia('https://a.com/v.webm?x=1')).toBe('.webm');
   });
-  it('theo Content-Type khi URL không có đuôi video', () => {
+  it('uses Content-Type when the URL has no video extension', () => {
     expect(extForMedia('https://a.com/stream', 'video/mp4')).toBe('.mp4');
     expect(extForMedia('https://a.com/stream', 'video/webm')).toBe('.webm');
   });
-  it('mặc định .mp4', () => {
+  it('defaults to .mp4', () => {
     expect(extForMedia('https://a.com/stream')).toBe('.mp4');
   });
 });
 
 describe('baseNameFromUrl', () => {
-  it('lấy tên file không đuôi', () => {
+  it('extracts the filename without extension', () => {
     expect(baseNameFromUrl('https://a.com/dir/clip.mp4?t=1')).toBe('clip');
   });
-  it('fallback hostname khi path rỗng', () => {
+  it('falls back to hostname when the path is empty', () => {
     expect(baseNameFromUrl('https://a.com/')).toBe('a.com');
   });
 });
 
 describe('buildDownloadFilename', () => {
-  it('ghép tiêu đề + độ phân giải + đuôi', () => {
+  it('joins title + resolution + extension', () => {
     expect(
       buildDownloadFilename({
         url: 'https://a.com/x.mp4',
@@ -67,19 +67,19 @@ describe('buildDownloadFilename', () => {
     ).toBe('Phim hay_720p.mp4');
   });
 
-  it('làm sạch tiêu đề có ký tự cấm', () => {
+  it('sanitizes a title with forbidden characters', () => {
     expect(
       buildDownloadFilename({ url: 'https://a.com/x.mp4', title: 'a/b:c' }),
     ).toBe('a_b_c.mp4');
   });
 
-  it('fallback tên URL khi không có tiêu đề', () => {
+  it('falls back to a URL-derived name when there is no title', () => {
     expect(buildDownloadFilename({ url: 'https://a.com/dir/movie.webm' })).toBe(
       'movie.webm',
     );
   });
 
-  it('thêm thư mục con', () => {
+  it('adds a subfolder', () => {
     expect(
       buildDownloadFilename({
         url: 'https://a.com/x.mp4',
@@ -89,7 +89,7 @@ describe('buildDownloadFilename', () => {
     ).toBe('YVIM/clip.mp4');
   });
 
-  it('đuôi từ Content-Type khi URL không rõ', () => {
+  it('extension from Content-Type when the URL is unclear', () => {
     expect(
       buildDownloadFilename({
         url: 'https://a.com/play',
@@ -102,49 +102,51 @@ describe('buildDownloadFilename', () => {
 
 // ── W4.3 ────────────────────────────────────────────────────────────────────
 
-describe('truncateUtf8 + sanitizeFilename cắt theo BYTE', () => {
-  it('cắt emoji KHÔNG chẻ đôi surrogate', () => {
+describe('truncateUtf8 + sanitizeFilename cut by BYTE', () => {
+  it('cutting emoji does NOT split a surrogate pair', () => {
     const out = sanitizeFilename('🎬'.repeat(200));
     expect(bytes(out)).toBeLessThanOrEqual(200);
     expect(hasLoneSurrogate(out)).toBe(false);
   });
 
-  it('tiếng Việt có dấu vẫn nằm trong trần byte', () => {
+  it('accented Vietnamese text still stays within the byte cap', () => {
     expect(
       bytes(sanitizeFilename('Tên video '.repeat(40))),
     ).toBeLessThanOrEqual(200);
   });
 
-  // 🔴 GHIM THỨ TỰ: cắt TRƯỚC rồi mới tỉa 2 đầu. Làm ngược lại thì nhát cắt để lộ dấu '.' cuối.
-  it('không để lộ dấu chấm/gạch dưới cuối tên sau khi cắt', () => {
+  // 🔴 PIN THE ORDER: cut FIRST, then trim both ends. Doing it the other way lets the cut expose a
+  // trailing '.'.
+  it('does not leave a trailing dot/underscore/space after cutting', () => {
     const out = sanitizeFilename('a'.repeat(199) + '.xyz');
     expect(out.endsWith('.')).toBe(false);
     expect(out.endsWith('_')).toBe(false);
     expect(out.endsWith(' ')).toBe(false);
   });
 
-  it('ASCII dài 150 vẫn giữ nguyên (nới hơn trần 120 cũ)', () => {
+  it('150-char ASCII stays unchanged (looser than the old 120 cap)', () => {
     expect(sanitizeFilename('a'.repeat(150))).toBe('a'.repeat(150));
   });
 
-  it('bỏ ký tự vô hình lọt vào tên file', () => {
+  it('strips invisible characters that slip into the filename', () => {
     expect(sanitizeFilename('A\u200BB')).toBe('AB');
   });
 
-  // NBSP hay lọt ra từ tiêu đề trang. Phải thành khoảng trắng THƯỜNG, không giữ nguyên.
-  it('NBSP -> khoảng trắng thường', () => {
+  // NBSP often leaks in from page titles. Must become a NORMAL space, not be kept as-is.
+  it('NBSP -> normal space', () => {
     const out = sanitizeFilename('Tên\u00A0video\u202Fhay');
     expect(out).toBe('Tên video hay');
     expect(/[\u00A0\u2007\u202F]/.test(out)).toBe(false);
   });
 
-  it('truncateUtf8 đếm theo byte chứ không theo ký tự', () => {
+  it('truncateUtf8 counts by byte, not by character', () => {
     expect(bytes(truncateUtf8('é'.repeat(100), 10))).toBeLessThanOrEqual(10);
   });
 
-  // 🔴 Trần LẺ so với bề rộng emoji (5 byte / emoji 4 byte) -> nhát cắt rơi ĐÚNG giữa cặp
-  // surrogate nếu lặp theo UTF-16 unit. Trần chẵn như 200 thì lỗi này lọt do ăn may số học.
-  it('trần lẻ vẫn không chẻ đôi emoji', () => {
+  // 🔴 An ODD cap relative to emoji width (5 bytes / 4-byte emoji) -> the cut falls RIGHT in the
+  // middle of a surrogate pair if you iterate by UTF-16 unit. An even cap like 200 lets this bug
+  // slip through by numeric luck.
+  it('an odd cap still does not split an emoji', () => {
     const out = truncateUtf8('🎬🎬🎬', 5);
     expect(bytes(out)).toBeLessThanOrEqual(5);
     expect(hasLoneSurrogate(out)).toBe(false);
@@ -162,25 +164,26 @@ describe('renderFilenameTemplate', () => {
     time: '143500',
   };
 
-  it('thay token', () => {
+  it('substitutes tokens', () => {
     expect(renderFilenameTemplate('{title}{res}', vars)).toBe('A_720p');
   });
 
-  // 🔴 Dấu gạch nằm TRONG token {res} -> không có video nào ra tên 'A_'.
-  it('res rỗng thì KHÔNG để lại dấu gạch thừa', () => {
+  // 🔴 The hyphen lives INSIDE the {res} token -> no video should ever end up named 'A_'.
+  it('an empty res leaves no dangling hyphen', () => {
     expect(renderFilenameTemplate('{title}{res}', { ...vars, res: '' })).toBe(
       'A',
     );
   });
 
-  // 🔴 '{' và '}' KHÔNG nằm trong danh sách ký tự cấm -> token lạ mà giữ nguyên là nó ra tới đĩa.
-  it('token lạ -> rỗng, KHÔNG để dấu ngoặc lọt ra tên file', () => {
+  // 🔴 '{' and '}' are NOT in the forbidden-character list -> keeping an unknown token as-is would
+  // let it reach disk.
+  it('an unknown token -> empty, braces must NOT leak into the filename', () => {
     expect(renderFilenameTemplate('{title}_{nope}', vars)).toBe('A_');
   });
 });
 
 describe('isUsableTemplate', () => {
-  it('mẫu phải sinh được tên PHÂN BIỆT giữa các video', () => {
+  it('the template must produce names that DISTINGUISH between videos', () => {
     expect(isUsableTemplate('{title}{res}')).toBe(true);
     expect(isUsableTemplate('{basename}')).toBe(true);
     expect(isUsableTemplate('{date}')).toBe(false);
@@ -188,16 +191,18 @@ describe('isUsableTemplate', () => {
   });
 });
 
-describe('buildDownloadFilename + mẫu tên', () => {
-  it('mẫu mặc định cho ra ĐÚNG kết quả như trước W4.3', () => {
+describe('buildDownloadFilename + filename templates', () => {
+  it('the default template produces EXACTLY the pre-W4.3 result', () => {
     expect(DEFAULT_FILENAME_TEMPLATE).toBe('{title}{res}');
   });
 
-  it('mẫu có {site} và {date}', () => {
-    // 🔴 W4.3 nợ — {date} lấy theo giờ MÁY (new Date(now) getters local), nên kỳ vọng PHẢI dựng từ
-    // chính new Date(now), KHÔNG hardcode chuỗi. Bản cũ hardcode '2026-07-19' + Date.UTC làm máy ở
-    // UTC+13/+14 ĐỎ OAN (12:00Z ngày 19 rơi sang ngày 20 giờ địa phương). Đây là test đo múi giờ
-    // của máy chạy test, không phải đo hành vi -> phải tự-nhất-quán với môi trường.
+  it('a template with {site} and {date}', () => {
+    // 🔴 W4.3 debt — {date} is derived from the MACHINE's clock (new Date(now) getters, local), so
+    // the expectation MUST be built from that same new Date(now), NOT hardcoded. The old version
+    // hardcoded '2026-07-19' + Date.UTC, which FALSELY fails on machines at UTC+13/+14 (12:00Z on
+    // the 19th rolls over to the 20th in local time). Nearly reached the opposite conclusion. This
+    // test measures the TEST MACHINE's timezone, not behavior — it must be self-consistent with the
+    // environment.
     const now = Date.UTC(2026, 6, 19, 12, 0, 0);
     const d = new Date(now);
     const p2 = (n: number) => String(n).padStart(2, '0');
@@ -213,11 +218,12 @@ describe('buildDownloadFilename + mẫu tên', () => {
     ).toBe(`site.com_A_${expectDate}.mp4`);
   });
 
-  // 🔴 W4.3 nợ — {time} và hàm two() (pad 2 chữ số) là token ĐÃ SHIP mà chưa có một assertion nào.
-  // Dùng new Date(local components) rồi đọc lại local components -> ĐỘC LẬP MÚI GIỜ (không như
-  // Date.UTC). Chọn giờ/phút/giây MỘT CHỮ SỐ để ghim đúng two(): thiếu pad thì '305' thay vì '030509'.
-  it('{time} = HHMMSS theo giờ máy, có pad 2 chữ số (ghim two())', () => {
-    const now = new Date(2026, 0, 2, 3, 5, 9).getTime(); // 03:05:09 giờ địa phương
+  // 🔴 W4.3 debt — {time} and the two() helper (2-digit padding) were SHIPPED tokens with zero
+  // assertions. Using new Date(local components) then reading back local components ->
+  // TIMEZONE-INDEPENDENT (unlike Date.UTC). Picking single-digit hour/minute/second pins down two()
+  // exactly: missing the pad would give '305' instead of '030509'.
+  it('{time} = HHMMSS in local time, 2-digit padded (pins down two())', () => {
+    const now = new Date(2026, 0, 2, 3, 5, 9).getTime(); // 03:05:09 local time
     expect(
       buildDownloadFilename({
         url: 'https://a.com/x.mp4',
@@ -228,7 +234,7 @@ describe('buildDownloadFilename + mẫu tên', () => {
     ).toBe('A_030509.mp4');
   });
 
-  it('{time} pad cả ca hai chữ số (không cắt cụt số lớn)', () => {
+  it('{time} pads both digits (does not truncate a large number)', () => {
     const now = new Date(2026, 0, 2, 23, 47, 58).getTime();
     expect(
       buildDownloadFilename({
@@ -240,7 +246,7 @@ describe('buildDownloadFilename + mẫu tên', () => {
     ).toBe('A_234758.mp4');
   });
 
-  it('{title} rỗng -> lùi về tên từ URL', () => {
+  it('empty {title} -> falls back to the URL-derived name', () => {
     expect(
       buildDownloadFilename({
         url: 'https://a.com/dir/movie.webm',
@@ -250,8 +256,9 @@ describe('buildDownloadFilename + mẫu tên', () => {
     ).toBe('movie.webm');
   });
 
-  // 🔴 Đường lùi TẦNG HAI, chạy SAU sanitize: mẫu toàn token lạ sẽ ra chuỗi rỗng.
-  it('mẫu vô nghĩa -> vẫn ra tên dùng được, không bao giờ rỗng', () => {
+  // 🔴 SECOND-TIER fallback, runs AFTER sanitize: a template of only unknown tokens produces an
+  // empty string.
+  it('a nonsensical template still produces a usable name, never empty', () => {
     expect(
       buildDownloadFilename({
         url: 'https://a.com/dir/movie.webm',
@@ -263,9 +270,10 @@ describe('buildDownloadFilename + mẫu tên', () => {
     ).toBe('a.com.mp4');
   });
 
-  // 🔴 GHIM THỨ TỰ: mẫu '...' render ra CHUỖI KHÁC RỖNG, chỉ sau khi sanitize mới thành rỗng.
-  // Kiểm đường lùi TRƯỚC sanitize là lọt ca này -> ra file tên '.mp4' (file ẩn, không đuôi).
-  it('mẫu chỉ toàn ký tự bị sanitize ăn sạch -> vẫn lùi được', () => {
+  // 🔴 PIN THE ORDER: the template '...' renders to a NON-EMPTY string, and only becomes empty
+  // AFTER sanitize. Checking the fallback BEFORE sanitize misses this case -> a file named '.mp4'
+  // (a hidden file with no visible extension).
+  it('a template made entirely of sanitize-stripped characters -> still falls back correctly', () => {
     expect(
       buildDownloadFilename({
         url: 'https://a.com/dir/movie.webm',
@@ -274,8 +282,9 @@ describe('buildDownloadFilename + mẫu tên', () => {
     ).toBe('movie.webm');
   });
 
-  // 🔴 Mẫu do user gõ KHÔNG được đẻ ra thư mục: '/' duy nhất hợp lệ là dấu ngăn folder.
-  it('mẫu KHÔNG chèn được dấu ngăn thư mục', () => {
+  // 🔴 A user-typed template must NOT be able to inject a directory separator: '/' is only valid
+  // as the folder separator.
+  it('a template cannot inject a directory separator', () => {
     expect(
       buildDownloadFilename({
         url: 'https://a.com/x.mp4',

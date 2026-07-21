@@ -1,5 +1,5 @@
-// Logic THUẦN phân loại media (không phụ thuộc chrome API) -> unit test được.
-// HLS (.m3u8) là ưu tiên số 1 theo yêu cầu chủ dự án.
+// PURE media classification logic (no chrome API dependency) -> unit testable.
+// HLS (.m3u8) is priority number 1 per the project owner's requirement.
 
 import type { MediaItem, MediaType, MediaDetectSource } from './types';
 
@@ -8,7 +8,7 @@ export interface DetectInput {
   contentType?: string | null;
 }
 
-// Đuôi file progressive: video tải trực tiếp.
+// Progressive file extensions: directly downloadable video.
 const PROGRESSIVE_EXTS = new Set([
   '.mp4',
   '.webm',
@@ -24,10 +24,10 @@ const PROGRESSIVE_EXTS = new Set([
   '.3gp',
 ]);
 
-// Đuôi file segment con của HLS/DASH -> KHÔNG phải media gốc, bỏ qua.
+// HLS/DASH child segment file extensions -> NOT original media, skip.
 const SEGMENT_EXTS = new Set(['.ts', '.m4s', '.aac', '.vtt', '.m4a']);
 
-// Content-Type nhận diện HLS.
+// Content-Type identifying HLS.
 const HLS_CONTENT_TYPES = new Set([
   'application/vnd.apple.mpegurl',
   'application/x-mpegurl',
@@ -37,24 +37,24 @@ const HLS_CONTENT_TYPES = new Set([
   'vnd.apple.mpegurl',
 ]);
 
-// Content-Type nhận diện DASH.
+// Content-Type identifying DASH.
 const DASH_CONTENT_TYPES = new Set(['application/dash+xml']);
 
-// Content-Type của segment con -> bỏ qua.
+// Content-Type of a child segment -> skip.
 const SEGMENT_CONTENT_TYPES = new Set(['video/mp2t', 'video/iso.segment']);
 
-/** Lấy pathname (bỏ query/hash) từ URL, an toàn với URL không hợp lệ. */
+/** Get the pathname (strip query/hash) from a URL, safe with invalid URLs. */
 export function getPathname(url: string): string {
   try {
     return new URL(url).pathname;
   } catch {
-    // URL tương đối/không hợp lệ: cắt query & hash thủ công.
+    // Relative/invalid URL: strip query & hash manually.
     const noHash = url.split('#', 1)[0] ?? url;
     return noHash.split('?', 1)[0] ?? noHash;
   }
 }
 
-/** Lấy đuôi file (kèm dấu chấm, lowercase) từ URL. '' nếu không có. */
+/** Get the file extension (including the dot, lowercase) from a URL. '' if none. */
 export function getExtension(url: string): string {
   const path = getPathname(url);
   const slash = path.lastIndexOf('/');
@@ -63,12 +63,12 @@ export function getExtension(url: string): string {
   return dot >= 0 ? name.slice(dot).toLowerCase() : '';
 }
 
-/** Chuẩn hoá Content-Type: bỏ tham số sau ';', trim, lowercase. */
+/** Normalize Content-Type: strip parameters after ';', trim, lowercase. */
 function normalizeContentType(ct?: string | null): string {
   return (ct ?? '').split(';', 1)[0]!.trim().toLowerCase();
 }
 
-/** Segment con (init/.ts/.m4s...) -> không phải media gốc, cần bỏ qua. */
+/** Child segment (init/.ts/.m4s...) -> not original media, must be skipped. */
 export function isLikelySegment(
   url: string,
   contentType?: string | null,
@@ -76,7 +76,7 @@ export function isLikelySegment(
   const ext = getExtension(url);
   if (SEGMENT_EXTS.has(ext)) return true;
   if (SEGMENT_CONTENT_TYPES.has(normalizeContentType(contentType))) return true;
-  // init segment fMP4: tên chứa 'init' (init.mp4, init-1.mp4, video_init.mp4...).
+  // fMP4 init segment: name contains 'init' (init.mp4, init-1.mp4, video_init.mp4...).
   const path = getPathname(url).toLowerCase();
   const file = path.slice(path.lastIndexOf('/') + 1);
   if (/(^|[._-])init([._-][^/]*)?\.(mp4|m4s)$/.test(file)) return true;
@@ -84,37 +84,37 @@ export function isLikelySegment(
 }
 
 /**
- * Phân loại media từ URL + Content-Type.
- * @returns MediaType hoặc null (không phải media, hoặc là segment con).
+ * Classify media from URL + Content-Type.
+ * @returns MediaType or null (not media, or a child segment).
  */
 export function classifyMedia(input: DetectInput): MediaType | null {
-  // Segment con -> bỏ trước tiên.
+  // Child segment -> skip first.
   if (isLikelySegment(input.url, input.contentType)) return null;
 
   const ext = getExtension(input.url);
   const ct = normalizeContentType(input.contentType);
 
-  // HLS ưu tiên số 1.
+  // HLS is priority number 1.
   if (ext === '.m3u8' || HLS_CONTENT_TYPES.has(ct)) return 'hls';
 
   // DASH.
   if (ext === '.mpd' || DASH_CONTENT_TYPES.has(ct)) return 'dash';
 
-  // Progressive: content-type video/* hoặc đuôi file quen thuộc.
+  // Progressive: content-type video/* or a known file extension.
   if (ct.startsWith('video/')) return 'progressive';
   if (PROGRESSIVE_EXTS.has(ext)) return 'progressive';
 
   return null;
 }
 
-/** Hash chuỗi ổn định (FNV-1a 32-bit) -> id ngắn cho media. */
+/** Stable string hash (FNV-1a 32-bit) -> short id for media. */
 export function stableHash(input: string): string {
   let h = 0x811c9dc5;
   for (let i = 0; i < input.length; i++) {
     h ^= input.charCodeAt(i);
     h = Math.imul(h, 0x01000193);
   }
-  // >>> 0 để thành unsigned; base36 cho gọn.
+  // >>> 0 to make it unsigned; base36 for compactness.
   return (h >>> 0).toString(36);
 }
 
@@ -122,10 +122,10 @@ export function mediaId(url: string): string {
   return stableHash(url);
 }
 
-/** Rút gọn URL để hiển thị (giữ đầu + đuôi, chèn '…' ở giữa). */
+/** Shorten a URL for display (keep head + tail, insert '…' in the middle). */
 export function shortenUrl(url: string, max = 60): string {
   if (url.length <= max) return url;
-  const budget = max - 1; // trừ ký tự '…'
+  const budget = max - 1; // subtract the '…' character
   const head = Math.ceil(budget / 2);
   const tail = Math.floor(budget / 2);
   return `${url.slice(0, head)}…${url.slice(url.length - tail)}`;
@@ -139,11 +139,11 @@ export interface BuildMediaInput extends DetectInput {
   acceptRanges?: boolean;
   detectSource?: MediaDetectSource;
   detectedAt: number;
-  /** W2.1 — header THẬT player đã gửi cho URL này (từ `onSendHeaders`). */
+  /** W2.1 — the REAL headers the player sent for this URL (from `onSendHeaders`). */
   sentHeaders?: Record<string, string>;
 }
 
-/** Dựng MediaItem từ một lần phát hiện. null nếu không phải media. */
+/** Build a MediaItem from a single detection. null if not media. */
 export function buildMediaItem(input: BuildMediaInput): MediaItem | null {
   const type = classifyMedia(input);
   if (!type) return null;
@@ -164,11 +164,11 @@ export function buildMediaItem(input: BuildMediaInput): MediaItem | null {
 }
 
 /**
- * Thêm/bổ sung media theo url:
- * - Chưa có url -> thêm mới.
- * - Đã có url -> MERGE các field còn thiếu (contentType/size/acceptRanges/pageUrl/title/...)
- *   từ bản phát hiện mới (vd onBeforeRequest thêm trước, onHeadersReceived bổ sung header sau).
- * @returns list (mới nếu thay đổi, cũ nếu không) + cờ changed.
+ * Add/augment media by url:
+ * - url not present -> add new.
+ * - url already present -> MERGE in missing fields (contentType/size/acceptRanges/pageUrl/title/...)
+ *   from the new detection (e.g. onBeforeRequest adds first, onHeadersReceived fills in headers later).
+ * @returns the list (new one if changed, old one otherwise) + a changed flag.
  */
 export function upsertMedia(
   list: MediaItem[],
@@ -181,7 +181,7 @@ export function upsertMedia(
 
   const existing = list[idx]!;
   let dirty = false;
-  // Chỉ điền khi field cũ trống và field mới có giá trị (không ghi đè dữ liệu đã biết).
+  // Only fill in when the old field is empty and the new field has a value (never overwrite known data).
   const pick = <T>(cur: T | undefined, inc: T | undefined): T | undefined => {
     if (
       (cur === undefined || cur === null) &&
@@ -200,20 +200,21 @@ export function upsertMedia(
     size: pick(existing.size, item.size),
     acceptRanges: pick(existing.acceptRanges, item.acceptRanges),
     pageUrl: pick(existing.pageUrl, item.pageUrl),
-    // 🔴 W4.3 — `detectPageUrl` CỐ Ý VẮNG MẶT trong danh sách merge này. Đừng "sửa" bằng cách thêm
-    // nó vào: bản trước đã thêm và review đối kháng bắt được đó là LỖI. Ý nghĩa của trường này là
-    // "URL trang lúc media được phát hiện LẦN ĐẦU" — điền muộn ở nhánh merge nghĩa là đóng dấu một
-    // media của trang A bằng URL trang B (cùng URL media hay được báo lại sau khi user đã chuyển
-    // trang SPA). Cổng sameDocument khi đó quay ra XÁC NHẬN cái sai, tức là tệ hơn không có cổng.
-    // Thiếu dấu thì cổng đóng lại và ta lùi về tên từ URL — thà thiếu tên còn hơn SAI tên.
+    // 🔴 W4.3 — `detectPageUrl` IS DELIBERATELY ABSENT from this merge list. Don't "fix" this by
+    // adding it: an earlier version did add it and adversarial review caught that as a BUG. The meaning of
+    // this field is "the page URL at the time the media was FIRST detected" — filling it in late on the
+    // merge branch means stamping page-A media with page-B's URL (the same media URL gets re-reported
+    // after the user has navigated an SPA page). The sameDocument gate would then turn around and
+    // CONFIRM the wrong thing, which is worse than having no gate at all.
+    // Missing the stamp closes the gate and we fall back to a name derived from the URL — better a missing name than a WRONG one.
     title: pick(existing.title, item.title),
     width: pick(existing.width, item.width),
     height: pick(existing.height, item.height),
     durationSec: pick(existing.durationSec, item.durationSec),
-    // 🔴 W2.1 — BẮT BUỘC có mặt trong danh sách merge này. `onBeforeRequest` tạo item TRƯỚC,
-    // `onSendHeaders` bắt được header SAU, nên header LUÔN tới ở nhánh merge chứ không bao giờ ở
-    // nhánh thêm-mới. Thiếu dòng này thì `{...existing}` nuốt bản chụp và `dirty` không bật ->
-    // changed=false -> addTabMedia không ghi gì -> W2.1 chết 100% mà không một lỗi nào hiện ra.
+    // 🔴 W2.1 — MUST be present in this merge list. `onBeforeRequest` creates the item FIRST,
+    // `onSendHeaders` captures the headers LATER, so headers ALWAYS arrive on the merge branch, never on
+    // the add-new branch. Without this line, `{...existing}` swallows the captured snapshot and `dirty`
+    // never gets set -> changed=false -> addTabMedia writes nothing -> W2.1 dies 100% with zero errors surfacing.
     sentHeaders: pick(existing.sentHeaders, item.sentHeaders),
   };
 
@@ -224,13 +225,13 @@ export function upsertMedia(
 }
 
 /**
- * W4.2 — đánh dấu các item là playlist CON của `parentUrl` (ẩn khỏi popup).
+ * W4.2 — mark items as CHILD playlists of `parentUrl` (hidden from the popup).
  *
- * Gọi khi vừa parse xong một master: `childUrls` là kết quả `childUrlsOfMaster()`.
- * Idempotent (đánh dấu lại không đổi gì) và KHÔNG đột biến list/item gốc.
+ * Called right after a master finishes parsing: `childUrls` is the result of `childUrlsOfMaster()`.
+ * Idempotent (marking again changes nothing) and does NOT mutate the original list/items.
  *
- * `changed: false` khi không có gì để đánh -> caller đừng ghi storage: ghi thừa sẽ bắn
- * `storage.onChanged` -> popup render lại vô ích.
+ * `changed: false` when there's nothing to mark -> the caller should skip writing to storage: an
+ * unnecessary write would fire `storage.onChanged` -> the popup re-renders for nothing.
  */
 export function markChildren(
   list: MediaItem[],
@@ -240,7 +241,7 @@ export function markChildren(
   const set = new Set(childUrls);
   let changed = false;
   const next = list.map((m) => {
-    // Master KHÔNG bao giờ là con của chính nó (thủ sẵn, dù childUrlsOfMaster đã loại).
+    // A master is NEVER its own child (defensive, even though childUrlsOfMaster already excludes it).
     if (m.child || m.url === parentUrl || !set.has(m.url)) return m;
     changed = true;
     return { ...m, child: true, parentUrl };
@@ -248,7 +249,7 @@ export function markChildren(
   return changed ? { list: next, changed } : { list, changed: false };
 }
 
-/** Item hiện lên popup: bỏ playlist con của master đã parse (W4.2). */
+/** Items shown in the popup: exclude child playlists of an already-parsed master (W4.2). */
 export function visibleMedia(list: MediaItem[]): MediaItem[] {
   return list.filter((m) => !m.child);
 }

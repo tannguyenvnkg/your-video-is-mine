@@ -76,12 +76,12 @@ import type {
   VariantsResponse,
 } from '@/utils/messages';
 
-// Phase kết thúc của job HLS (done/error/cancelled) — dùng cho cả badge lẫn đối soát rule spoof.
+// Terminal phase of an HLS job (done/error/cancelled) — used for both the badge and spoof-rule reconciliation.
 const TERMINAL_PHASES = new Set<HlsPhase>(['done', 'error', 'cancelled']);
 
 export default defineBackground(() => {
-  // Serialize ghi storage để tránh race read-modify-write giữa nhiều event.
-  // ĐIỀU PHỐI TẠM THỜI trong 1 vòng đời SW; chrome.storage.session mới là NGUỒN SỰ THẬT.
+  // Serialize storage writes to avoid a read-modify-write race between multiple events.
+  // TEMPORARY coordination within one SW lifetime; chrome.storage.session is the SOURCE OF TRUTH.
   let writeChain: Promise<unknown> = Promise.resolve();
   function serialize<T>(fn: () => Promise<T>): Promise<T> {
     const run = writeChain.then(fn, fn);
@@ -100,7 +100,7 @@ export default defineBackground(() => {
       });
       await browser.action.setBadgeBackgroundColor({ tabId, color: '#2f6feb' });
     } catch {
-      // tab có thể đã đóng.
+      // tab may have already closed.
     }
   }
 
@@ -119,33 +119,33 @@ export default defineBackground(() => {
     } catch {
       // best-effort.
     }
-    // W4.2 — mọi .m3u8 đều có thể là master; chỉ đọc nó ra mới biết con của nó là ai.
+    // W4.2 — any .m3u8 could be a master; the only way to know its children is to read it.
     if (item.type === 'hls') void learnMasterChildren(input.tabId, item.url);
   }
 
   /**
-   * W4.2 — đọc một master để biết playlist con của nó, rồi ẩn các dòng con khỏi popup.
+   * W4.2 — read a master to learn its child playlists, then hide the child rows from the popup.
    *
-   * ĐO THẬT (Edge + extension, fixture tách tiếng): một video = 3 dòng "HLS" y hệt nhau
-   * (master + video.m3u8 + audio.m3u8) vì webRequest thấy mọi request .m3u8 của player.
+   * MEASURED IN REAL LIFE (Edge + extension, audio-split fixture): one video = 3 identical "HLS"
+   * rows (master + video.m3u8 + audio.m3u8) because webRequest sees every .m3u8 request the player makes.
    *
-   * Vì sao FETCH LẠI master (player vừa fetch rồi): body của request không đọc được từ MV3
-   * webRequest — đó là hạn chế của API, không phải lựa chọn. Cú fetch này thường trúng HTTP cache
-   * của trình duyệt. Best-effort hoàn toàn: 403/mạng hỏng -> không học được gì -> popup về đúng
-   * hành vi cũ (hiện cả 3 dòng), KHÔNG bao giờ chặn đường tải.
-   * ⚠️ Hàm này chưa spoof Referer (§2.3, để W2.2 sửa) -> trên site chống hotlink nó sẽ 403 và
-   * W4.2 im lặng không có tác dụng. Đó là giới hạn ĐÃ BIẾT, không phải lỗi ẩn.
+   * Why RE-FETCH the master (the player just fetched it): a request's body cannot be read from MV3
+   * webRequest — that's an API limitation, not a choice. This fetch usually hits the browser's HTTP
+   * cache. Fully best-effort: 403/network failure -> nothing learned -> popup falls back to the old
+   * behavior (shows all 3 rows), NEVER blocks the download path.
+   * ⚠️ This function does not yet spoof Referer (§2.3, left for W2.2 to fix) -> on an anti-hotlink
+   * site it will 403 and W4.2 silently has no effect. That's a KNOWN limitation, not a hidden bug.
    */
   async function learnMasterChildren(
     tabId: number,
     url: string,
   ): Promise<void> {
     try {
-      // Đã biết là con của master khác -> chắc chắn không phải master -> khỏi tốn một cú fetch.
+      // Already known to be a child of another master -> definitely not a master -> skip the fetch.
       const state = await getTabState(tabId);
       if (state.childUrls?.[url]) return;
-      // Xí phần TRƯỚC khi fetch: cùng một URL được onBeforeRequest và onHeadersReceived báo hai
-      // lần, không xí thì fetch đôi.
+      // Claim BEFORE fetching: the same URL is reported twice, by onBeforeRequest and
+      // onHeadersReceived — without claiming it we'd fetch twice.
       if (!(await serialize(() => claimMasterParse(tabId, url)))) return;
 
       // W2.1 debt (b) — replay the player's REAL Referer/Origin for this master, but NOT its token.
@@ -177,15 +177,15 @@ export default defineBackground(() => {
       const children = childUrlsOfMaster(
         parseHlsManifest(await res.text(), url),
       );
-      if (children.length === 0) return; // media playlist -> không có con.
+      if (children.length === 0) return; // media playlist -> no children.
       const count = await serialize(() => addChildUrls(tabId, url, children));
       if (count !== null) await updateBadge(tabId, count);
     } catch {
-      // best-effort: ẩn dòng rác là tiện nghi, không được phép làm hỏng phát hiện.
+      // best-effort: hiding duplicate rows is a nicety, it must never break detection.
     }
   }
 
-  // Ghi media dạng blob/MSE (URL blob: không qua classify -> tạo item type 'blob' trực tiếp).
+  // Record blob/MSE media (blob: URL doesn't go through classify -> create a 'blob' type item directly).
   async function recordBlobMedia(input: {
     url: string;
     tabId: number;
@@ -213,8 +213,9 @@ export default defineBackground(() => {
     }
   }
 
-  // Ghi manifest HLS/DASH bị nguỵ trang (content script sniff từ body). URL có thể mang đuôi giả
-  // (.jpg) nên KHÔNG qua classifyMedia -> tạo item type 'hls'/'dash' TRỰC TIẾP theo mediaType đã nhận.
+  // Record a disguised HLS/DASH manifest (content script sniffed it from the body). The URL may
+  // carry a fake extension (.jpg) so it does NOT go through classifyMedia -> create an 'hls'/'dash'
+  // type item DIRECTLY using the received mediaType.
   async function recordManifestMedia(input: {
     url: string;
     mediaType: ManifestKind;
@@ -301,25 +302,27 @@ export default defineBackground(() => {
   );
 
   /**
-   * W2.1 — BẮT header THẬT mà player của trang gửi, để sau này PHÁT LẠI thay vì BỊA (§2.11).
+   * W2.1 — CAPTURE the REAL headers the page's player sends, to REPLAY later instead of FABRICATING them (§2.11).
    *
-   * `extraHeaders` là BẮT BUỘC: thiếu nó Chrome giấu Cookie/Referer/Origin khỏi listener. Đã đo
-   * trong Edge thật — có `extraHeaders` thì thấy đủ `Referer`, `Cookie`, `X-Playback-Session-Id`.
+   * `extraHeaders` is REQUIRED: without it Chrome hides Cookie/Referer/Origin from the listener.
+   * Measured in real Edge — with `extraHeaders` we see the full `Referer`, `Cookie`, `X-Playback-Session-Id`.
    *
-   * VÌ SAO ĐI QUA `recordMedia` chứ không nuôi một Map riêng: lộ trình gợi ý "Map requestId ->
-   * headers có quét TTL", nhưng service worker MV3 EPHEMERAL — biến toàn cục chết theo SW và bản
-   * chụp sẽ bốc hơi ngay trước lúc user bấm tải (đúng loại lỗi im lặng đã giết dự án này 3 lần).
-   * Đi qua `recordMedia` thì bản chụp nằm luôn trong `chrome.storage.session` cùng MediaItem: sống
-   * qua SW chết, tự dọn theo tab, tự tuân epoch điều hướng. Không cần TTL, không cần Map.
+   * WHY GO THROUGH `recordMedia` instead of keeping a separate Map: the roadmap suggested "a
+   * requestId -> headers Map with TTL sweeping", but the MV3 service worker is EPHEMERAL — a global
+   * variable dies with the SW and the capture would evaporate right before the user clicks download
+   * (exactly the kind of silent failure that has killed this project 3 times). Going through
+   * `recordMedia` puts the capture straight into `chrome.storage.session` alongside the MediaItem: it
+   * survives SW death, cleans up per-tab automatically, and obeys the navigation epoch automatically.
+   * No TTL needed, no Map needed.
    *
-   * Lọc rác miễn phí: `buildMediaItem` trả null cho URL không phải media, nên segment/ảnh/script
-   * không sinh ghi nào — chỉ manifest & file media mới được lưu header.
+   * Free garbage filtering: `buildMediaItem` returns null for non-media URLs, so segments/images/scripts
+   * don't produce any record — only manifests & media files get their headers stored.
    */
   browser.webRequest.onSendHeaders.addListener(
     (details): undefined => {
       if (!shouldCaptureRequest(details, browser.runtime.id)) return undefined;
-      // Lọc NGAY LÚC BẮT: Cookie & bạn bè không bao giờ được phát lại nên đừng lưu chúng vào
-      // storage.session (listener chạy trên <all_urls>, user chưa hề bấm tải gì).
+      // Filter RIGHT AT CAPTURE TIME: Cookie and friends must never be replayed, so don't store them
+      // in storage.session (this listener runs on <all_urls>, before the user has clicked download at all).
       const sentHeaders = filterCapturable(
         capturedFromHeaderList(details.requestHeaders ?? []),
       );
@@ -340,17 +343,19 @@ export default defineBackground(() => {
     ['requestHeaders', 'extraHeaders'],
   );
 
-  // Router message.
+  // Message router.
   //
-  // HỢP ĐỒNG: trả `true` ĐỒNG BỘ cho mọi nhánh async, rồi gọi `sendResponse` sau.
-  // TUYỆT ĐỐI KHÔNG trả Promise: đó là hợp đồng của webextension-polyfill (dự án KHÔNG dùng).
-  // Chrome chỉ nhận Promise từ bản 148 và còn "rolling out gradually" -> máy dev (Edge 150) chạy
-  // ngon trong khi máy user cũ hơn nhận về `undefined` — KHÔNG phải lỗi, nên `catch` ở
-  // utils/messages.ts không bao giờ bắn: popup chỉ lặng lẽ nhận undefined rồi nổ chỗ khác.
-  // Chrome docs: `return true` chạy "whether this capability is enabled or not".
-  // Ghim bằng tests/background-messaging.test.ts (KHÔNG đặt test trong entrypoints/ — WXT coi mọi
-  // file ở đó là entrypoint và `pnpm build` sẽ chết vì trùng tên). Listener KHÔNG được là `async`:
-  // hàm `async` LUÔN trả Promise, tức là quay lại đúng lỗi này mà tsc/lint không hề kêu.
+  // CONTRACT: return `true` SYNCHRONOUSLY for every async branch, then call `sendResponse` later.
+  // ABSOLUTELY DO NOT return a Promise: that's the webextension-polyfill contract (this project does
+  // NOT use it). Chrome only accepts a Promise from build 148 onward, and that's still "rolling out
+  // gradually" -> the dev machine (Edge 150) runs fine while an older user machine gets back
+  // `undefined` — NOT a bug, so the `catch` in utils/messages.ts never fires: the popup just silently
+  // receives undefined and then blows up elsewhere.
+  // Chrome docs: `return true` runs "whether this capability is enabled or not".
+  // Pinned by tests/background-messaging.test.ts (do NOT put tests in entrypoints/ — WXT treats every
+  // file there as an entrypoint and `pnpm build` will die from a name collision). The listener must
+  // NOT be `async`: an `async` function ALWAYS returns a Promise, which reintroduces this exact bug
+  // silently — tsc/lint won't flag it.
   browser.runtime.onMessage.addListener(
     (
       message: unknown,
@@ -360,8 +365,9 @@ export default defineBackground(() => {
       if (isOffscreenTargeted(message)) return undefined;
       if (!isRuntimeMessage(message)) return undefined;
 
-      // Giữ kênh mở rồi trả lời khi promise xong. Handler tự bắt lỗi và trả {ok:false}, nhưng
-      // vẫn phải có nhánh reject: sót một lỗi ngoài dự kiến là popup quay spinner vĩnh viễn.
+      // Keep the channel open and respond once the promise settles. The handler catches its own
+      // errors and returns {ok:false}, but a reject branch is still required: missing an unexpected
+      // error would leave the popup spinning forever.
       const respond = (p: Promise<unknown>): true => {
         void p
           .then(
@@ -369,8 +375,8 @@ export default defineBackground(() => {
             (e: unknown) =>
               sendResponse({ ok: false, error: describeError(e) }),
           )
-          // Kênh đã đóng (user đóng popup giữa chừng) -> sendResponse ném. Không có gì để làm,
-          // nhưng không được để unhandled rejection.
+          // Channel already closed (user closed the popup mid-flight) -> sendResponse throws.
+          // Nothing to do about it, but it must not become an unhandled rejection.
           .catch(() => undefined);
         return true;
       };
@@ -413,14 +419,14 @@ export default defineBackground(() => {
           ),
         );
       }
-      // Offscreen báo tiến trình -> background ghi hộ vào storage.session.
-      // ACK để offscreen `await` được: nhờ vậy các bản cập nhật giữ ĐÚNG THỨ TỰ và lỗi ghi không
-      // biến mất trong hư không. ACK này PHẢI đi qua `respond` — trả Promise ở đây thì trên
-      // Chrome <148 nó resolve `undefined` NGAY, và thứ tự ghi storage âm thầm mất.
+      // Offscreen reports progress -> background writes it to storage.session on its behalf.
+      // ACK so offscreen can `await` it: this keeps updates in the CORRECT ORDER and write errors
+      // don't vanish into nothing. This ACK MUST go through `respond` — returning a Promise directly
+      // here resolves to `undefined` IMMEDIATELY on Chrome <148, and storage write order silently breaks.
       if (message.kind === 'hls/progress') {
-        // W2.7 — MỌI tin từ offscreen đều là một nhịp tim: nghe thấy tiếng nó tức là nó còn sống.
-        // Đóng dấu bằng đồng hồ CỦA BACKGROUND (một đồng hồ duy nhất -> không lệch giờ giữa hai
-        // ngữ cảnh, và offscreen chết thì dấu tự nhiên ngừng tiến).
+        // W2.7 — EVERY message from offscreen is a heartbeat: hearing from it means it's still alive.
+        // Stamp it with the BACKGROUND's clock (a single clock -> no time drift between the two
+        // contexts, and if offscreen dies the stamp naturally stops advancing).
         return respond(
           updateHlsJob(message.jobId, {
             ...message.patch,
@@ -440,16 +446,17 @@ export default defineBackground(() => {
         );
         return undefined;
       }
-      // W2.5 — offscreen báo tiến trình/lỗi fetch progressive; background ghi hộ (offscreen không có
-      // chrome.storage). ACK qua respond để giữ ĐÚNG THỨ TỰ cập nhật (cùng lý do hls/progress).
+      // W2.5 — offscreen reports progressive fetch progress/errors; background writes it on its
+      // behalf (offscreen has no chrome.storage). ACK via respond to keep update order CORRECT
+      // (same reasoning as hls/progress).
       if (message.kind === 'download/progress') {
         const { key, patch } = message;
-        // W2.7 — như hls/progress: mọi tin từ offscreen là bằng chứng nó còn sống.
+        // W2.7 — same as hls/progress: any message from offscreen is proof it's still alive.
         return respond(
           updateDownload(key, { ...patch, lastSeenAt: Date.now() }).then(
             async (): Promise<DownloadProgressResponse> => {
-              // Fetch LỖI (403 giữa chừng/mạng) -> handleBlobDownload KHÔNG bao giờ chạy nên rule
-              // spoof của lượt này sẽ RÒ RỈ nguyên phiên nếu không gỡ ở đây (cùng lớp lỗi W2.4).
+              // Fetch FAILED (403 mid-way / network) -> handleBlobDownload will NEVER run, so this
+              // round's spoof rule will LEAK for the rest of the session unless removed here (same bug class as W2.4).
               if (patch.state === 'interrupted') {
                 const e = (await getDownloads())[key];
                 if (e?.spoofRuleIds?.length)
@@ -461,9 +468,10 @@ export default defineBackground(() => {
         );
       }
       if (message.kind === 'hls/cancel') {
-        // W2.7 — TRƯỚC: bắn tin rồi ghi 'cancelled' NGAY, không chờ ai. Tin rớt (offscreen chết/chưa
-        // đăng ký listener) thì popup báo "Đã huỷ" trong khi job VẪN CHẠY và vẫn tải file về —
-        // đúng nghĩa nói dối người dùng. NAY: chỉ chốt sau khi offscreen xác nhận đã nhận.
+        // W2.7 — BEFORE: fired the message and wrote 'cancelled' IMMEDIATELY, without waiting for
+        // anything. If the message dropped (offscreen dead/not yet registered its listener) the popup
+        // reported "Cancelled" while the job KEPT RUNNING and still downloaded the file — literally
+        // lying to the user. NOW: only finalize once offscreen confirms receipt.
         const jobId = message.jobId;
         void (async () => {
           const delivered = await sendToOffscreen({
@@ -474,9 +482,9 @@ export default defineBackground(() => {
             await updateHlsJob(jobId, { phase: 'cancelled', error: 'Đã huỷ' });
             return;
           }
-          // Offscreen KHÔNG nhận được -> nó đã chết, nghĩa là job cũng chết theo (mọi việc tải nằm
-          // trong đó). Vẫn phải chốt về trạng thái kết thúc, nếu không job kẹt 'fetching' mãi —
-          // nhưng nói ĐÚNG lý do, đừng vờ như huỷ êm đẹp.
+          // Offscreen did NOT receive it -> it's dead, meaning the job died along with it (all the
+          // download work lives there). Still must finalize to a terminal state, otherwise the job
+          // stays stuck in 'fetching' forever — but state the REAL reason, don't pretend it was a clean cancel.
           await updateHlsJob(jobId, {
             phase: 'cancelled',
             error: 'Đã huỷ (bộ xử lý video đã dừng trước đó).',
@@ -507,13 +515,13 @@ export default defineBackground(() => {
           });
         }
       }
-      // W7.1 — trang xin DRM/EME -> gắn cờ cho tab (ranh giới cứng §7). KHÔNG chặn trang phát video:
-      // ta chỉ từ chối TẢI, không phá trải nghiệm xem.
+      // W7.1 — page requests DRM/EME -> flag the tab (hard boundary §7). Does NOT block the page from
+      // playing the video: we only refuse to DOWNLOAD, never break the viewing experience.
       if (message.kind === 'media/drm') {
         const name = drmNameFromKeySystem(message.keySystem) ?? 'DRM không rõ';
-        // 🔴 PHẢI đi qua `serialize`: đây là read-modify-write trên CÙNG khoá storage với
-        // `setTabNavUrl` (W4.3, bắn theo mọi lần đổi URL). Không xếp hàng thì hai bên ghi đè nhau
-        // và cờ DRM có thể bị XOÁ -> ranh giới cứng §7 thủng mà không một dòng lỗi nào hiện ra.
+        // 🔴 MUST go through `serialize`: this is a read-modify-write on the SAME storage key as
+        // `setTabNavUrl` (W4.3, fires on every URL change). Without queuing, the two writers overwrite
+        // each other and the DRM flag can get WIPED -> the §7 hard boundary breaks with no error at all.
         void serialize(() => markTabDrm(tabId, name)).then((isNew) => {
           if (isNew) console.warn(`[bg] W7.1: tab ${tabId} dùng DRM (${name})`);
         });
@@ -539,13 +547,14 @@ export default defineBackground(() => {
     },
   );
 
-  // Theo dõi trạng thái LƯU (chrome.downloads) -> cập nhật storage + thu hồi blob URL khi xong.
-  // W2.5: DownloadEntry keyed theo jobId, nên tra NGƯỢC entry qua chromeDownloadId (delta.id là id
-  // chrome, không phải khoá). Entry chỉ có chromeDownloadId ở phase LƯU nên chắc chắn tra ra ở đây.
+  // Watch the SAVE state (chrome.downloads) -> update storage + revoke the blob URL when done.
+  // W2.5: DownloadEntry is keyed by jobId, so look up the entry BACKWARDS via chromeDownloadId
+  // (delta.id is chrome's own id, not our key). An entry only has chromeDownloadId during the SAVE
+  // phase, so the lookup is guaranteed to succeed here.
   browser.downloads.onChanged.addListener((delta) => {
     void (async () => {
       const entry = await getDownloadByChromeId(delta.id);
-      if (!entry) return; // download không phải của ta (hoặc chưa kịp gắn id — onChanged sớm sẽ bỏ qua).
+      if (!entry) return; // not our download (or the id wasn't attached yet — an early onChanged will just be skipped).
       const patch: Partial<DownloadEntry> = {};
       if (delta.state) patch.state = delta.state.current as DownloadState;
       if (delta.error?.current) patch.error = delta.error.current;
@@ -556,21 +565,22 @@ export default defineBackground(() => {
         delta.state?.current === 'complete' ||
         delta.state?.current === 'interrupted';
       if (finished) {
-        // W2.7 — qua helper: offscreen chết thì blob URL cũng chết theo nó, không có gì để thu hồi
-        // và cũng không được để lại unhandled rejection.
+        // W2.7 — via the helper: if offscreen is dead, the blob URL died with it, so there's nothing
+        // to revoke and this must not leave an unhandled rejection either.
         if (entry.blobUrl)
           void sendToOffscreen({ kind: 'revoke', url: entry.blobUrl });
-        // Xoá session rule spoof cho lượt tải này (không để tồn suốt phiên). W2.4: theo id riêng.
-        // (Progressive đã gỡ ở handleBlobDownload khi fetch xong; trùng nhau vô hại.)
+        // Remove the session spoof rule for this download (don't let it persist the whole session).
+        // W2.4: tracked by its own id. (Progressive already removes it in handleBlobDownload once the
+        // fetch is done; doing it again here is harmless.)
         if (entry.spoofRuleIds?.length)
           void removeSpoofRules(entry.spoofRuleIds);
       }
     })();
   });
 
-  // --- Tiến trình HLS -> badge % trên icon + thông báo khi xong/lỗi (v0.5.0) ---
+  // --- HLS progress -> icon badge % + notification on done/error (v0.5.0) ---
 
-  // % tổng hợp để hiện lên badge theo phase.
+  // Aggregate % shown on the badge, based on phase.
   function jobBadgePct(job: HlsJob): number {
     if (job.phase === 'fetching') {
       return job.segmentsTotal > 0
@@ -589,7 +599,7 @@ export default defineBackground(() => {
       await browser.action.setBadgeText({ tabId, text: `${pct}%` });
       await browser.action.setBadgeBackgroundColor({ tabId, color: '#1a7f37' });
     } catch {
-      // tab có thể đã đóng.
+      // tab may have already closed.
     }
   }
 
@@ -602,7 +612,7 @@ export default defineBackground(() => {
         message,
       });
     } catch {
-      // notifications có thể không khả dụng.
+      // notifications may not be available.
     }
   }
 
@@ -617,9 +627,10 @@ export default defineBackground(() => {
         const prevPhase = oldJobs[id]?.phase;
         const justFinished =
           TERMINAL_PHASES.has(job.phase) && prevPhase !== job.phase;
-        // W2.3/W2.4: dọn MỌI rule spoof của job ở nhánh kết thúc (done/error/cancelled) — KHÔNG phụ
-        // thuộc tabId (badge cần tabId, gỡ rule thì không). Nhánh thành công còn dọn thêm ở
-        // handleBlobDownload; trùng nhau vô hại (removeRuleIds bỏ qua id không tồn tại).
+        // W2.3/W2.4: remove EVERY spoof rule of this job on a terminal branch (done/error/cancelled)
+        // — does NOT depend on tabId (the badge needs tabId, rule removal doesn't). The success
+        // branch also removes them in handleBlobDownload; doing it twice is harmless
+        // (removeRuleIds skips ids that no longer exist).
         if (justFinished && job.spoofRuleIds?.length) {
           void removeSpoofRules(job.spoofRuleIds);
         }
@@ -627,7 +638,7 @@ export default defineBackground(() => {
         if (ACTIVE_PHASES.has(job.phase)) {
           await setBadgePct(job.tabId, jobBadgePct(job));
         } else if (justFinished) {
-          // Khôi phục badge = số dòng CÒN HIỆN (W4.2: không đếm playlist con đã ẩn).
+          // Restore the badge = count of rows STILL VISIBLE (W4.2: don't count hidden child playlists).
           const count = visibleMedia(await getTabMedia(job.tabId)).length;
           await updateBadge(job.tabId, count);
           const name = job.filename?.split('/').pop() ?? 'video';
@@ -645,35 +656,38 @@ export default defineBackground(() => {
     void clearTabMedia(tabId);
   });
 
-  // W4.3 — điều hướng SPA (`pushState`) KHÔNG sinh request `main_frame` nào nên `resetTab` không
-  // chạy; nhưng `tabs.onUpdated` VẪN bắn kèm `changeInfo.url`. Chỉ cập nhật navUrl, KHÔNG xoá
-  // items: media của route mới cần được đóng dấu đúng trang, còn xoá danh sách là việc của resetTab.
+  // W4.3 — SPA navigation (`pushState`) does NOT generate any `main_frame` request so `resetTab`
+  // never runs; but `tabs.onUpdated` STILL fires with `changeInfo.url`. Only update navUrl, do NOT
+  // clear items: media from the new route needs to be stamped with the correct page, while clearing
+  // the list is resetTab's job.
   browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
     const url = changeInfo.url;
     if (url) void serialize(() => setTabNavUrl(tabId, url));
   });
 
-  // W2.4 — đối soát rule spoof rò rỉ. `onStartup` bắn khi mở lại trình duyệt; lời gọi top-level
-  // bắn mỗi lần SW cold-start giữa phiên (bắt rule của job đã chết trước đó mà chưa kịp dọn). Job
-  // còn sống thì id của nó nằm trong tập "còn sống" nên KHÔNG bị quét nhầm.
+  // W2.4 — reconcile leaked spoof rules. `onStartup` fires when the browser is reopened; the
+  // top-level call fires every time the SW cold-starts mid-session (catches rules from a job that
+  // died earlier and didn't get to clean up). A still-alive job has its id in the "alive" set, so it
+  // is NOT swept by mistake.
   browser.runtime.onStartup.addListener(() => {
     void sweepStaleSpoofRules();
-    // W4.3 — tab đã mở sẵn trước khi SW này chạy cũng cần biết mình đang ở URL nào.
+    // W4.3 — a tab already open before this SW ran also needs to know which URL it's on.
     void seedNavUrls(serialize);
   });
   void sweepStaleSpoofRules();
 
-  // W2.7 — tick dò "bộ xử lý video đã chết". Alarm chứ KHÔNG setInterval: service worker MV3 bị ngủ
-  // bất cứ lúc nào và timer chết theo nó, còn alarm thì đánh thức SW dậy để chạy. Chu kỳ 0.5 phút =
-  // mức dày nhất Chrome cho phép; ngưỡng chết 60s nên tệ nhất user chờ thêm ~30s.
+  // W2.7 — periodic tick that detects "the video processor has died". An alarm, NOT setInterval:
+  // the MV3 service worker can be put to sleep at any time and a timer would die with it, while an
+  // alarm wakes the SW back up to run. 0.5-minute period = the densest Chrome allows; the 60s death
+  // threshold means the worst case is the user waits ~30s extra.
   browser.alarms.create(DEAD_JOB_ALARM, { periodInMinutes: 0.5 });
   browser.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name !== DEAD_JOB_ALARM) return;
     void reapDeadHlsJobs();
     void reapDeadDownloads();
   });
-  // Chạy luôn một lượt lúc SW cold-start: nếu SW vừa hồi sinh sau khi cả nó lẫn offscreen bị giết,
-  // job mồ côi phải được chốt NGAY chứ không đợi hết chu kỳ alarm.
+  // Also run one pass right at SW cold-start: if the SW just revived after both it and offscreen
+  // were killed, an orphaned job must be finalized IMMEDIATELY, not wait for the alarm cycle.
   void reapDeadHlsJobs();
   void reapDeadDownloads();
 });
@@ -681,11 +695,12 @@ export default defineBackground(() => {
 const DEAD_JOB_ALARM = 'w27-dead-job-tick';
 
 /**
- * W2.7 — chốt LỖI cho job mà offscreen đã chết giữa chừng (§2.14).
+ * W2.7 — finalize an ERROR for a job whose offscreen died mid-way (§2.14).
  *
- * Vì sao cần: offscreen chết IM LẶNG — Chrome không bắn sự kiện nào về background. Không có tick
- * này thì job nằm lại 'fetching' VĨNH VIỄN và popup quay spinner không lời giải thích, đúng kết cục
- * tệ nhất của một app tải: user không biết nên chờ tiếp hay bấm lại.
+ * Why this is needed: offscreen dies SILENTLY — Chrome fires no event back to background. Without
+ * this tick a job would stay stuck at 'fetching' FOREVER and the popup would spin with no
+ * explanation — exactly the worst possible outcome for a download app: the user has no idea whether
+ * to keep waiting or click again.
  */
 async function reapDeadHlsJobs(): Promise<void> {
   try {
@@ -698,24 +713,25 @@ async function reapDeadHlsJobs(): Promise<void> {
         error: DEAD_OFFSCREEN_ERROR,
         note: undefined,
       });
-      // Rule spoof của job chết là rác: nó không tự dọn được nữa (nhánh kết thúc bình thường không
-      // bao giờ chạy). Cùng lớp lỗi rò rỉ W2.4.
+      // A dead job's spoof rule is garbage: it can no longer clean itself up (the normal terminal
+      // branch never runs). Same leak bug class as W2.4.
       const ids = jobs[id]?.spoofRuleIds;
       if (ids?.length) await removeSpoofRules(ids);
     }
     console.warn(`[bg] W2.7: chốt lỗi ${dead.length} job do offscreen đã chết`);
   } catch (e) {
-    // Tick định kỳ KHÔNG được phép ném: ném ở đây là unhandled rejection mỗi 30 giây.
+    // The periodic tick MUST NOT throw: throwing here would be an unhandled rejection every 30 seconds.
     console.warn('[bg] tick dò job chết lỗi:', describeError(e));
   }
 }
 
 /**
- * W2.7 — chốt LỖI cho lượt tải PROGRESSIVE mà offscreen đã chết giữa lúc fetch.
+ * W2.7 — finalize an ERROR for a PROGRESSIVE download whose offscreen died mid-fetch.
  *
- * Vì sao đường này cũng cần (dễ bỏ sót): W2.5 chuyển .mp4 sang fetch trong offscreen để mang được
- * Referer spoof — từ đó nó phụ thuộc offscreen y như HLS, nhưng lưới liveness ban đầu chỉ phủ HLS.
- * ĐÃ ĐO bằng e2e `progressive-offscreen-death`: entry kẹt `in_progress` >150s.
+ * Why this path is also needed (easy to overlook): W2.5 moved .mp4 to fetch inside offscreen so it
+ * could carry the Referer spoof — from that point it depends on offscreen just like HLS does, but the
+ * original liveness net only covered HLS. MEASURED via e2e `progressive-offscreen-death`: entry stuck
+ * at `in_progress` for >150s.
  */
 async function reapDeadDownloads(): Promise<void> {
   try {
@@ -727,8 +743,8 @@ async function reapDeadDownloads(): Promise<void> {
         state: 'interrupted',
         error: DEAD_OFFSCREEN_ERROR,
       });
-      // Rule spoof của lượt chết không tự dọn được nữa: nhánh kết thúc bình thường (handleBlobDownload
-      // / download/progress 'interrupted') không bao giờ chạy. Cùng lớp rò rỉ W2.4.
+      // A dead round's spoof rule can no longer clean itself up: the normal terminal branch
+      // (handleBlobDownload / download/progress 'interrupted') never runs. Same leak class as W2.4.
       const ids = entries[key]?.spoofRuleIds;
       if (ids?.length) await removeSpoofRules(ids);
     }
@@ -741,18 +757,20 @@ async function reapDeadDownloads(): Promise<void> {
 }
 
 /**
- * W2.2 — bật spoof Referer/Origin ÔM SÁT một cú fetch rồi gỡ ngay trong `finally`.
+ * W2.2 — enable a Referer/Origin spoof TIGHTLY WRAPPED around one fetch, then remove it right in `finally`.
  *
- * §2.3: `handleVariants`/`handleHlsEstimate` là HAI cú fetch ĐẦU TIÊN của flow, mà trước đây chúng
- * fetch trần ⇒ site chống hotlink 403 ngay bước "Chất lượng", `handleHlsDownload` (hàm CÓ spoof)
- * không bao giờ được gọi tới ⇒ tính năng vượt 403 là code chết đúng trên site cần nó nhất.
+ * §2.3: `handleVariants`/`handleHlsEstimate` are the FIRST TWO fetches of the flow, and they used to
+ * fetch bare ⇒ an anti-hotlink site would 403 right at the "Quality" step, so `handleHlsDownload`
+ * (the function WITH spoofing) never got called at all ⇒ the 403-bypass feature was dead code exactly
+ * on the site that needed it most.
  *
- * `pageUrl` (từ `media.pageUrl` tra theo tabId) là Referer THẬT của trang — quan trọng vì hotlink
- * thường kiểm Referer khớp domain site, không phải domain CDN. Thiếu pageUrl thì applySpoof tự lùi
- * về dùng chính targetUrl (đủ qua cổng "thiếu Referer", nhưng kém khớp trên site kiểm domain).
+ * `pageUrl` (looked up from `media.pageUrl` by tabId) is the page's REAL Referer — important because
+ * hotlink checks usually match Referer against the site's domain, not the CDN's. Without pageUrl,
+ * applySpoof falls back to using targetUrl itself (enough to pass a "missing Referer" gate, but a
+ * weaker match on a site that checks the domain).
  *
- * W2.4: cấp id RIÊNG cho mỗi cú fetch (allocateSpoofRuleId) rồi gỡ đúng id đó -> hai lượt tải/ước
- * lượng trên CÙNG host không còn giật rule của nhau (giới hạn W2.2 cũ đã hết).
+ * W2.4: allocate a SEPARATE id for each fetch (allocateSpoofRuleId) and remove exactly that id -> two
+ * downloads/estimates on the SAME host no longer steal each other's rule (the old W2.2 limitation is gone).
  */
 async function withSpoofedFetch<T>(
   targetUrl: string,
@@ -771,10 +789,10 @@ async function withSpoofedFetch<T>(
 }
 
 /**
- * pageUrl để dựng Referer thật. Ưu tiên item khớp `url` (master); nếu không (vd estimate chỉ có
- * URL variant, không khớp media nào) thì lùi về pageUrl của item bất kỳ trên tab — pageUrl thực chất
- * là của cả TRANG (resetTab xoá sạch khi điều hướng nên mọi item cùng một trang). undefined khi
- * không có tabId hoặc tab chưa có media nào.
+ * pageUrl to build the real Referer. Prefer the item matching `url` (the master); if none matches
+ * (e.g. estimate only has the variant URL, no matching media) fall back to the pageUrl of any item on
+ * the tab — pageUrl is really a fact about the whole PAGE (resetTab clears everything on navigation
+ * so every item belongs to the same page). undefined when there's no tabId or the tab has no media yet.
  */
 async function pageUrlFor(
   tabId?: number,
@@ -790,11 +808,12 @@ async function pageUrlFor(
 }
 
 /**
- * W2.1 — bản chụp header thật cho ĐÚNG `url`. KHỚP CHÍNH XÁC, không có đường lùi.
+ * W2.1 — real header capture for the EXACT `url`. EXACT MATCH ONLY, no fallback.
  *
- * Cố ý khác `pageUrlFor` ngay bên trên: hàm đó được phép lùi về item bất kỳ vì `pageUrl` là sự
- * thật cấp TRANG. Header thì là sự thật cấp REQUEST — lấy header của media khác gán cho request
- * này chính là BỊA, đúng thứ W2.1 sinh ra để diệt. Không khớp -> undefined -> lùi về spoof cũ.
+ * Intentionally different from `pageUrlFor` right above: that function is allowed to fall back to
+ * any item because `pageUrl` is a fact at the PAGE level. Headers are a fact at the REQUEST level —
+ * assigning another media's headers to this request is FABRICATION, the exact thing W2.1 exists to
+ * kill. No match -> undefined -> fall back to the old spoof.
  */
 async function capturedFor(
   tabId: number | undefined,
@@ -806,11 +825,13 @@ async function capturedFor(
 }
 
 /**
- * Trần chờ khi đọc tiêu đề trang. Đọc tên file là việc PHỤ — không được phép giữ cả lượt tải.
+ * Wait cap when reading the page title. Reading the filename is a SIDE concern — it must not be
+ * allowed to hold up the whole download.
  *
- * Ca thật: renderer treo (trang nặng, breakpoint devtools) thì `executeScript` không bao giờ trả
- * lời. Lời gọi này nằm TRƯỚC `putHlsJob`/`putDownload`, nên treo ở đây nghĩa là bấm Tải mà KHÔNG
- * có gì xảy ra: không job, không lỗi, không dòng log — đúng kiểu hỏng câm dự án này đã trả giá.
+ * Real case: if the renderer hangs (heavy page, devtools breakpoint), `executeScript` never resolves.
+ * This call sits BEFORE `putHlsJob`/`putDownload`, so hanging here means clicking Download does
+ * NOTHING: no job, no error, no log line — exactly the kind of silent failure this project has paid
+ * for before.
  */
 const TITLE_READ_TIMEOUT_MS = 3_000;
 
@@ -824,12 +845,12 @@ function withTitleTimeout<T>(p: Promise<T>): Promise<T | undefined> {
 }
 
 /**
- * W4.3 — nạp `navUrl` cho các tab ĐANG MỞ SẴN lúc service worker khởi động.
+ * W4.3 — seed `navUrl` for tabs ALREADY OPEN when the service worker starts up.
  *
- * Không có bước này thì tab đã mở từ trước khi extension cài/cập nhật sẽ không có `navUrl` (chỉ
- * `resetTab` theo main_frame và `tabs.onUpdated` mới đặt), nên mọi media phát hiện trong đó KHÔNG
- * được đóng dấu -> cổng chống đặt nhầm tên đóng lại -> tên file lùi về `master.mp4` dù user đang
- * đứng đúng ở trang đó. Nạp sẵn để trường hợp thường gặp vẫn có tên đẹp.
+ * Without this step, a tab open before the extension was installed/updated has no `navUrl` (only
+ * `resetTab` via main_frame and `tabs.onUpdated` ever set it), so any media detected in it does NOT
+ * get stamped -> the anti-wrong-name guard closes -> the filename falls back to `master.mp4` even
+ * though the user is standing right on that page. Seed it upfront so the common case still gets a nice name.
  */
 async function seedNavUrls(
   run: <T>(fn: () => Promise<T>) => Promise<T>,
@@ -849,19 +870,20 @@ async function seedNavUrls(
 }
 
 /**
- * W4.3 — giải tiêu đề video LÚC TẢI, không phải lúc phát hiện.
+ * W4.3 — resolve the video title AT DOWNLOAD TIME, not at detection time.
  *
- * VÌ SAO ĐỌC MUỘN: phát hiện qua mạng (`onBeforeRequest`/`onHeadersReceived`/`onSendHeaders`) chạy
- * TRƯỚC content script (`document_idle`) — đó chính là lý do đa số media HLS/DASH xưa nay không có
- * tiêu đề nào và rơi về `master.mp4`. Đọc lúc user bấm tải thì DOM đã dựng xong, `og:title` đã có.
- * Đọc muộn cũng có nghĩa KHÔNG cần lưu tiêu đề lên `MediaItem` -> không dính bẫy "ai ghi trước
- * thắng" của `upsertMedia`, và không có cuộc đua nào để thua.
+ * WHY READ LATE: network-based detection (`onBeforeRequest`/`onHeadersReceived`/`onSendHeaders`)
+ * runs BEFORE the content script (`document_idle`) — that's exactly why most HLS/DASH media used to
+ * have no title at all and fell back to `master.mp4`. Reading when the user clicks download means the
+ * DOM is already built and `og:title` already exists. Reading late also means we do NOT need to store
+ * the title on `MediaItem` -> avoids `upsertMedia`'s "first writer wins" trap, and there's no race to lose.
  *
- * Về `frameIds: [0]` — ĐÃ ĐO (e2e `title-og` + mutation ME5, 2026-07-19): nó KHÔNG phải thứ đang
- * gánh việc. `executeScript` mặc định đã chỉ chèn vào khung TOP, nên bỏ dòng này ca e2e vẫn xanh.
- * Giữ lại vì nó nói rõ ý định và chặn trước ca ai đó đổi sang `allFrames: true` — lúc ấy iframe của
- * player nhúng (title riêng kiểu 'JW Player') mới thật sự có cửa chen vào. ĐỪNG ghi nó là "bắt
- * buộc": fixture `/og.html` có sẵn iframe tiêu đề sai mà mutation vẫn không bắn.
+ * On `frameIds: [0]` — MEASURED (e2e `title-og` + mutation ME5, 2026-07-19): it is NOT what's doing
+ * the work. `executeScript` already only injects into the TOP frame by default, so removing this line
+ * still leaves the e2e test green. Kept because it states intent clearly and guards against someone
+ * later switching to `allFrames: true` — that's when an embedded player's iframe (with its own title
+ * like 'JW Player') would actually have a chance to sneak in. DO NOT write it off as "required":
+ * fixture `/og.html` already has an iframe with a wrong title and the mutation still doesn't fire.
  */
 async function resolveTitle(
   tabId: number | undefined,
@@ -877,18 +899,18 @@ async function resolveTitle(
   try {
     tab = await withTitleTimeout(browser.tabs.get(tabId));
   } catch {
-    // Tab đã đóng / bị Chrome loại khỏi bộ nhớ. Không phải lỗi — cứ dùng thứ đã lưu.
+    // Tab already closed / evicted from memory by Chrome. Not an error — just use what was stored.
     tab = undefined;
   }
   const currentUrl = tab?.url;
 
-  // 🔴 Cổng chống ĐẶT NHẦM TÊN — ĐÓNG khi thiếu dữ kiện (review đối kháng: 6 lăng kính độc lập
-  // cùng chỉ vào chỗ này). Hai ca đều phải chặn:
-  //  - media được phát hiện ở trang khác trang đang mở (user chuyển video kiểu SPA);
-  //  - media KHÔNG có dấu trang (`detectPageUrl` trống) -> ta không có cách nào biết nó thuộc trang
-  //    nào, nên KHÔNG được mượn tiêu đề của trang đang mở.
-  // Chặn ở đây chỉ làm tên file lùi về tên từ URL. Cho qua thì cho ra một cái tên SAI mà trông rất
-  // thật — tệ hơn hẳn `master.mp4`, vì user TIN nó đúng.
+  // 🔴 The anti-WRONG-NAME guard — CLOSED when facts are missing (adversarial review: 6 independent
+  // lenses all pointed here). Both cases must be blocked:
+  //  - media detected on a different page than the one currently open (user switched videos SPA-style);
+  //  - media with NO page stamp (`detectPageUrl` empty) -> we have no way to know which page it
+  //    belongs to, so we must NOT borrow the title of the currently open page.
+  // Blocking here only makes the filename fall back to a URL-derived name. Letting it through would
+  // produce a WRONG name that looks very real — far worse than `master.mp4`, because the user TRUSTS it.
   if (!detectedAt || !sameDocument(detectedAt, currentUrl)) {
     return pickTitle({ stored }, detectedAt ?? currentUrl);
   }
@@ -916,8 +938,8 @@ async function resolveTitle(
     );
     meta = results?.[0]?.result ?? {};
   } catch (e) {
-    // Trang cấm chèn script (chrome://, Web Store, PDF viewer) — KHÔNG phải lỗi của lượt tải.
-    // Ghi log chứ không nuốt trọn: `catch {}` trần là thứ đã giấu 3 con bug chí mạng của dự án này.
+    // Page forbids script injection (chrome://, Web Store, PDF viewer) — NOT an error for the download.
+    // Log it instead of swallowing it whole: a bare `catch {}` is what hid 3 fatal bugs in this project.
     console.warn('[bg] W4.3 không đọc được tiêu đề trang:', describeError(e));
   }
 
@@ -940,8 +962,8 @@ async function handleVariants(
 ): Promise<VariantsResponse> {
   try {
     const pageUrl = await pageUrlFor(tabId, url);
-    // W2.2: spoof TRƯỚC khi fetch — 403 không được giết bước chọn chất lượng.
-    // W2.1: phát lại header THẬT của player cho đúng manifest này nếu đã bắt được.
+    // W2.2: spoof BEFORE fetching — a 403 must not kill the quality-selection step.
+    // W2.1: replay the player's REAL headers for this exact manifest if they were captured.
     const res = await withSpoofedFetch(
       url,
       pageUrl,
@@ -970,27 +992,29 @@ async function handleDownload(
   url: string,
   tabId: number,
 ): Promise<DownloadStartResponse> {
-  // W7.1 — RANH GIỚI CỨNG §7: chặn cả đường progressive, không chỉ HLS.
+  // W7.1 — HARD BOUNDARY §7: also block the progressive path, not just HLS.
   const drmBlocked = await drmBlockReason(tabId);
   if (drmBlocked) return { ok: false, error: drmBlocked };
-  // W2.5 — ĐỊNH TUYẾN QUA OFFSCREEN thay vì chrome.downloads.download({url}) thẳng.
-  // ĐO 2026-07-18: cú download thẳng KHÔNG nhận rule DNR modifyHeaders (server nhận Referer:NONE ->
-  // 403 trên site chống hotlink). fetch() của offscreen là xmlhttprequest tab-less -> KHỚP rule spoof
-  // -> qua 403. chrome.downloads.download từ nay chỉ nhận blob: URL (bất biến VDH).
+  // W2.5 — ROUTE THROUGH OFFSCREEN instead of calling chrome.downloads.download({url}) directly.
+  // MEASURED 2026-07-18: a direct download does NOT receive the DNR modifyHeaders rule (the server
+  // sees Referer:NONE -> 403 on an anti-hotlink site). offscreen's fetch() is a tab-less
+  // xmlhttprequest -> MATCHES the spoof rule -> passes the 403. chrome.downloads.download now only
+  // ever receives a blob: URL (VDH invariant).
   //
-  // Hoist ra ngoài try để catch dọn được: rule áp TRƯỚC ensureOffscreen; nếu ném trước khi putDownload
-  // thì id chưa lưu ở đâu -> chỉ sweep cold-start dọn. Gỡ ngay ở catch để không rò rỉ nguyên phiên.
+  // Hoisted out of the try so the catch can clean it up: the rule is applied BEFORE ensureOffscreen;
+  // if it throws before putDownload, the id isn't stored anywhere -> only the cold-start sweep would
+  // clean it. Remove it right away in the catch to avoid leaking it for the rest of the session.
   let ruleId: number | undefined;
   const key = crypto.randomUUID();
   try {
     const media = (await getTabMedia(tabId)).find((m) => m.url === url);
-    // Spoof Referer/Origin để vượt hotlink-protection/403 (non-DRM). Id riêng cho lượt tải này (W2.4).
+    // Spoof Referer/Origin to bypass hotlink-protection/403 (non-DRM). Own id for this download (W2.4).
     ruleId = await allocateSpoofRuleId();
     await applySpoof(ruleId, url, media?.pageUrl, capturedContextOf(media));
     const folder = await getDownloadFolder();
     const filename = buildDownloadFilename({
       url,
-      // W4.3 — KHÔNG dùng `media?.title` nữa: nó gần như luôn trống trên đường phát hiện qua mạng.
+      // W4.3 — no longer using `media?.title`: it's almost always empty on the network detection path.
       title: await resolveTitle(tabId, media),
       height: media?.height,
       contentType: media?.contentType,
@@ -998,20 +1022,21 @@ async function handleDownload(
       template: await getFilenameTemplate(),
       pageUrl: media?.pageUrl ?? media?.detectPageUrl,
     });
-    // Entry in-flight (phase FETCH trong offscreen) — chưa có chromeDownloadId, popup hiện "Đang tải…".
+    // In-flight entry (FETCH phase inside offscreen) — no chromeDownloadId yet, popup shows "Downloading…".
     await putDownload({
       key,
       mediaUrl: url,
       filename,
       state: 'in_progress',
       startedAt: Date.now(),
-      // W2.7 — nhịp tim đầu tiên: phủ cả ca "offscreen chết trước khi kịp nhận việc".
+      // W2.7 — first heartbeat: also covers the case "offscreen died before it could pick up the work".
       lastSeenAt: Date.now(),
       spoofRuleIds: [ruleId],
     });
     await ensureOffscreen();
-    // KHÔNG await: offscreen fetch có thể chạy lâu, báo tiến trình qua download/progress. NHƯNG phải
-    // bắt lỗi gửi (offscreen chưa đăng ký listener) -> nếu không entry kẹt 'in_progress' vĩnh viễn.
+    // Not awaited: offscreen's fetch can run long, it reports progress via download/progress. BUT the
+    // send must be error-caught (offscreen hasn't registered its listener yet) -> otherwise the entry
+    // stays stuck at 'in_progress' forever.
     void browser.runtime
       .sendMessage({
         target: 'offscreen',
@@ -1032,7 +1057,7 @@ async function handleDownload(
       });
     return { ok: true, key };
   } catch (e) {
-    // Dọn rule đã áp nhưng chưa kịp giao offscreen — tránh rò rỉ nguyên phiên.
+    // Clean up a rule that was applied but never got handed off to offscreen — avoids a session-long leak.
     if (ruleId !== undefined) await removeSpoofRules([ruleId]);
     await updateDownload(key, {
       state: 'interrupted',
@@ -1045,7 +1070,7 @@ async function handleDownload(
   }
 }
 
-/** Máy chủ trả mã lỗi — giữ lại `status` để thông báo còn chỉ đúng hướng (403 = chống hotlink). */
+/** Server returned an error code — keep `status` so the message still points in the right direction (403 = anti-hotlink). */
 class HttpError extends Error {
   constructor(readonly status: number) {
     super(`HTTP ${status}`);
@@ -1053,25 +1078,27 @@ class HttpError extends Error {
 }
 
 /**
- * W7.1 — RANH GIỚI CỨNG §7. Tab đã lộ dùng DRM/EME thì mọi đường TẢI đóng lại, báo rõ lý do.
+ * W7.1 — HARD BOUNDARY §7. Once a tab is revealed to use DRM/EME, every DOWNLOAD path closes, with
+ * a clear reason given.
  *
- * Trả câu lỗi nếu phải chặn, `null` nếu sạch. Đặt ở background (không phải popup) vì popup chỉ là
- * một trong các đường vào — chặn ở đây thì mọi đường đều bịt.
+ * Returns the error message if it must block, `null` if clean. Placed in background (not the popup)
+ * because the popup is just one of the entry points — blocking here seals every path.
  *
- * 🔴 Đây là mã TỪ CHỐI, không phải mã giải mã: ta chỉ nhận diện để nói "không hỗ trợ".
+ * 🔴 This is REFUSAL code, not decryption code: we only detect it to say "not supported".
  */
 async function drmBlockReason(tabId?: number): Promise<string | null> {
   if (tabId === undefined || tabId < 0) return null;
   try {
     const systems = (await getTabState(tabId)).drmSystems ?? [];
     if (systems.length === 0) return null;
-    // Bỏ mục chung nếu đã biết đích danh hãng -> thông báo nói đúng tên thay vì "không rõ".
+    // Drop the generic entry if a named vendor is already known -> the message states the real name
+    // instead of "unknown".
     const named = systems.filter((s) => s !== 'DRM không rõ');
     return DRM_UNSUPPORTED_ERROR(
       named.length > 0 ? named.join(', ') : undefined,
     );
   } catch {
-    return null; // đọc storage hỏng -> đừng chặn oan.
+    return null; // storage read failed -> don't block unjustly.
   }
 }
 
@@ -1084,9 +1111,9 @@ async function handleHlsEstimate(
   variantId?: string,
   audioId?: string,
 ): Promise<HlsEstimateResponse> {
-  // W7.1 — cờ DRM của TAB (EME) là tín hiệu ĐỘC LẬP với playlist: SAMPLE-AES lộ trong playlist,
-  // còn Widevine/PlayReady KHÔNG để lại dấu nào ở đó mà chỉ lộ qua EME. Biết trước thì trả lời
-  // ngay, khỏi tốn một request nào.
+  // W7.1 — the TAB's DRM flag (EME) is a signal INDEPENDENT of the playlist: SAMPLE-AES shows up in
+  // the playlist, while Widevine/PlayReady leave NO trace there and only surface via EME. Knowing
+  // upfront lets us answer immediately, without spending a single request.
   const drmBlocked = await drmBlockReason(tabId);
   if (drmBlocked) {
     return {
@@ -1094,13 +1121,15 @@ async function handleHlsEstimate(
       protected: true,
       segmentCount: 0,
       durationSec: 0,
-      // Chưa fetch playlist nào (DRM chặn trước) -> chưa biết gì về chỗ nối. Popup dừng ở nhánh
-      // `protected` trước khi đọc tới đây, nên 0 ở đây là "không có tin", không phải "đã đo là sạch".
+      // No playlist has been fetched yet (DRM blocked it first) -> nothing is known about splice
+      // points. The popup stops at the `protected` branch before reading this far, so 0 here means
+      // "no data", not "measured and clean".
       discontinuityCount: 0,
     };
   }
-  // W2.2: spoof Referer/Origin quanh cú fetch ước lượng — cùng lý do §2.3 như handleVariants.
-  // Ước lượng thường trỏ cùng host với hình; host tiếng khác (nếu có) là phần W2.3 phủ đầy đủ.
+  // W2.2: spoof Referer/Origin around the estimate fetch — same §2.3 reasoning as handleVariants.
+  // The estimate usually points at the same host as video; a different audio host (if any) is fully
+  // covered by W2.3.
   const pageUrl = await pageUrlFor(tabId, variantUrl);
   try {
     return await withSpoofedFetch(
@@ -1136,24 +1165,26 @@ async function estimateFromPlaylists(
   variantId?: string,
   audioId?: string,
 ): Promise<HlsEstimateResponse> {
-  // Mã HTTP PHẢI sống sót tới tay user: "Máy chủ trả mã 403." chỉ thẳng vào chống hotlink,
-  // còn "mạng hoặc CORS" chỉ sai hướng hoàn toàn — đúng kiểu "lý do thật bốc hơi" mà chính
-  // phiên này vừa vá ở khâu ffmpeg. Ném HttpError riêng để khối catch phân biệt được.
+  // The HTTP status MUST survive all the way to the user: "Server returned code 403." points
+  // straight at anti-hotlink protection, while "network or CORS" points in a completely wrong
+  // direction — exactly the "real reason evaporates" pattern this very session just patched in the
+  // ffmpeg layer. Throw a dedicated HttpError so the catch block can tell them apart.
   const fetchParse = async (url: string) => {
     const res = await fetch(url, { credentials: 'include' });
     if (!res.ok) throw new HttpError(res.status);
     return parseTrackSegments(await res.text(), url, mediaType, variantId);
   };
-  // W1.1: job sẽ tải CẢ playlist tiếng -> ước lượng phải soi cả nó, nếu không popup báo
-  // "10 segment" rồi thanh tiến trình chạy tới 21 — trông như lỗi.
+  // W1.1: the job will also download the audio playlist -> the estimate must inspect it too,
+  // otherwise the popup reports "10 segments" and then the progress bar runs up to 21 — looks like a bug.
   //
-  // ⚠️ Playlist tiếng hỏng KHÔNG được chặn đường tải: đây chỉ là bước ƯỚC LƯỢNG. Host tiếng có
-  // thể khác host hình nên spoof của estimate (chỉ phủ host hình) không tới nó -> trên site chống
-  // hotlink, playlist tiếng rất dễ 403 ở đây rồi vẫn tải ngon ở handleHlsDownload. Để Promise.all
-  // reject thì user mất luôn nút tải vì một con số ước lượng — đổi một phiền toái nhỏ lấy ngõ cụt.
-  // W1.5 — DASH để hình VÀ tiếng trong CÙNG một file .mpd, nên `variantUrl === audioUrl`. Gọi
-  // fetchParse hai lần sẽ tải nguyên manifest hai lượt cho đúng một con số ước lượng; tải một lần
-  // rồi parse hai track là đủ và không đụng mạng thêm.
+  // ⚠️ A broken audio playlist must NOT block the download path: this is only the ESTIMATE step. The
+  // audio host can differ from the video host, so the estimate's spoof (which only covers the video
+  // host) doesn't reach it -> on an anti-hotlink site, the audio playlist can easily 403 right here
+  // and still download fine later in handleHlsDownload. Letting Promise.all reject would cost the user
+  // the download button entirely over one estimate number — trading a small annoyance for a dead end.
+  // W1.5 — DASH keeps BOTH video AND audio in the SAME .mpd file, so `variantUrl === audioUrl`.
+  // Calling fetchParse twice would download the whole manifest twice just for one estimate number;
+  // fetching once and parsing both tracks is enough and costs no extra network.
   let parsed: Awaited<ReturnType<typeof fetchParse>>;
   let audio: Awaited<ReturnType<typeof fetchParse>> | null;
   if (mediaType === 'dash') {
@@ -1170,10 +1201,10 @@ async function estimateFromPlaylists(
       audioUrl ? fetchParse(audioUrl).catch(() => null) : Promise.resolve(null),
     ]);
   }
-  // Thời lượng là MAX chứ KHÔNG phải tổng: hình và tiếng chạy SONG SONG, không nối đuôi.
+  // Duration is the MAX, NOT the sum: video and audio run IN PARALLEL, not back to back.
   const durationSec = Math.max(parsed.totalDuration, audio?.totalDuration ?? 0);
-  // BANDWIDTH của #EXT-X-STREAM-INF đã gồm cả rendition tiếng (RFC 8216 §4.3.4.2) -> KHÔNG
-  // cộng thêm, cộng nữa là đếm đôi.
+  // #EXT-X-STREAM-INF's BANDWIDTH already includes the audio rendition (RFC 8216 §4.3.4.2) -> do
+  // NOT add anything on top, adding more would double-count it.
   const estBytes =
     bandwidth && bandwidth > 0
       ? Math.round((bandwidth / 8) * durationSec)
@@ -1181,16 +1212,16 @@ async function estimateFromPlaylists(
   return {
     ok: true,
     protected: parsed.isProtected || (audio?.isProtected ?? false),
-    // Nêu đích danh hãng DRM: "không hỗ trợ" trống không khiến user tưởng extension hỏng.
+    // Name the DRM vendor explicitly: a bare "not supported" makes the user think the extension is broken.
     ...(parsed.drmName || audio?.drmName
       ? { drmName: parsed.drmName ?? audio?.drmName }
       : {}),
     segmentCount: parsed.segments.length + (audio?.segments.length ?? 0),
     durationSec,
     estBytes,
-    // W1.4 — MAX chứ KHÔNG cộng: hình và tiếng là hai góc nhìn của CÙNG một dòng thời gian, nên
-    // cùng một chỗ chèn quảng cáo hiện ra ở CẢ HAI playlist. Cộng vào là đếm đôi. Lấy max để
-    // playlist nào khai đầy đủ hơn thì thắng — bỏ sót chỗ nối mới là cái hỏng im lặng.
+    // W1.4 — MAX, NOT sum: video and audio are two views of the SAME timeline, so the same ad-break
+    // splice point shows up in BOTH playlists. Adding them would double-count. Take the max so
+    // whichever playlist declares it more completely wins — missing a splice point is the silent failure.
     discontinuityCount: Math.max(
       parsed.discontinuityCount,
       audio?.discontinuityCount ?? 0,
@@ -1208,24 +1239,27 @@ async function handleHlsDownload(
   variantId?: string,
   audioId?: string,
 ): Promise<HlsDownloadResponse> {
-  // W7.1 — RANH GIỚI CỨNG §7: từ chối NGAY, trước khi áp một rule spoof hay bắn một request nào.
+  // W7.1 — HARD BOUNDARY §7: refuse IMMEDIATELY, before applying any spoof rule or firing any request.
   const drmBlocked = await drmBlockReason(tabId);
   if (drmBlocked) return { ok: false, error: drmBlocked };
-  // Hoist ra ngoài try để catch còn dọn được: nếu throw xảy ra TRƯỚC putHlsJob thì id chưa lưu ở
-  // đâu; nếu ensureOffscreen ném SAU putHlsJob thì job kẹt 'queued' (storage.onChanged không có
-  // nhánh terminal để dọn) -> gỡ thẳng theo id đang giữ là chắc chắn nhất.
+  // Hoisted out of the try so the catch can still clean up: if it throws BEFORE putHlsJob, the id
+  // isn't stored anywhere; if ensureOffscreen throws AFTER putHlsJob, the job stays stuck at 'queued'
+  // (storage.onChanged has no terminal branch to clean it) -> removing directly via the id we're
+  // already holding is the most reliable approach.
   const spoofRuleIds: number[] = [];
   try {
     const media = (await getTabMedia(tabId)).find((m) => m.url === mediaUrl);
     const pageUrl = media?.pageUrl;
-    // W2.1 — header THẬT player đã gửi cho chính manifest này. Bắt theo ĐÚNG URL media, KHÔNG
-    // dùng đường lùi kiểu `pageUrlFor` (nó trả item bất kỳ của tab): pageUrl là sự thật cấp
-    // TRANG nên mượn được, còn header là sự thật cấp REQUEST — mượn của media khác là bịa kiểu mới.
+    // W2.1 — the REAL headers the player sent for this exact manifest. Captured by the EXACT media
+    // URL, NOT via a `pageUrlFor`-style fallback (which returns any item on the tab): pageUrl is a
+    // page-level fact so it can be borrowed, but headers are a request-level fact — borrowing from
+    // another media item would be a new kind of fabrication.
     const captured = capturedContextOf(media);
-    // Mọi rule đã spoof PHẢI được theo dõi để còn DỌN: rule DNR session sống hết phiên trình duyệt
-    // (§2.10) -> sót một cái là rác tới lúc đóng trình duyệt. W2.4: mỗi host một id RIÊNG (không
-    // suy từ host) nên hai download cùng host không giật rule của nhau. `spoofedHosts` chỉ để DEDUPE
-    // (một host một rule cho job này), còn `spoofRuleIds` là thứ đem đi dọn.
+    // Every applied rule MUST be tracked so it can be CLEANED UP: a DNR session rule lives for the
+    // rest of the browser session (§2.10) -> missing one leaks it until the browser closes. W2.4:
+    // each host gets its OWN id (not derived from the host) so two downloads on the same host don't
+    // steal each other's rule. `spoofedHosts` is only for DEDUPING (one rule per host for this job),
+    // while `spoofRuleIds` is what actually gets cleaned up.
     const spoofedHosts = new Set<string>();
     const spoof = async (url: string): Promise<void> => {
       const host = hostFromUrl(url);
@@ -1240,17 +1274,20 @@ async function handleHlsDownload(
       spoofedHosts.add(host);
       spoofRuleIds.push(ruleId);
     };
-    // Spoof host playlist hình + tiếng (tiếng có thể ở CDN riêng — W1.1).
+    // Spoof the video + audio playlist hosts (audio can be on a separate CDN — W1.1).
     await spoof(variantUrl);
     if (audioUrl) await spoof(audioUrl);
-    // W2.3: parse playlist TRƯỚC rồi spoof MỌI host của segment/key/init. Chúng rất hay ở CDN khác
-    // host với playlist (key AES gần như LUÔN khác, lại là thứ hay kiểm Referer nhất) -> bỏ sót là
-    // job tới 'fetching' rồi mọi segment 403. Rule áp XONG ở đây, TRƯỚC khi offscreen tải segment.
-    // Best-effort: playlist 403 ở bước này thì offscreen vẫn tự thử lại; ta chỉ mất phần "khác host".
+    // W2.3: parse the playlist FIRST, then spoof EVERY host of segment/key/init. These are very often
+    // on a different CDN host than the playlist (the AES key host is ALMOST ALWAYS different, and is
+    // also the thing that most often checks Referer) -> missing one means the job reaches 'fetching'
+    // and every segment 403s. The rule is applied HERE, BEFORE offscreen fetches any segment.
+    // Best-effort: if the playlist 403s at this step, offscreen still retries on its own; we only lose
+    // the "different host" coverage.
     //
-    // W1.5 — parse theo ĐÚNG định dạng: nạp .mpd vào parser HLS thì ra 0 segment mà KHÔNG ném lỗi
-    // -> 0 host segment được spoof -> job chạy tới 'fetching' rồi 403 sạch, im lặng.
-    // DASH để cả hình lẫn tiếng trong một .mpd nên dedupe theo URL: cùng một tài liệu, hai track.
+    // W1.5 — parse using the CORRECT format: feeding a .mpd into the HLS parser yields 0 segments
+    // WITHOUT throwing -> 0 segment hosts get spoofed -> the job reaches 'fetching' and then 403s
+    // cleanly, silently.
+    // DASH keeps both video and audio in one .mpd, so dedupe by URL: same document, two tracks.
     const playlistJobs: { url: string; trackId?: string }[] =
       mediaType === 'dash'
         ? [
@@ -1278,18 +1315,18 @@ async function handleHlsDownload(
         for (const url of spoofTargetsFromSegments(parsed.segments)) {
           await spoof(url);
         }
-        // DASH SegmentBase: cả representation chỉ là MỘT file .mp4 tải thẳng được -> không có
-        // segment nào để ghép. Đẩy sang luồng progressive (W2.5) thay vì để offscreen báo
-        // "playlist không có segment nào" — đúng chữ nhưng sai hẳn nguyên nhân.
+        // DASH SegmentBase: the whole representation is just ONE .mp4 file that downloads directly
+        // -> there's no segment to mux. Route it to the progressive path (W2.5) instead of letting
+        // offscreen report "playlist has no segments" — technically true but entirely the wrong reason.
         if (parsed.directUrl) await spoof(parsed.directUrl);
       } catch {
-        // best-effort — không được để việc dò host làm hỏng đường tải.
+        // best-effort — host discovery must never be allowed to break the download path.
       }
     }
     const folder = await getDownloadFolder();
     const filename = buildDownloadFilename({
       url: variantUrl,
-      // W4.3 — đây là đường tải CHỦ LỰC (HLS/DASH) và cũng là chỗ `media?.title` trống nhiều nhất.
+      // W4.3 — this is the MAIN download path (HLS/DASH) and also where `media?.title` is empty most often.
       title: await resolveTitle(tabId, media),
       height: height ?? media?.height,
       folder,
@@ -1301,24 +1338,26 @@ async function handleHlsDownload(
       id: jobId,
       mediaUrl,
       variantUrl,
-      // 'queued' chứ KHÔNG phải 'loading': offscreen chưa chạy dòng nào. Chỉ offscreen mới được
-      // đặt 'loading' (main.ts), nhờ vậy job kẹt ở 'queued' = message không tới nơi.
+      // 'queued', NOT 'loading': offscreen hasn't run a single line yet. Only offscreen is allowed to
+      // set 'loading' (main.ts), so a job stuck at 'queued' means the message never arrived.
       phase: 'queued',
       segmentsTotal: 0,
       segmentsDone: 0,
       filename,
       tabId,
-      // W2.7 — nhịp tim ĐẦU TIÊN đặt ngay lúc sinh job. Nhờ vậy ca "offscreen chết trước khi kịp
-      // nhận việc" (job kẹt 'queued') cũng có mốc thời gian để tick dò ra, chứ không nằm ngoài lưới.
+      // W2.7 — the FIRST heartbeat, set right when the job is created. This gives the case
+      // "offscreen died before it could pick up the work" (job stuck at 'queued') a timestamp for the
+      // detection tick to find, instead of falling outside the net.
       lastSeenAt: Date.now(),
-      // Lưu để DỌN ở MỌI nhánh kết thúc (done/error/cancelled), không chỉ nhánh thành công qua
-      // handleBlobDownload — W2.3 mở rộng tập host nên rò rỉ khi lỗi sẽ nặng hơn nếu không dọn.
+      // Stored so it can be CLEANED UP on EVERY terminal branch (done/error/cancelled), not just the
+      // success branch via handleBlobDownload — W2.3 expanded the host set so a leak on error would
+      // be worse without this.
       spoofRuleIds,
     });
     await ensureOffscreen();
-    // KHÔNG await: job chạy dài, offscreen báo tiến trình qua storage chứ không qua response.
-    // NHƯNG phải bắt lỗi — nuốt ở đây thì message rớt (vd offscreen chưa đăng ký listener) sẽ khiến
-    // job kẹt 'queued' VĨNH VIỄN mà không một dòng lỗi nào hiện ra.
+    // Not awaited: the job runs long, offscreen reports progress via storage, not via the response.
+    // BUT errors must be caught — swallowing them here would mean a dropped message (e.g. offscreen
+    // hasn't registered its listener yet) leaves the job stuck at 'queued' FOREVER with no error line at all.
     void browser.runtime
       .sendMessage({
         target: 'offscreen',
@@ -1330,11 +1369,12 @@ async function handleHlsDownload(
         mediaUrl,
         tabId,
         spoofRuleIds,
-        // W1.5 — thiếu 3 trường này thì offscreen nạp .mpd vào parser HLS và job chết câm.
+        // W1.5 — missing these 3 fields makes offscreen feed the .mpd into the HLS parser, and the
+        // job dies silently.
         mediaType,
         variantId,
         audioId,
-        // Offscreen không đọc được settings (không có chrome.storage) -> đọc hộ rồi truyền vào.
+        // Offscreen cannot read settings itself (no chrome.storage) -> read them here and pass them along.
         concurrency: await getConcurrency(),
       })
       .catch(async (e: unknown) => {
@@ -1345,8 +1385,8 @@ async function handleHlsDownload(
       });
     return { ok: true, jobId };
   } catch (e) {
-    // Dọn mọi rule đã áp trước khi throw (xem chú thích hoist ở đầu hàm) — nếu không, id mồ côi
-    // chỉ được sweep cold-start dọn.
+    // Clean up every rule applied before throwing (see the hoist comment at the top of this function)
+    // — otherwise an orphaned id would only get cleaned up by the cold-start sweep.
     if (spoofRuleIds.length) await removeSpoofRules(spoofRuleIds);
     return {
       ok: false,
@@ -1364,10 +1404,12 @@ async function handleBlobDownload(
   spoofRuleIds?: number[],
   downloadKey?: string,
 ): Promise<void> {
-  // Bytes đã lấy xong -> xoá rule spoof của MỌI host (HLS: hình/tiếng/segment; progressive: 1 host).
+  // Bytes are already fetched -> remove the spoof rule for EVERY host (HLS: video/audio/segment;
+  // progressive: 1 host).
   if (spoofRuleIds?.length) void removeSpoofRules(spoofRuleIds);
-  // W2.5: progressive giao qua downloadKey -> GẮN chromeDownloadId vào ĐÚNG entry đang fetch (đừng
-  // tạo mới, kẻo popup thấy 2 dòng). HLS không có downloadKey -> tạo entry keyed theo jobId.
+  // W2.5: progressive hands off via downloadKey -> ATTACH chromeDownloadId to the EXACT entry that's
+  // fetching (don't create a new one, or the popup will show 2 rows). HLS has no downloadKey ->
+  // create an entry keyed by jobId.
   const key = downloadKey ?? jobId;
   try {
     const downloadId = await browser.downloads.download({
@@ -1377,20 +1419,23 @@ async function handleBlobDownload(
       conflictAction: 'uniquify',
     });
     if (downloadKey) {
-      // User đã HUỶ trong lúc fetch->save (entry 'interrupted' rồi, lúc đó chưa có chromeDownloadId nên
-      // handleDownloadCancel chỉ abort offscreen — vô hại vì fetch xong) -> huỷ luôn download blob vừa
-      // tạo + thu hồi, ĐỪNG ghi 'complete' đè lên cancel của user.
+      // User already CANCELLED during fetch->save (entry is already 'interrupted'; at that point
+      // there was no chromeDownloadId yet, so handleDownloadCancel only aborted offscreen — harmless
+      // since the fetch had finished) -> cancel this freshly created blob download too + revoke it,
+      // DO NOT write 'complete' over the user's cancel.
       const cur = (await getDownloads())[key];
       if (cur?.state === 'interrupted') {
         void browser.downloads.cancel(downloadId).catch(() => undefined);
         void sendToOffscreen({ kind: 'revoke', url: blobUrl });
         return;
       }
-      // Entry đã có (phase fetch) -> merge id thật + blobUrl; state giữ in_progress (onChanged flip).
+      // Entry already exists (fetch phase) -> merge in the real id + blobUrl; keep state in_progress
+      // (onChanged will flip it).
       await updateDownload(key, { chromeDownloadId: downloadId, blobUrl });
-      // Chống race: blob nhỏ có thể COMPLETE trước khi downloads.onChanged khớp được entry (lúc đó
-      // chromeDownloadId chưa persist -> onChanged bỏ qua -> entry kẹt 'in_progress'). Đọc lại state
-      // NGAY: nếu đã terminal thì ghi luôn + thu hồi blob (khỏi phụ thuộc timing của onChanged).
+      // Race guard: a small blob can COMPLETE before downloads.onChanged manages to match the entry
+      // (at that point chromeDownloadId hasn't persisted yet -> onChanged skips it -> entry stuck at
+      // 'in_progress'). Re-read the state IMMEDIATELY: if already terminal, write it now + revoke the
+      // blob (avoids depending on onChanged's timing).
       const [d] = await browser.downloads.search({ id: downloadId });
       if (d && d.state !== 'in_progress') {
         await updateDownload(key, {
@@ -1410,7 +1455,8 @@ async function handleBlobDownload(
       });
     }
   } catch (e) {
-    // Không lưu được -> báo lỗi ĐÚNG nơi popup đang nhìn: progressive nhìn DownloadEntry, HLS nhìn job.
+    // Could not save -> report the error at the EXACT place the popup is watching: progressive watches
+    // DownloadEntry, HLS watches the job.
     const msg = e instanceof Error ? e.message : 'Không lưu được file về máy.';
     if (downloadKey) {
       await updateDownload(key, { state: 'interrupted', error: msg });
@@ -1421,9 +1467,10 @@ async function handleBlobDownload(
 }
 
 /**
- * W2.5 — huỷ một lượt tải progressive theo KHOÁ. Hai phase, hai cách huỷ:
- * - đã có chromeDownloadId (đang LƯU) -> chrome.downloads.cancel;
- * - chưa (đang FETCH trong offscreen) -> báo offscreen abort cú fetch + gỡ rule spoof + đánh dấu huỷ.
+ * W2.5 — cancel a progressive download by KEY. Two phases, two ways to cancel:
+ * - already has chromeDownloadId (currently SAVING) -> chrome.downloads.cancel;
+ * - doesn't yet (currently FETCHING inside offscreen) -> tell offscreen to abort the fetch + remove
+ *   the spoof rule + mark it cancelled.
  */
 async function handleDownloadCancel(key: string): Promise<void> {
   const entry = (await getDownloads())[key];
@@ -1448,9 +1495,10 @@ async function handleEngineSelfTest(): Promise<EngineSelfTestResponse> {
       target: 'offscreen',
       kind: 'engine/selftest',
     });
-    // W2.7 — offscreen chết/chưa đăng ký listener thì `sendMessage` resolve UNDEFINED chứ không ném.
-    // Trả thẳng cái đó ra là đưa `undefined` cho popup -> nút kiểm tra im lìm không nói gì.
-    // Hợp đồng của hàm này là LUÔN trả một object đọc được.
+    // W2.7 — if offscreen is dead/hasn't registered its listener, `sendMessage` resolves to
+    // UNDEFINED instead of throwing. Returning that straight through hands `undefined` to the popup
+    // -> the test button stays silent, saying nothing at all.
+    // This function's contract is to ALWAYS return a readable object.
     if (!res || typeof res !== 'object') {
       return {
         ok: false,
@@ -1468,11 +1516,12 @@ async function handleEngineSelfTest(): Promise<EngineSelfTestResponse> {
 }
 
 /**
- * W2.7 — offscreen document có đang SỐNG không?
+ * W2.7 — is the offscreen document currently ALIVE?
  *
- * `getContexts` là câu hỏi trực tiếp tới trình duyệt, khác hẳn cách cũ "cứ gửi rồi xem có ném
- * không": offscreen chết là một NHÁNH BÌNH THƯỜNG cần xử lý, không phải một rejection bất ngờ.
- * (API có từ Chrome 116; thiếu thì trả `true` để giữ nguyên hành vi cũ thay vì chặn oan.)
+ * `getContexts` asks the browser directly, unlike the old approach of "just send and see if it
+ * throws": offscreen being dead is a NORMAL BRANCH to handle, not an unexpected rejection.
+ * (API available since Chrome 116; if missing, return `true` to preserve the old behavior instead of
+ * blocking unjustly.)
  */
 async function isOffscreenAlive(): Promise<boolean> {
   const rt = browser.runtime as typeof browser.runtime & {
@@ -1485,16 +1534,16 @@ async function isOffscreenAlive(): Promise<boolean> {
     const ctxs = await rt.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
     return ctxs.length > 0;
   } catch {
-    return true; // API lỗi -> đừng chặn oan, cứ thử gửi như cũ.
+    return true; // API failed -> don't block unjustly, just try sending as before.
   }
 }
 
 /**
- * W2.7 — gửi tin sang offscreen, KHÔNG BAO GIỜ ném và không bao giờ tạo unhandled rejection.
+ * W2.7 — send a message to offscreen, NEVER throws and never creates an unhandled rejection.
  *
- * Trả `true` nếu offscreen thực sự nhận được. Trước W2.7 hai chỗ (`hls/cancel`, `revoke`) gọi
- * `sendMessage` trần không `.catch` -> offscreen chết thì sinh unhandled rejection, mà tệ hơn là
- * caller vẫn đinh ninh tin đã tới nơi.
+ * Returns `true` if offscreen actually received it. Before W2.7, two call sites (`hls/cancel`,
+ * `revoke`) called `sendMessage` bare without `.catch` -> a dead offscreen produced an unhandled
+ * rejection, and worse, the caller still assumed the message had arrived.
  */
 async function sendToOffscreen(msg: Record<string, unknown>): Promise<boolean> {
   if (!(await isOffscreenAlive())) return false;
@@ -1502,23 +1551,25 @@ async function sendToOffscreen(msg: Record<string, unknown>): Promise<boolean> {
     await browser.runtime.sendMessage({ target: 'offscreen', ...msg });
     return true;
   } catch (e) {
-    // Ca thường gặp: offscreen vừa chết GIỮA lúc dò và lúc gửi (đua nhau), hoặc chưa kịp đăng ký
-    // listener. Không phải lỗi chí mạng — caller tự quyết dựa vào `false`.
+    // Common case: offscreen just died BETWEEN the alive check and the send (a race), or hasn't
+    // registered its listener yet. Not a fatal error — the caller decides what to do based on `false`.
     console.warn('[bg] không gửi được tin sang offscreen:', describeError(e));
     return false;
   }
 }
 
 /**
- * W2.7 — `singleFlight` diệt race "hai job cùng gọi createDocument".
+ * W2.7 — `singleFlight` kills the race "two jobs both call createDocument".
  *
- * Trước W2.7: hai `handleHlsDownload` gọi sát nhau -> cả hai vào `createDocument`; cái thứ hai ném
- * "single offscreen document" rồi bị NUỐT như thể bình thường, nên nó bắn `hls/run` vào một
- * document CÓ THỂ chưa đăng ký listener xong -> job kẹt 'queued' vĩnh viễn, không một dòng lỗi.
- * Nay lượt thứ hai chờ ĐÚNG promise của lượt đầu, nên khi nó chạy tiếp thì document đã sẵn sàng.
+ * Before W2.7: two `handleHlsDownload` calls close together -> both enter `createDocument`; the
+ * second one throws "single offscreen document" which was then SWALLOWED as if normal, so it fired
+ * `hls/run` at a document that MIGHT not have finished registering its listener -> the job stayed
+ * stuck at 'queued' forever, with no error line at all. Now the second call awaits the FIRST call's
+ * exact promise, so by the time it proceeds the document is ready.
  */
 const ensureOffscreen = singleFlight(async (): Promise<void> => {
-  // Dò trước: đã sống thì khỏi cần đụng createDocument (khỏi phải bắt lỗi "đã tồn tại" cho vui).
+  // Check first: if already alive, no need to touch createDocument (no need to catch an "already
+  // exists" error just for fun).
   if (await isOffscreenAlive()) return;
   try {
     await browser.offscreen.createDocument({
@@ -1528,32 +1579,33 @@ const ensureOffscreen = singleFlight(async (): Promise<void> => {
         'Chạy libav.wasm để ghép/remux video và tạo blob URL để tải.',
     });
   } catch (e) {
-    // Mỗi extension chỉ được 1 offscreen document -> "đã tồn tại" là BÌNH THƯỜNG, bỏ qua.
-    // Mọi lỗi khác (tạo document hỏng thật) PHẢI ném lên: nuốt hết thì caller tưởng offscreen sống
-    // và job sẽ treo mãi không lời giải thích.
+    // Each extension only gets 1 offscreen document -> "already exists" is NORMAL, ignore it.
+    // Every other error (document creation genuinely failing) MUST be rethrown: swallowing it all
+    // would make the caller believe offscreen is alive, and the job would hang forever with no explanation.
     if (!/single offscreen document/i.test(describeError(e))) throw e;
   }
 });
 
-// Trần số host được spoof cho một job (VDH cap tổng ~750 rule; ở đây một job hiếm khi quá vài host,
-// đặt trần để một manifest dị dạng không sinh hàng trăm rule).
+// Cap on the number of hosts spoofed per job (VDH caps the total at ~750 rules; a job here rarely
+// exceeds a few hosts, but the cap keeps a malformed manifest from spawning hundreds of rules).
 const MAX_SPOOF_HOSTS = 64;
 
-/** W2.1 — bản chụp header thật của player + host đã chụp được nó. */
+/** W2.1 — the player's real captured headers + the host they were captured for. */
 interface CapturedContext {
   headers: Record<string, string>;
-  /** host của URL đã quan sát được request; quyết định header nào bắn sang host khác được. */
+  /** host of the URL whose request was observed; decides which headers may be fired at a different host. */
   host: string;
-  /** origin của URL đã chụp — dùng để NEO rule mang header nhạy cảm (chống rò sang subdomain). */
+  /** origin of the captured URL — used to ANCHOR a rule carrying a sensitive header (prevents leaking to subdomains). */
   origin: string;
 }
 
 /**
- * W2.1 — lấy bản chụp header của ĐÚNG media này (undefined nếu chưa quan sát được request nào).
+ * W2.1 — get the header capture for THIS EXACT media (undefined if no request was ever observed for it).
  *
- * ⚠️ KHÔNG được nới thành "lấy đại item nào của tab" như `pageUrlFor` đang làm: `pageUrl` là sự
- * thật cấp TRANG nên mượn giữa các media là hợp lý, còn header là sự thật cấp REQUEST — mượn
- * `Authorization` của video khác chính là bịa kiểu mới, đúng thứ W2.1 sinh ra để diệt.
+ * ⚠️ Must NOT be loosened into "grab any item on the tab" the way `pageUrlFor` does: `pageUrl` is a
+ * page-level fact so borrowing between media items is reasonable, but headers are a request-level
+ * fact — borrowing another video's `Authorization` is a new kind of fabrication, exactly what W2.1
+ * exists to kill.
  */
 function capturedContextOf(media?: MediaItem): CapturedContext | undefined {
   if (!media?.sentHeaders) return undefined;
@@ -1564,12 +1616,13 @@ function capturedContextOf(media?: MediaItem): CapturedContext | undefined {
 }
 
 /**
- * W2.1 — chọn rule spoof: PHÁT LẠI header thật nếu bắt được, nếu không thì lùi về đường BỊA cũ.
+ * W2.1 — pick the spoof rule: REPLAY the real headers if captured, otherwise fall back to the old FABRICATION path.
  *
- * 🔴 ĐƯỜNG LÙI LÀ BẮT BUỘC, KHÔNG PHẢI CẨN THẬN THỪA. Ta chỉ bắt được header khi đã quan sát một
- * request của player cho đúng URL đó. Media phát hiện qua DOM/MSE, hoặc tab đã tải xong trước khi
- * extension kịp nghe, thì `sentHeaders` trống. Bỏ đường lùi = mất tính năng vượt 403 ĐANG CHẠY
- * ĐƯỢC (e2e `variants-403`, `segments-other-host`, `progressive-403` đều xanh nhờ nó).
+ * 🔴 THE FALLBACK IS REQUIRED, NOT EXTRA CAUTION. We only capture headers when a player request for
+ * that exact URL was observed. Media detected via DOM/MSE, or a tab that already finished loading
+ * before the extension started listening, will have empty `sentHeaders`. Dropping the fallback would
+ * lose the 403-bypass feature that IS CURRENTLY WORKING (e2e `variants-403`, `segments-other-host`,
+ * `progressive-403` are all green thanks to it).
  */
 function buildSpoofRule(
   ruleId: number,
@@ -1578,9 +1631,10 @@ function buildSpoofRule(
   pageUrl: string | undefined,
   captured: CapturedContext | undefined,
   /**
-   * W2.1 nợ (a) — host này đã có rule nhạy cảm của job KHÁC đang sống. Chồng thêm rule nhạy cảm
-   * thứ hai làm job trước nhận nhầm token (đã ĐO: DNR cho id cao thắng, áp cho cả request job kia).
-   * True -> hạ plan xuống chỉ Referer/Origin để job đầu giữ đúng token của nó.
+   * W2.1 debt (a) — this host already has a sensitive rule from ANOTHER live job. Stacking a second
+   * sensitive rule makes the earlier job pick up the wrong token (MEASURED: DNR lets the higher id
+   * win, applying it to the other job's request too). True -> downgrade the plan to just
+   * Referer/Origin so the first job keeps its own correct token.
    */
   suppressSensitive = false,
 ): DnrRule | null {
@@ -1589,10 +1643,12 @@ function buildSpoofRule(
       sameHost: host === captured.host,
     });
     if (suppressSensitive && plan.hasSensitive) plan = stripSensitive(plan);
-    // isEmpty = bản chụp chỉ toàn header bị vứt -> coi như chưa bắt được gì -> đi tiếp xuống lùi.
+    // isEmpty = the capture was entirely made of discarded headers -> treat it as if nothing was
+    // captured -> continue down to the fallback.
     if (!plan.isEmpty) {
-      // Rule mang header nhạy cảm (Authorization, token x-*) phải NEO theo origin: requestDomains
-      // của DNR khớp cả subdomain, nếu không neo thì token rò sang api./accounts./cdn. cùng apex.
+      // A rule carrying a sensitive header (Authorization, x-* token) must be ANCHORED by origin:
+      // DNR's requestDomains also match subdomains, so without anchoring the token leaks to
+      // api./accounts./cdn. on the same apex domain.
       return buildHeaderSpoofRule(
         ruleId,
         host,
@@ -1608,34 +1664,38 @@ function buildSpoofRule(
   return buildRefererSpoofRule(ruleId, host, refererBase, origin);
 }
 
-// Áp session rule DNR spoof Referer/Origin cho host của media (vượt hotlink/403 non-DRM).
-// W2.4: `ruleId` do caller cấp (allocateSpoofRuleId) — id riêng mỗi (download, host) nên hai lượt
-// tải cùng host không giật rule của nhau.
-// W2.1: ưu tiên header THẬT của player (`captured`), chỉ BỊA khi không có gì để phát lại.
+// Apply a DNR session rule that spoofs Referer/Origin for the media's host (bypasses non-DRM hotlink/403).
+// W2.4: `ruleId` is provided by the caller (allocateSpoofRuleId) — a separate id per (download, host)
+// so two downloads on the same host don't steal each other's rule.
+// W2.1: prefer the player's REAL headers (`captured`), only FABRICATE when there's nothing to replay.
 async function applySpoof(
   ruleId: number,
   targetUrl: string,
   pageUrl?: string,
   captured?: CapturedContext,
   /**
-   * W2.1 nợ (a) — buộc hạ cấp (chỉ giữ Referer/Origin THẬT, bỏ token) BẤT KỂ có xung đột hay không.
-   * Dùng cho fetch NỀN best-effort (learnMasterChildren): một rule nhạy cảm nền còn sống có thể làm
-   * cú tải THẬT của asset KHÁC (khác token, cùng host) tự hạ token của mình rồi 403 (đã ĐO ở e2e
-   * dual-host-different-token). Vẫn dùng Referer/Origin thật của captured -> không bịa Origin (§2.11).
+   * W2.1 debt (a) — force the downgrade (keep only the REAL Referer/Origin, drop the token)
+   * REGARDLESS of whether there's a conflict. Used for the best-effort BACKGROUND fetch
+   * (learnMasterChildren): a live sensitive background rule can make a REAL download of a DIFFERENT
+   * asset (different token, same host) downgrade its own token and then 403 (MEASURED in e2e
+   * dual-host-different-token). Still uses the capture's real Referer/Origin -> doesn't fabricate an
+   * Origin (§2.11).
    */
   forceStripSensitive = false,
 ): Promise<void> {
   const host = hostFromUrl(targetUrl);
   if (!host) return;
-  // W2.1 nợ (a) — chỉ hạ cấp khi host này đã có rule nhạy cảm của job KHÁC đặt một header nhạy cảm
-  // với giá trị XUNG ĐỘT (khác token) so với header job này sắp đặt. (Đã ĐO: khi hai rule cùng khớp,
-  // DNR cho id cao thắng và áp cho MỌI request tới origin -> job trước nhận nhầm token job sau.)
-  // 🔴 Xung đột GIÁ TRỊ, không phải tồn tại: hai tải cùng site thường chung một token phiên -> nếu
-  // suppress theo tồn tại thì ca cùng-token (phổ biến hơn ca khác-token) bị 403 oan. Cùng token ->
-  // không xung đột -> KHÔNG suppress -> cả hai vẫn tải được. Chỉ tính khi job này THẬT SỰ sắp đặt
-  // header nhạy cảm (plan.hasSensitive); đường lùi Referer/Origin không mang header nhạy cảm nên
-  // không cần kiểm. Best-effort: hai job khởi động sát nhau vẫn có khe đua nhỏ (cả hai đọc rule
-  // trước khi ai kịp ghi) — hẹp, chấp nhận được cho một nợ vốn đã hiếm.
+  // W2.1 debt (a) — only downgrade when this host already has a sensitive rule from ANOTHER job that
+  // sets a sensitive header with a CONFLICTING value (a different token) than what this job is about
+  // to set. (MEASURED: when two rules both match, DNR lets the higher id win and applies it to EVERY
+  // request to the origin -> the earlier job picks up the later job's token.)
+  // 🔴 A VALUE conflict, not mere existence: two downloads on the same site usually share one session
+  // token -> suppressing based on existence would wrongly 403 the same-token case (more common than
+  // the different-token case). Same token -> no conflict -> do NOT suppress -> both still download
+  // fine. Only checked when this job is ACTUALLY about to set a sensitive header (plan.hasSensitive);
+  // the Referer/Origin fallback carries no sensitive header so no check is needed. Best-effort: two
+  // jobs starting close together still have a narrow race window (both read the rule before either
+  // gets to write) — narrow, acceptable for a debt that's already rare.
   let suppressSensitive = forceStripSensitive;
   if (!suppressSensitive && captured) {
     const plan = planHeaderReplay(captured.headers, {
@@ -1651,7 +1711,7 @@ async function applySpoof(
           plan.headers,
         );
       } catch {
-        // getSessionRules lỗi -> giữ hành vi cũ (không suppress); không chặn đường tải.
+        // getSessionRules failed -> keep the old behavior (don't suppress); don't block the download.
       }
     }
   }
@@ -1665,7 +1725,7 @@ async function applySpoof(
   );
   if (!rule) return;
   try {
-    // Cast: DnrRule (string literals) tương thích cấu trúc với kiểu Rule của API.
+    // Cast: DnrRule (string literals) is structurally compatible with the API's Rule type.
     await browser.declarativeNetRequest.updateSessionRules({
       removeRuleIds: [rule.id],
       addRules: [rule],
@@ -1673,12 +1733,12 @@ async function applySpoof(
       typeof browser.declarativeNetRequest.updateSessionRules
     >[0]);
   } catch {
-    // Thiếu host access hoặc API lỗi -> bỏ qua (vẫn thử tải không spoof).
+    // Missing host access or an API error -> ignore (still try downloading without the spoof).
   }
 }
 
-// Xoá session rule spoof theo id (W2.4: id riêng mỗi download). removeRuleIds bỏ qua id không tồn
-// tại nên gọi trùng vô hại.
+// Remove a spoof session rule by id (W2.4: a separate id per download). removeRuleIds skips ids that
+// don't exist, so calling it redundantly is harmless.
 async function removeSpoofRules(ids: number[]): Promise<void> {
   if (ids.length === 0) return;
   try {
@@ -1693,16 +1753,17 @@ async function removeSpoofRules(ids: number[]): Promise<void> {
 }
 
 /**
- * W2.4 — đối soát & dọn rule spoof rò rỉ: xoá mọi session rule trong dải spoof mà KHÔNG còn
- * job/download nào sống dùng tới.
+ * W2.4 — reconcile & clean up leaked spoof rules: remove every session rule in the spoof range that
+ * has NO live job/download still using it.
  *
- * Vì sao BẮT BUỘC: id theo bộ đếm mất tính "re-add cùng host thay thế rule cũ" mà hash-host từng
- * cho, nên rule của một job chết (SW bị giết giữa chừng, không kịp dọn) sẽ nằm lại tới lúc restart
- * trình duyệt. Gọi lúc `onStartup` (mở lại trình duyệt) và mỗi lần SW cold-start giữa phiên.
+ * Why this is REQUIRED: switching to a counter-based id lost the "re-adding the same host replaces
+ * the old rule" property that the old host-hash scheme gave for free, so a dead job's rule (SW killed
+ * mid-way, never got to clean up) would stay around until the browser restarts. Called on
+ * `onStartup` (browser reopened) and every time the SW cold-starts mid-session.
  *
- * An toàn với job đang chạy: job còn sống nằm trong storage ở phase chưa kết thúc -> id của nó vào
- * tập "còn sống" -> KHÔNG bị quét. (SW có thể chết trong khi offscreen vẫn tải; khi SW hồi sinh,
- * job vẫn ở 'fetching' trong storage nên rule của nó được giữ.)
+ * Safe for a running job: a live job sits in storage at a non-terminal phase -> its id is in the
+ * "alive" set -> it is NOT swept. (The SW can die while offscreen keeps downloading; when the SW
+ * revives, the job is still at 'fetching' in storage so its rule is kept.)
  */
 async function sweepStaleSpoofRules(): Promise<void> {
   try {
@@ -1724,7 +1785,7 @@ async function sweepStaleSpoofRules(): Promise<void> {
     const stale = staleSpoofRuleIds(sessionIds, alive);
     if (stale.length > 0) await removeSpoofRules(stale);
   } catch {
-    // best-effort — sweep là dọn rác, không được để nó làm hỏng gì.
+    // best-effort — the sweep is garbage collection, it must never be allowed to break anything.
   }
 }
 

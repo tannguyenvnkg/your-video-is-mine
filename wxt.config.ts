@@ -1,11 +1,11 @@
 import { defineConfig } from 'wxt';
 
-// Cấu hình WXT cho extension MV3 "Your Video Is Mine".
-// Xem https://wxt.dev/api/config.html
+// WXT config for the "Your Video Is Mine" MV3 extension.
+// See https://wxt.dev/api/config.html
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
 
-  // Bật WXT sinh file khai báo globals cho ESLint 9+ (flat config): .wxt/eslint-auto-imports.mjs.
+  // Enable WXT to generate the globals declaration file for ESLint 9+ (flat config): .wxt/eslint-auto-imports.mjs.
   imports: {
     eslintrc: {
       enabled: 9,
@@ -17,7 +17,7 @@ export default defineConfig({
     description:
       'Phát hiện và tải video (HLS/DASH/progressive) về máy. KHÔNG hỗ trợ nội dung được bảo vệ DRM.',
 
-    // Quyền tối thiểu-đủ-dùng cho MV3 (xem CLAUDE.md để biết lý do từng quyền).
+    // Minimal-sufficient permissions for MV3 (see CLAUDE.md for the reasoning behind each one).
     permissions: [
       'storage',
       'downloads',
@@ -27,14 +27,14 @@ export default defineConfig({
       'scripting',
       'tabs',
       'notifications',
-      // W2.7 — tick định kỳ dò job mà offscreen đã chết giữa chừng. Dùng alarms chứ KHÔNG setInterval:
-      // service worker MV3 ngủ bất cứ lúc nào, timer trong SW chết theo; alarm thì đánh thức SW dậy.
+      // W2.7 — periodic tick to detect jobs where offscreen died midway. Use alarms, NOT setInterval:
+      // the MV3 service worker can sleep at any time, killing timers with it; an alarm wakes the SW back up.
       'alarms',
     ],
     host_permissions: ['<all_urls>'],
 
-    // CSP: thêm 'wasm-unsafe-eval' để chạy ffmpeg.wasm trong offscreen.
-    // MV3 mặc định KHÔNG cho WebAssembly -> phải khai báo tường minh. Vẫn KHÔNG dùng CDN.
+    // CSP: add 'wasm-unsafe-eval' to run ffmpeg.wasm in offscreen.
+    // MV3 does NOT allow WebAssembly by default -> must declare it explicitly. Still NOT using a CDN.
     content_security_policy: {
       extension_pages:
         "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",

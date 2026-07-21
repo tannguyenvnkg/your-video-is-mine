@@ -1,17 +1,17 @@
-// Worker ghép video: nơi DUY NHẤT có `FileSystemSyncAccessHandle`.
+// Muxing worker: the ONLY place `FileSystemSyncAccessHandle` is used.
 //
-// 🔴 BA RÀNG BUỘC NỀN TẢNG ĐÃ ĐO, đừng thiết kế lại:
-// 1. `createSyncAccessHandle` CHỈ tồn tại trong Worker. Gọi ở luồng chính offscreen ném
-//    `TypeError: fh.createSyncAccessHandle is not a function` — mà tsc/eslint/vitest đều
-//    không thấy. Đúng lớp lỗi đã giết dự án này ba lần.
-// 2. Trong Worker, `chrome` KHÔNG TỒN TẠI (offscreen còn có `chrome.runtime`, ở đây thì không).
-//    Nên mọi đường dẫn phải do luồng chính truyền vào; libav nạp bằng `import()` ĐỘNG với URL
-//    truyền vào, không phải import tĩnh.
-// 3. `av_write_trailer` KHÔNG BAO GIỜ được bỏ qua mã trả về — xem `runMux`.
+// 🔴 THREE FOUNDATIONAL CONSTRAINTS, VERIFIED IN PRACTICE — don't redesign around them:
+// 1. `createSyncAccessHandle` ONLY exists inside a Worker. Calling it on the offscreen main thread
+//    throws `TypeError: fh.createSyncAccessHandle is not a function` — which tsc/eslint/vitest all
+//    miss. Exactly the class of bug that has killed this project three times.
+// 2. Inside a Worker, `chrome` does NOT EXIST (offscreen still has `chrome.runtime`, but here there's
+//    nothing). So every path must be passed in by the main thread; libav is loaded via a DYNAMIC
+//    `import()` with a passed-in URL, not a static import.
+// 3. The return code of `av_write_trailer` must NEVER be ignored — see `runMux`.
 //
-// Việc nặng chạy ở đây cũng giữ cho luồng chính offscreen RẢNH, nhờ vậy nhịp tim 5 giây
-// (W2.7) vẫn đập trong suốt lúc ghép; nếu ghép ở luồng chính thì một job khoẻ sẽ bị tick
-// dò-offscreen-chết GIẾT OAN sau ~60–90 giây.
+// Running the heavy work here also keeps the offscreen main thread FREE, so the 5-second heartbeat
+// (W2.7) keeps beating throughout muxing; if muxing ran on the main thread, a healthy job would get
+// WRONGLY KILLED by the dead-offscreen-detection tick after ~60–90 seconds.
 
 import {
   moovReserveForPackets,
@@ -22,18 +22,24 @@ import {
   type RemuxResult,
 } from '@/utils/remux-core';
 
-/* ────────────────────────── Giao thức với luồng chính ────────────────────────── */
+/* ────────────────────────── Protocol with the main thread ────────────────────────── */
 
 export interface MuxTrackSpec {
-  /** 'v' | 'a' | '' — tiền tố đặt tên file OPFS, khớp quy ước cũ của FS ảo ffmpeg. */
+  /** 'v' | 'a' | '' — OPFS filename prefix, matching the old convention of ffmpeg's virtual FS. */
   prefix: string;
   kind: 'video' | 'audio' | 'any';
-  /** MPEG-TS cần bitstream filter aac_adtstoasc; fMP4 thì KHÔNG. */
+  /** MPEG-TS needs the aac_adtstoasc bitstream filter; fMP4 does NOT. */
   adtsToAsc: boolean;
 }
 
 type WorkerRequest =
-  | { rid: number; cmd: 'init'; jobKey: string; libavBase: string; libavEntry: string }
+  | {
+      rid: number;
+      cmd: 'init';
+      jobKey: string;
+      libavBase: string;
+      libavEntry: string;
+    }
   | { rid: number; cmd: 'append'; track: string; bytes: ArrayBuffer }
   | { rid: number; cmd: 'mux'; tracks: MuxTrackSpec[] }
   | { rid: number; cmd: 'cleanup'; keep?: string | null }
@@ -45,7 +51,7 @@ interface TrackFile {
   bytes: number;
 }
 
-/* ────────────────────────── Trạng thái ────────────────────────── */
+/* ────────────────────────── State ────────────────────────── */
 
 let jobKey = '';
 let libavBase = '';
@@ -56,17 +62,18 @@ let outName = '';
 let outHandle: FileSystemSyncAccessHandle | null = null;
 
 /**
- * Lỗi chốt lại từ callback ĐỒNG BỘ của device.
+ * Error latched from a device's SYNCHRONOUS callback.
  *
- * 🔴 ĐO ĐƯỢC: `sah.write()` ném `QuotaExceededError` (DOMException, code 22 — phân biệt rõ với
- * `NoModificationAllowedError` code 7 của tranh chấp handle), KHÔNG có đường ghi thiếu: hoặc đủ
- * hoặc ném. Nhưng `libav.onwrite` chạy đồng bộ qua ranh giới wasm nên cú ném đó CÓ THỂ BỊ NUỐT,
- * và file ghi dở vẫn flush sạch, close sạch, đọc lại được — không cách nào phân biệt bằng kích
- * thước. Nên: chốt vào đây, và `remux()` hỏi lại sau mỗi lô ghi và sau `av_write_trailer`.
+ * 🔴 VERIFIED IN PRACTICE: `sah.write()` throws `QuotaExceededError` (DOMException, code 22 —
+ * clearly distinct from `NoModificationAllowedError` code 7 for handle contention); there's no
+ * partial-write path: either it fully succeeds or it throws. But `libav.onwrite` runs synchronously
+ * across the wasm boundary, so that throw CAN GET SWALLOWED, and the partially-written file still
+ * flushes cleanly, closes cleanly, and reads back fine — no way to tell by size alone. So: latch it
+ * here, and `remux()` re-checks it after every write batch and after `av_write_trailer`.
  */
 let deviceError: Error | null = null;
 
-/** Tiến trình KHÔNG GIẢM, kể cả khi phải mux lại lần hai vì đặt chỗ moov thiếu. */
+/** Progress NEVER DECREASES, even when a second mux pass is needed due to insufficient moov reservation. */
 let progressMax = 0;
 function reportProgress(fraction: number): void {
   if (fraction <= progressMax) return;
@@ -80,8 +87,8 @@ const post = (msg: Record<string, unknown>): void => {
 const logLine = (line: string): void => post({ type: 'log', line });
 
 /**
- * Đổi DOMException của OPFS thành thông báo người dùng hiểu được.
- * Phân biệt theo `name`, KHÔNG theo nội dung chuỗi (chuỗi đổi theo phiên bản trình duyệt).
+ * Turn an OPFS DOMException into a message the user can understand.
+ * Distinguished by `name`, NOT by string content (the message text changes across browser versions).
  */
 function describeDeviceError(e: unknown, what: string): Error {
   const name = e instanceof DOMException ? e.name : '';
@@ -104,7 +111,7 @@ async function root(): Promise<FileSystemDirectoryHandle> {
   return await navigator.storage.getDirectory();
 }
 
-/** Tên file OPFS của một track. Có `jobKey` để hai job không bao giờ đụng nhau. */
+/** OPFS filename of a track. Includes `jobKey` so two jobs never collide. */
 const trackFileName = (prefix: string): string =>
   `ymv-${jobKey}-${prefix === '' ? 'm' : prefix}.bin`;
 
@@ -121,14 +128,14 @@ async function openTrack(prefix: string): Promise<TrackFile> {
   return t;
 }
 
-/** Đóng mọi handle. PHẢI gọi trước khi luồng chính `getFile()` — SAH giữ khoá độc quyền. */
+/** Close every handle. MUST be called before the main thread's `getFile()` — SAH holds an exclusive lock. */
 function closeHandles(): void {
   for (const t of tracks.values()) {
     try {
       t.handle.flush();
       t.handle.close();
     } catch {
-      // đã đóng rồi thì thôi
+      // already closed, ignore
     }
   }
   if (outHandle) {
@@ -136,7 +143,7 @@ function closeHandles(): void {
       outHandle.flush();
       outHandle.close();
     } catch {
-      // đã đóng rồi thì thôi
+      // already closed, ignore
     }
     outHandle = null;
   }
@@ -145,20 +152,20 @@ function closeHandles(): void {
 async function removeFiles(keep?: string | null): Promise<void> {
   const dir = await root();
   const names = [...tracks.values()].map((t) => t.name);
-  // File kết quả đã giao cho background (blob URL đang trỏ vào) thì GIỮ LẠI — nó được xoá
-  // lúc `revoke`, hết TTL, hoặc bởi lượt quét lúc khởi động.
+  // KEEP the result file if it has already been handed to background (a blob URL is pointing at
+  // it) — it gets removed on `revoke`, on TTL expiry, or by the startup sweep.
   if (outName && outName !== keep) names.push(outName);
   for (const n of names) {
     try {
       await dir.removeEntry(n);
     } catch {
-      // file có thể chưa từng được tạo
+      // the file may never have been created
     }
   }
   tracks.clear();
 }
 
-/* ────────────────────────── Nạp libav ────────────────────────── */
+/* ────────────────────────── Loading libav ────────────────────────── */
 
 let libavPromise: Promise<LibavLike> | null = null;
 
@@ -172,9 +179,12 @@ interface LibavFactoryModule {
 async function getLibav(): Promise<LibavLike> {
   if (!libavPromise) {
     libavPromise = (async () => {
-      // import() ĐỘNG: URL do luồng chính truyền vào (`chrome.runtime.getURL`). Import TĨNH
-      // không dùng được vì bundler sẽ cố gói libav vào chunk, mà nó phải nằm rời ở public/.
-      const mod = (await import(/* @vite-ignore */ libavEntry)) as LibavFactoryModule;
+      // DYNAMIC import(): URL is passed in by the main thread (`chrome.runtime.getURL`). A static
+      // import can't be used because the bundler would try to bundle libav into a chunk, but it needs
+      // to stay a separate file under public/.
+      const mod = (await import(
+        /* @vite-ignore */ libavEntry
+      )) as LibavFactoryModule;
       mod.default.base = libavBase;
       return await mod.default.LibAV({ noworker: true, nothreads: true });
     })().catch((e: unknown) => {
@@ -185,7 +195,7 @@ async function getLibav(): Promise<LibavLike> {
   return libavPromise;
 }
 
-/* ────────────────────────── Ghép ────────────────────────── */
+/* ────────────────────────── Muxing ────────────────────────── */
 
 interface MuxOutcome {
   outName: string;
@@ -200,21 +210,25 @@ async function runMux(specs: MuxTrackSpec[]): Promise<MuxOutcome> {
   const libav = await getLibav();
   const dir = await root();
 
-  // Đóng handle GHI của các track input rồi mở lại để ĐỌC: cùng một file, nhưng vòng đời
-  // ghi đã xong hẳn. `getSize()` ở đây chính là kích thước cuối — thứ mà
-  // `mkblockreaderdev` bắt buộc phải biết trước.
+  // Close the WRITE handles of the input tracks and reopen them for READING: same file, but the
+  // write lifecycle is fully done. `getSize()` here is exactly the final size — something
+  // `mkblockreaderdev` must know in advance.
   for (const t of tracks.values()) {
     t.handle.flush();
     t.handle.close();
   }
-  const readers = new Map<string, { handle: FileSystemSyncAccessHandle; size: number }>();
+  const readers = new Map<
+    string,
+    { handle: FileSystemSyncAccessHandle; size: number }
+  >();
   for (const [prefix, t] of tracks) {
     const fh = await dir.getFileHandle(t.name);
     const handle = await fh.createSyncAccessHandle();
     const size = handle.getSize();
-    // 🔴 CỔNG ĐẾM BYTE. Bản ffmpeg cũ dò lỗ bằng cách xem mảng tên file có ô nào `undefined`
-    // không — nối byte vào MỘT file thì dấu vết đó biến mất, nên phải đếm byte thay thế.
-    // Ghi thiếu mà vẫn ghép = ra file thiếu đoạn mà không báo gì: đúng thứ W1.2 sinh ra để chặn.
+    // 🔴 BYTE-COUNT GATE. The old ffmpeg version detected gaps by checking whether the filename
+    // array had any `undefined` slot — appending bytes into ONE file makes that signal disappear,
+    // so byte counting has to replace it. Muxing with an incomplete write = a file missing a chunk
+    // with no error reported: exactly what W1.2 exists to block.
     if (size !== t.bytes) {
       throw new Error(
         `Dữ liệu tải về không khớp (đã nhận ${t.bytes} byte, trên đĩa có ${size}) — không ghép để tránh ra file hỏng.`,
@@ -227,7 +241,7 @@ async function runMux(specs: MuxTrackSpec[]): Promise<MuxOutcome> {
   try {
     await dir.removeEntry(outName);
   } catch {
-    // chưa có thì thôi
+    // doesn't exist yet, ignore
   }
   const outFh = await dir.getFileHandle(outName, { create: true });
 
@@ -261,10 +275,12 @@ async function runMux(specs: MuxTrackSpec[]): Promise<MuxOutcome> {
 
   const totalInputBytes = [...readers.values()].reduce((a, r) => a + r.size, 0);
 
-  // Mỗi lần thử ghép: mở lại device ghi + handle ghi sạch (moov đặt chỗ khác nhau -> bố cục khác).
+  // Each mux attempt: reopen a write device + a clean write handle (different moov reservation -> different layout).
   let attempts = 0;
   let outBytes = 0;
-  const attempt = async (moovSizeBytes: number | 'auto'): Promise<RemuxResult> => {
+  const attempt = async (
+    moovSizeBytes: number | 'auto',
+  ): Promise<RemuxResult> => {
     attempts++;
     outHandle = await outFh.createSyncAccessHandle();
     outHandle.truncate(0);
@@ -303,18 +319,21 @@ async function runMux(specs: MuxTrackSpec[]): Promise<MuxOutcome> {
 
   let res = await attempt('auto');
 
-  // 🔴 Đặt chỗ moov THIẾU = file HỎNG MÀ TRÔNG NHƯ THẬT. ĐO ĐƯỢC: `av_write_trailer` trả -28,
-  // hộp sau moov parse thành rác, decoder ném "Invalid NAL unit size" — NHƯNG `ffprobe` vẫn
-  // đọc được thời lượng và THOÁT MÃ 0. Không có cách nào phát hiện bằng cách probe file.
-  // Vì vậy: bám đúng mã trả về, và có hai đường lùi thay vì giao file hỏng.
+  // 🔴 INSUFFICIENT moov reservation = a BROKEN FILE THAT LOOKS FINE. VERIFIED IN PRACTICE:
+  // `av_write_trailer` returns -28, the box after moov parses into garbage, the decoder throws
+  // "Invalid NAL unit size" — BUT `ffprobe` still reads a duration and EXITS CODE 0. There's no way
+  // to detect this by probing the file. So: rely strictly on the return code, and have two fallback
+  // paths instead of handing over a broken file.
   if (res.trailerCode < 0) {
     logLine(`đặt chỗ moov thiếu (mã ${res.trailerCode}) — thử lại rộng gấp 4`);
     res = await attempt(moovReserveForPackets(res.packetsWritten) * 4);
   }
   let moovAtFront = true;
   if (res.trailerCode < 0) {
-    // Đường lùi cuối: KHÔNG đặt chỗ. moov nằm cuối file — mất faststart nhưng LUÔN đúng.
-    logLine(`vẫn thiếu (mã ${res.trailerCode}) — ghép lại với moov ở cuối file`);
+    // Last fallback: NO reservation. moov sits at the end of the file — loses faststart but is ALWAYS correct.
+    logLine(
+      `vẫn thiếu (mã ${res.trailerCode}) — ghép lại với moov ở cuối file`,
+    );
     res = await attempt(0);
     moovAtFront = false;
   }
@@ -328,7 +347,7 @@ async function runMux(specs: MuxTrackSpec[]): Promise<MuxOutcome> {
     try {
       r.handle.close();
     } catch {
-      // thôi
+      // ignore
     }
   }
 
@@ -342,18 +361,18 @@ async function runMux(specs: MuxTrackSpec[]): Promise<MuxOutcome> {
   };
 }
 
-/* ────────────────────────── Vòng nhận lệnh ────────────────────────── */
+/* ────────────────────────── Command receive loop ────────────────────────── */
 
 /**
- * Hàng đợi lệnh TUẦN TỰ.
+ * SEQUENTIAL command queue.
  *
- * 🔴 ĐO ĐƯỢC bằng e2e (không cổng tĩnh nào thấy): vòng tải gọi `append` từ NHIỀU worker fetch
- * song song, nên hai tin `append` cùng bay tới lúc chưa có file nào được mở. `openTrack` có
- * `await` ở giữa -> cả hai cùng thấy `tracks` rỗng -> cùng gọi `createSyncAccessHandle` trên
- * MỘT file, và cái thứ hai ném:
+ * 🔴 VERIFIED IN PRACTICE via e2e (no static gate catches this): the download loop calls `append`
+ * from MULTIPLE parallel fetch workers, so two `append` messages can arrive before any file is
+ * open. `openTrack` has an `await` in the middle -> both see `tracks` as empty -> both call
+ * `createSyncAccessHandle` on the SAME file, and the second one throws:
  *   "Access Handles cannot be created if there is another open Access Handle ..."
- * Toàn bộ job HLS chết ở ~segment 6/10. Xử lý tuần tự cũng bảo đảm luôn thứ tự BYTE khi nối
- * segment — thứ mà hai tin chạy xen kẽ có thể phá.
+ * The entire HLS job dies at ~segment 6/10. Sequential processing also guarantees BYTE ordering
+ * when concatenating segments — something interleaved messages could break.
  */
 let queue: Promise<void> = Promise.resolve();
 
@@ -369,7 +388,7 @@ self.addEventListener('message', (ev: MessageEvent<WorkerRequest>) => {
           cancelled = false;
           deviceError = null;
           progressMax = 0;
-          // Nạp libav SỚM, song song với việc tải segment — giống hệt cách cũ prewarm ffmpeg.
+          // Load libav EARLY, in parallel with segment downloading — same as the old ffmpeg prewarm approach.
           void getLibav().catch(() => undefined);
           post({ rid: msg.rid, ok: true });
           return;

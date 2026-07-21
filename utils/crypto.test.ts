@@ -3,26 +3,26 @@ import { decryptAes128Cbc, hlsSegmentIv, segmentIv } from './crypto';
 import { parseHlsSegments } from './hls';
 
 describe('hlsSegmentIv', () => {
-  it('mặc định = media sequence big-endian ở 4 byte cuối', () => {
+  it('defaults to media sequence, big-endian in the last 4 bytes', () => {
     const iv = hlsSegmentIv(1);
     expect(iv.length).toBe(16);
     expect(Array.from(iv.slice(0, 12))).toEqual(new Array(12).fill(0));
     expect(iv[15]).toBe(1);
   });
 
-  it('seq lớn -> big-endian đúng', () => {
+  it('large seq -> big-endian is correct', () => {
     const iv = hlsSegmentIv(0x01020304);
     expect(Array.from(iv.slice(12))).toEqual([1, 2, 3, 4]);
   });
 
-  it('ưu tiên IV khai báo tường minh', () => {
+  it('an explicitly declared IV takes priority', () => {
     const explicit = new Uint8Array(16).fill(7);
     expect(hlsSegmentIv(5, explicit)).toEqual(explicit);
   });
 });
 
 describe('decryptAes128Cbc (round-trip WebCrypto)', () => {
-  it('giải mã đúng dữ liệu đã mã hoá AES-128-CBC', async () => {
+  it('correctly decrypts AES-128-CBC encrypted data', async () => {
     const key = crypto.getRandomValues(new Uint8Array(16));
     const iv = crypto.getRandomValues(new Uint8Array(16));
     const plain = new TextEncoder().encode('Xin chào HLS AES-128! '.repeat(20));
@@ -41,16 +41,17 @@ describe('decryptAes128Cbc (round-trip WebCrypto)', () => {
   });
 });
 
-// --- Vector IV lấy từ chính fixture e2e ---------------------------------------------------------
+// --- IV vectors taken from the actual e2e fixture ---------------------------------------------------------
 //
-// 🔴 ĐÂY LÀ LƯỚI DUY NHẤT CHO LUẬT IV. Đừng xoá vì "e2e đã phủ AES rồi" — e2e KHÔNG phủ được:
-// đo trên build thật (2026-07-19), đột biến dùng chỉ số mảng thay `seg.seq`, và đột biến bỏ qua
-// `#EXT-X-KEY:IV=`, đều để cả 6 ca e2e AES VẪN XANH. CBC chỉ cho IV chi phối 16 byte đầu mỗi
-// segment: file .mp4 ra GIỐNG HỆT TỪNG BYTE. Số đo: lệch 10/143.444 byte, cùng 100 khung.
+// 🔴 THIS IS THE ONLY NET CATCHING THE IV RULE. Don't delete it because "e2e already covers AES" —
+// e2e does NOT cover this: measured on a real build (2026-07-19), a mutation using the array index
+// instead of `seg.seq`, and a mutation ignoring `#EXT-X-KEY:IV=`, both leave all 6 e2e AES cases
+// STILL GREEN. CBC only lets the IV affect the first 16 bytes of each segment: the resulting .mp4
+// comes out BYTE-IDENTICAL. Measured: a 10/143,444-byte diff, across the same 100 frames.
 //
-// Playlist dưới đây COPY ĐÚNG hình dạng `e2e/fixture-server.mjs` sinh ra (MEDIA-SEQUENCE=7 cho
-// biến thể `seq`, IV a1b2... cho biến thể `iv`). Đổi bên kia thì phải đổi cả bên này.
-describe('segmentIv — luật lấy IV (e2e mù với lớp lỗi này)', () => {
+// The playlist below EXACTLY COPIES the shape `e2e/fixture-server.mjs` generates (MEDIA-SEQUENCE=7
+// for the `seq` variant, IV a1b2... for the `iv` variant). Changing one side requires changing this one too.
+describe('segmentIv — IV selection rule (e2e is blind to this class of bug)', () => {
   const hex = (u: Uint8Array) => Buffer.from(u).toString('hex');
   const playlist = (mediaSeq: number, ivAttr: string) =>
     `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:${mediaSeq}\n` +
@@ -58,9 +59,12 @@ describe('segmentIv — luật lấy IV (e2e mù với lớp lỗi này)', () =>
     Array.from({ length: 3 }, (_, i) => `#EXTINF:1.0,\nseg${i}.ts`).join('\n') +
     '\n#EXT-X-ENDLIST\n';
 
-  it('IV mặc định theo MEDIA SEQUENCE TUYỆT ĐỐI, không theo vị trí trong mảng', () => {
-    const r = parseHlsSegments(playlist(7, ''), 'http://x/hls-aes/seq/media.m3u8');
-    // Nếu ai đó dùng chỉ số mảng (0,1,2) thì ba giá trị này thành ...00/01/02 -> ĐỎ tại đây.
+  it('IV defaults to the ABSOLUTE MEDIA SEQUENCE, not the array position', () => {
+    const r = parseHlsSegments(
+      playlist(7, ''),
+      'http://x/hls-aes/seq/media.m3u8',
+    );
+    // If someone used the array index (0,1,2) instead, these three values would become ...00/01/02 -> RED here.
     expect(r.segments.map((s) => hex(segmentIv(s)))).toEqual([
       '00000000000000000000000000000007',
       '00000000000000000000000000000008',
@@ -68,19 +72,24 @@ describe('segmentIv — luật lấy IV (e2e mù với lớp lỗi này)', () =>
     ]);
   });
 
-  it('IV tường minh THẮNG media sequence, và giống nhau ở mọi segment', () => {
+  it('an explicit IV WINS over media sequence, and is identical across every segment', () => {
     const r = parseHlsSegments(
       playlist(3, ',IV=0xa1b2c3d4e5f60718293a4b5c6d7e8f90'),
       'http://x/hls-aes/iv/media.m3u8',
     );
-    // Bản nào bỏ qua seg.iv sẽ ra ...03/04/05 thay vì a1b2... -> ĐỎ tại đây.
+    // A version that ignores seg.iv would produce ...03/04/05 instead of a1b2... -> RED here.
     expect(r.segments.map((s) => hex(segmentIv(s)))).toEqual(
       Array(3).fill('a1b2c3d4e5f60718293a4b5c6d7e8f90'),
     );
   });
 
-  it('MEDIA-SEQUENCE=0 (ca dễ) vẫn đúng — đây là ca KHÔNG phân biệt được, ghim để khỏi tưởng nhầm', () => {
-    const r = parseHlsSegments(playlist(0, ''), 'http://x/hls-aes/rot/media.m3u8');
-    expect(hex(segmentIv(r.segments[0]!))).toBe('00000000000000000000000000000000');
+  it('MEDIA-SEQUENCE=0 (the easy case) is still correct — this is the case that CANNOT distinguish the two rules, pinned so it is not mistaken for proof', () => {
+    const r = parseHlsSegments(
+      playlist(0, ''),
+      'http://x/hls-aes/rot/media.m3u8',
+    );
+    expect(hex(segmentIv(r.segments[0]!))).toBe(
+      '00000000000000000000000000000000',
+    );
   });
 });

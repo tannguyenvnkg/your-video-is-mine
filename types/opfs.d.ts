@@ -1,12 +1,15 @@
-// Khai báo tối thiểu cho OPFS SyncAccessHandle — lib DOM của TypeScript chưa có (nó chỉ tồn
-// tại trong Worker). ĐO ĐƯỢC trong Worker thật của extension này:
+// Minimal declaration for the OPFS SyncAccessHandle — TypeScript's DOM lib doesn't have it yet
+// (it only exists inside a Worker). ACTUALLY MEASURED in this extension's real Worker:
 //   typeof FileSystemSyncAccessHandle === 'function'
 //   sah_methods = ["write","read","truncate","flush","close","getSize"]
-// Ở luồng chính offscreen thì `createSyncAccessHandle` là undefined — đó là lý do việc ghép
-// bắt buộc phải nằm trong Worker.
+// On the offscreen main thread, `createSyncAccessHandle` is undefined — that's why the stitching
+// step must run inside a Worker.
 interface FileSystemSyncAccessHandle {
   read(buffer: ArrayBufferView, options?: { at?: number }): number;
-  write(buffer: ArrayBufferView | ArrayBuffer, options?: { at?: number }): number;
+  write(
+    buffer: ArrayBufferView | ArrayBuffer,
+    options?: { at?: number },
+  ): number;
   truncate(newSize: number): void;
   flush(): void;
   close(): void;

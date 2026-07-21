@@ -1,28 +1,32 @@
-// Harness: BỆNH CÂM (§2.1) trên stream TÁCH TIẾNG công khai — đây là câu hỏi trung tâm của dự án.
+// Harness: MUTE BUG (§2.1) on a public DEMUXED stream — this is the project's central question.
 //
-// VÌ SAO KHÔNG DÙNG TWITTER/X: X đòi đăng nhập -> máy không tự chạy được. Nhưng bệnh câm KHÔNG
-// phải đặc sản của X: nó bắn trên MỌI master playlist mà luồng tiếng nằm ở rendition riêng
-// (`#EXT-X-MEDIA:TYPE=AUDIO` + variant có `AUDIO="..."`). Stream mẫu công khai của Apple có ĐÚNG
-// cấu trúc đó (ĐÃ ĐO 2026-07-17: 3 group tiếng `aud1/aud2/aud3`, mỗi group có URI riêng, cộng 1
-// group phụ đề `sub1`) -> thay thế X hợp lệ, không cần tài khoản ai cả.
+// WHY NOT USE TWITTER/X: X requires login -> a machine can't run this unattended. But the mute
+// bug is NOT an X specialty: it fires on ANY master playlist whose audio stream lives in a
+// separate rendition (`#EXT-X-MEDIA:TYPE=AUDIO` + variant with `AUDIO="..."`). Apple's public
+// sample stream has EXACTLY that structure (MEASURED 2026-07-17: 3 audio groups `aud1/aud2/aud3`,
+// each group with its own URI, plus 1 subtitle group `sub1`) -> a valid substitute for X, no
+// account needed at all.
 //
-// VÌ SAO KHÔNG CẦN VLC: `ffprobe` trả lời "file ra có track tiếng không" chắc chắn hơn tai người.
-// Lộ trình ghi nghiệm thu W1.1 là "mở VLC nghe có tiếng" — máy làm được việc đó, và làm chính xác hơn.
+// WHY VLC IS NOT NEEDED: `ffprobe` answers "does the output file have an audio track" more
+// reliably than a human ear. The W1.1 roadmap acceptance note is "open VLC, listen for audio" —
+// a machine can do that, and do it more precisely.
 //
-// 🔬 RATCHET TỰ BẬT: hôm nay ca này ĐỎ (file ra CÂM = bug §2.1 còn sống). Khi W1.1 xong, nó sẽ ĐẠT
-// -> harness ĐỎ NGƯỢC đòi đổi `EXPECT_MUTE` thành false. Không thể quên như TODO chết.
+// 🔬 SELF-FLIPPING RATCHET: today this case is RED (output file is MUTE = bug §2.1 still alive).
+// Once W1.1 is done it will PASS -> the harness flips RED demanding `EXPECT_MUTE` be changed to
+// false. Can't be forgotten like a dead TODO.
 //
-// ✅ TRẠNG THÁI 2026-07-17 — ĐÃ XANH sau W1.1 + W1.3: 38.1MB, 600.0s, 201 segment (100 hình +
-// 101 tiếng), track video+audio. Đây là ca THẬT khó nhất của dự án vì gộp ĐỦ BA thứ cùng lúc:
-// fMP4/CMAF + `#EXT-X-BYTERANGE` + tiếng tách rời.
+// ✅ STATUS 2026-07-17 — GREEN after W1.1 + W1.3: 38.1MB, 600.0s, 201 segments (100 video +
+// 101 audio), track video+audio. This is the project's genuinely hardest real case because it
+// combines all THREE things at once: fMP4/CMAF + `#EXT-X-BYTERANGE` + demuxed audio.
 //
-// LỊCH SỬ (đừng đi lại đường cũ): stream này từng chết với `FS error` cụt lủn và cái đó đã bị đặt
-// tên nhầm là "lỗi #30 — fMP4/CMAF hỏng". SAI. Gốc rễ là **byterange** (W1.3): playlist để MỌI
-// segment trỏ cùng file `main.mp4` 27MB, ta bỏ qua `#EXT-X-BYTERANGE` nên tải nguyên 27MB x 101
-// lần rồi nối ~2.8GB byte rác. `concat:` ghép fMP4 hoàn toàn bình thường. Xem PROMPT-THUC-THI.md §2b.
+// HISTORY (don't retread this path): this stream used to die with a terse `FS error` that got
+// misnamed "bug #30 — fMP4/CMAF broken". WRONG. The root cause was **byterange** (W1.3): the
+// playlist has EVERY segment point at the same 27MB `main.mp4` file, we ignored
+// `#EXT-X-BYTERANGE` so we downloaded the full 27MB x 101 times and concatenated ~2.8GB of
+// garbage bytes. `concat:` muxes fMP4 completely fine. See PROMPT-THUC-THI.md §2b.
 //
-// Chạy: pnpm e2e:demuxed   (cần `pnpm build` trước; cần ffprobe). Chậm (~30s, tải 38MB thật) —
-// muốn kiểm bệnh câm NHANH và offline thì dùng `pnpm e2e:demuxed-fixture`.
+// Run: pnpm e2e:demuxed   (needs `pnpm build` first; needs ffprobe). Slow (~30s, downloads a real
+// 38MB) — for a FAST, offline mute-bug check use `pnpm e2e:demuxed-fixture`.
 
 import {
   requireBuild,
@@ -33,13 +37,15 @@ import {
 } from './lib.mjs';
 import { existsSync, statSync } from 'node:fs';
 
-// Master công khai, KHÔNG cần đăng nhập, tách tiếng + có phụ đề (fMP4/CMAF).
+// Public master, NO login needed, demuxed audio + has subtitles (fMP4/CMAF).
 const MASTER_URL =
   'https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8';
 
-// ✅ 2026-07-17: W1.1 + W1.3 xong -> file ra PHẢI CÓ TIẾNG. Ratchet đã tự bật đòi đổi cờ này.
-// Đo thật trên stream Apple: 38.1MB, 600.0s, 201 segment, track video+audio [h264, aac].
-// Từ đây ca này là lưới chống tái phát trên STREAM THẬT (fMP4 + byterange + tách tiếng cùng lúc).
+// ✅ 2026-07-17: W1.1 + W1.3 done -> the output file MUST HAVE AUDIO. The ratchet self-flipped
+// demanding this flag change. Measured for real on the Apple stream: 38.1MB, 600.0s, 201
+// segments, track video+audio [h264, aac].
+// From here on this case is a regression safety net on a REAL STREAM (fMP4 + byterange +
+// demuxed audio all at once).
 const EXPECT_MUTE = false;
 
 const JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_MS ?? 600_000);
@@ -47,34 +53,36 @@ const DOWNLOAD_FOLDER = `yvim-demuxed-${process.pid}`;
 
 requireBuild();
 
-console.log('Bệnh câm (§2.1) trên stream TÁCH TIẾNG công khai (Apple, fMP4)\n');
+console.log('Mute bug (§2.1) on a public DEMUXED stream (Apple, fMP4)\n');
 
 const result = await withBrowser(DOWNLOAD_FOLDER, async ({ page, logs }) => {
   const bail = (msg) => ({
     fatal: msg,
     logs: logs.filter((l) => /error|ffmpeg|FS|Error/i.test(l)).slice(-25),
   });
-  // --- Bước 1: bấm "Chất lượng" y như popup làm ---
+  // --- Step 1: click "Quality" exactly as the popup does ---
   const vres = await page.evaluate(
     (url) => chrome.runtime.sendMessage({ kind: 'manifest/variants', url, mediaType: 'hls' }),
     MASTER_URL,
   );
-  if (!vres?.ok) return bail(`manifest/variants hỏng: ${vres?.error ?? JSON.stringify(vres)}`);
-  console.log(`  ✓ Ra ${vres.variants.length} chất lượng`);
+  if (!vres?.ok) return bail(`manifest/variants broken: ${vres?.error ?? JSON.stringify(vres)}`);
+  console.log(`  ✓ Got ${vres.variants.length} qualities`);
 
-  // Chọn variant NHỎ NHẤT CÓ HÌNH cho nhanh — bệnh câm không phụ thuộc bitrate.
-  // Lọc `height` vì master Apple có cả variant AUDIO-ONLY (HLS Authoring Spec §2.3 bắt buộc):
-  // chọn trúng nó thì "file ra không có hình" chứ chẳng liên quan gì bệnh câm.
+  // Pick the SMALLEST variant WITH VIDEO for speed — the mute bug doesn't depend on bitrate.
+  // Filter by `height` because Apple's master also has an AUDIO-ONLY variant (HLS Authoring
+  // Spec §2.3 requires it): picking that one would give "output has no video", unrelated to
+  // the mute bug.
   const variant = [...vres.variants]
     .filter((v) => (v.height ?? 0) > 0)
     .sort((a, b) => (a.height ?? 1e9) - (b.height ?? 1e9) || (a.bandwidth ?? 0) - (b.bandwidth ?? 0))[0];
   const audioUrl = variant.audioRenditions?.find((r) => r.selected)?.uri;
-  console.log(`  → tải variant ${variant.height ?? '?'}p (${variant.bandwidth ?? '?'} bps)`);
-  console.log(`  → luồng tiếng: ${audioUrl ?? '(không có — tiếng nằm trong variant)'}`);
+  console.log(`  → downloading variant ${variant.height ?? '?'}p (${variant.bandwidth ?? '?'} bps)`);
+  console.log(`  → audio stream: ${audioUrl ?? '(none — audio is inside the variant)'}`);
 
-  // --- Bước 2: tải thật ---
-  // PHẢI gửi audioUrl y như popup (giao thức W1.1). Thiếu nó thì harness tự tay dựng lại đúng
-  // bệnh câm rồi đổ cho sản phẩm — đo sai, và tệ hơn là đo sai theo hướng bi quan.
+  // --- Step 2: real download ---
+  // MUST send audioUrl exactly as the popup does (W1.1 protocol). Without it the harness would
+  // manually reproduce the exact mute bug and then blame the product — a wrong measurement, and
+  // worse, wrong in the pessimistic direction.
   const start = await page.evaluate(
     ([variantUrl, mediaUrl, height, aUrl]) =>
       chrome.runtime.sendMessage({
@@ -87,21 +95,22 @@ const result = await withBrowser(DOWNLOAD_FOLDER, async ({ page, logs }) => {
       }),
     [variant.uri, MASTER_URL, variant.height, audioUrl],
   );
-  if (!start?.ok) return bail(`hls/download bị từ chối: ${JSON.stringify(start)}`);
+  if (!start?.ok) return bail(`hls/download rejected: ${JSON.stringify(start)}`);
 
   const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
-  if (!job) return bail(`job TREO sau ${JOB_TIMEOUT_MS / 1000}s`);
+  if (!job) return bail(`job HUNG after ${JOB_TIMEOUT_MS / 1000}s`);
   if (job.phase !== 'done') return bail(`job ${job.phase}: ${job.error ?? '?'}`);
 
-  // --- Bước 3: soi file ra — CÓ TIẾNG KHÔNG? ---
+  // --- Step 3: inspect the output file — DOES IT HAVE AUDIO? ---
   const file = await waitDownloadedFile(page, 60_000);
-  if (!file) return bail('job done nhưng KHÔNG có file nào rơi xuống đĩa');
+  if (!file) return bail('job done but NO file landed on disk');
   if (file.state !== 'complete') return bail(`download ${file.state}: ${file.error ?? '?'}`);
-  if (!existsSync(file.filename)) return bail(`file không tồn tại: ${file.filename}`);
+  if (!existsSync(file.filename)) return bail(`file does not exist: ${file.filename}`);
 
-  // countFrames: false — stream này dài, đếm khung tốn thời gian mà câu hỏi ở đây là track tiếng.
+  // countFrames: false — this stream is long, counting frames is costly and the question here
+  // is about the audio track.
   const probe = probeFile(file.filename, { countFrames: false });
-  if (probe.error) return bail(`ffprobe không đọc được: ${probe.error}`);
+  if (probe.error) return bail(`ffprobe could not read the file: ${probe.error}`);
 
   return {
     sizeMB: statSync(file.filename).size / 1024 / 1024,
@@ -111,9 +120,9 @@ const result = await withBrowser(DOWNLOAD_FOLDER, async ({ page, logs }) => {
 });
 
 if (result.fatal) {
-  console.log(`\n✗ Không kết luận được: ${result.fatal}`);
+  console.log(`\n✗ Could not reach a conclusion: ${result.fatal}`);
   if (result.logs?.length) {
-    console.log('\n--- log các ngữ cảnh (kể cả offscreen) ---');
+    console.log('\n--- logs from all contexts (including offscreen) ---');
     for (const l of result.logs) console.log(`  ${l}`);
   }
   process.exit(1);
@@ -121,26 +130,26 @@ if (result.fatal) {
 
 const { probe, sizeMB, segments } = result;
 console.log(
-  `\n  File ra: ${sizeMB.toFixed(1)}MB, ${probe.duration.toFixed(1)}s, ${segments} segment\n` +
-    `  Track:   ${probe.codecs.join(' + ') || '(rỗng)'}  [${probe.codecNames.join(', ')}]\n` +
-    `  CÓ TIẾNG? ${probe.hasAudio ? 'CÓ' : 'KHÔNG — CÂM'}\n`,
+  `\n  Output file: ${sizeMB.toFixed(1)}MB, ${probe.duration.toFixed(1)}s, ${segments} segments\n` +
+    `  Track:   ${probe.codecs.join(' + ') || '(empty)'}  [${probe.codecNames.join(', ')}]\n` +
+    `  HAS AUDIO? ${probe.hasAudio ? 'YES' : 'NO — MUTE'}\n`,
 );
 
 if (EXPECT_MUTE) {
   if (!probe.hasAudio) {
-    console.log('⊘ ĐỎ NHƯ DỰ KIẾN — file ra CÂM. Bug §2.1 CÒN SỐNG, nay đã đo được trên stream thật.');
-    console.log('   ghim: §2.1 -> gói W1.1 (ghép luồng tiếng tách rời)');
-    console.log('\n✓ Kết luận thu được (bug đã được xác nhận bằng chạy thật)');
+    console.log('⊘ RED AS EXPECTED — output file is MUTE. Bug §2.1 STILL ALIVE, now measured on a real stream.');
+    console.log('   pinned: §2.1 -> W1.1 package (mux demuxed audio stream)');
+    console.log('\n✓ Conclusion reached (bug confirmed by a real run)');
     process.exit(0);
   }
-  console.log('✗ RATCHET BẬT — file ra CÓ TIẾNG, tức §2.1 đã được sửa.');
-  console.log('   => Đổi EXPECT_MUTE thành false trong e2e/real-demuxed.mjs.');
+  console.log('✗ RATCHET FLIPPED — output file HAS AUDIO, meaning §2.1 has been fixed.');
+  console.log('   => Change EXPECT_MUTE to false in e2e/real-demuxed.mjs.');
   process.exit(1);
 }
 
 if (probe.hasAudio) {
-  console.log('✓ ĐẠT — file ra CÓ TIẾNG. W1.1 hoạt động trên stream tách tiếng thật.');
+  console.log('✓ PASS — output file HAS AUDIO. W1.1 works on a real demuxed stream.');
   process.exit(0);
 }
-console.log('✗ HỎNG — file ra vẫn CÂM dù W1.1 lẽ ra đã xong.');
+console.log('✗ BROKEN — output file is still MUTE even though W1.1 was supposed to be done.');
 process.exit(1);

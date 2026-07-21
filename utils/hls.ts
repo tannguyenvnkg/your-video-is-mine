@@ -1,5 +1,5 @@
-// Parse HLS playlist (m3u8) THUẦN -> danh sách variant chất lượng + danh sách segment.
-// Không phụ thuộc chrome API. Xử lý cả master playlist lẫn media playlist trực tiếp.
+// Pure parsing of an HLS playlist (m3u8) -> list of quality variants + list of segments.
+// No dependency on the chrome API. Handles both master playlists and media playlists directly.
 
 import { Parser, type M3u8Rendition, type M3u8Segment } from 'm3u8-parser';
 import { drmSystemFromHlsPlaylist } from './drm';
@@ -11,11 +11,11 @@ export interface HlsParseResult {
   segmentCount?: number;
   keyMethod?: string;
   isProtected?: boolean;
-  /** Tên hãng DRM để nói cho user (chỉ có khi isProtected vì DRM khai trong playlist). */
+  /** DRM vendor name to tell the user (only present when isProtected, since DRM is declared in the playlist). */
   drmName?: string;
 }
 
-/** Resolve URL tương đối trong manifest thành tuyệt đối. */
+/** Resolve a relative URL in the manifest to an absolute one. */
 export function resolveUri(uri: string, baseUrl: string): string {
   try {
     return new URL(uri, baseUrl).href;
@@ -24,14 +24,14 @@ export function resolveUri(uri: string, baseUrl: string): string {
   }
 }
 
-/** Nhãn hiển thị cho variant: ưu tiên "<height>p", rồi "<kbps> kbps", cuối cùng "Gốc". */
+/** Display label for a variant: prefer "<height>p", then "<kbps> kbps", finally "Gốc" (Original). */
 export function variantLabel(height?: number, bandwidth?: number): string {
   if (height && height > 0) return `${height}p`;
   if (bandwidth && bandwidth > 0) return `${Math.round(bandwidth / 1000)} kbps`;
   return 'Gốc';
 }
 
-/** Sắp xếp variant giảm dần theo độ phân giải rồi bitrate (chất lượng cao lên đầu). */
+/** Sort variants descending by resolution then bitrate (highest quality first). */
 export function sortVariantsDesc(variants: VariantInfo[]): void {
   variants.sort(
     (a, b) =>
@@ -41,17 +41,18 @@ export function sortVariantsDesc(variants: VariantInfo[]): void {
 }
 
 /**
- * Chốt một `VariantInfo.id` duy nhất.
+ * Settle on a unique `VariantInfo.id`.
  *
- * `preferred` là danh tính tự nhiên của định dạng (DASH: `Representation@id` qua `attributes.NAME`).
- * Nó KHÔNG chắc duy nhất — DASH chỉ đòi id duy nhất trong một AdaptationSet, nên hai AdaptationSet
- * vẫn có thể cùng khai `id="1"`. Đụng nhau thì chốt bằng chỉ số.
+ * `preferred` is the format's natural identity (DASH: `Representation@id` via `attributes.NAME`).
+ * It is NOT guaranteed unique — DASH only requires the id to be unique within one AdaptationSet, so
+ * two AdaptationSets can still both declare `id="1"`. On collision, fall back to the index.
  *
- * ⚠️ Phải soi lại BẰNG VÒNG LẶP, không phải một phép thử: `@id` do người đóng gói đặt và ISO
- * 23009-1 §5.3.5.2 chỉ cấm khoảng trắng, nên một representation hoàn toàn có thể tên sẵn là
- * `"a#2"` — đúng dạng ta sinh ra. Thử một lần rồi tin là đủ sẽ trả về id TRÙNG, tái lập đúng con
- * bug "bấm một dòng sáng cả cụm" mà gói này sinh ra để diệt. Vòng lặp luôn dừng: mỗi lượt nối
- * thêm một '#' nên chuỗi dài ra, không thể quay lại giá trị đã có trong `used`.
+ * ⚠️ Must re-check WITH A LOOP, not a single attempt: `@id` is set by whoever packaged the content,
+ * and ISO 23009-1 §5.3.5.2 only forbids whitespace, so a representation can perfectly well already
+ * be named `"a#2"` — exactly the shape we generate. Trying once and trusting it is enough would
+ * return a DUPLICATE id, reproducing the exact "select one row, the whole group highlights" bug this
+ * package exists to kill. The loop always terminates: each round appends another '#', so the string
+ * keeps growing and can never fall back to a value already in `used`.
  */
 export function uniqueVariantId(
   preferred: string | undefined,
@@ -65,7 +66,7 @@ export function uniqueVariantId(
   return id;
 }
 
-/** METHOD mã hoá đầu tiên khác 'NONE' trong danh sách segment. */
+/** First encryption METHOD other than 'NONE' among the segment list. */
 function firstKeyMethod(segments: M3u8Segment[]): string | undefined {
   for (const s of segments) {
     const method = s.key?.method;
@@ -76,7 +77,7 @@ function firstKeyMethod(segments: M3u8Segment[]): string | undefined {
 
 type RawGroups = Record<string, Record<string, M3u8Rendition>>;
 
-/** Dàn phẳng mediaGroups thành danh sách rendition (uri đã resolve tuyệt đối). */
+/** Flatten mediaGroups into a list of renditions (uri already resolved to absolute). */
 function flattenGroups(
   groups: RawGroups,
   manifestUrl: string,
@@ -87,8 +88,9 @@ function flattenGroups(
       out.push({
         groupId,
         name,
-        // CHỈ resolve khi có uri thật: rendition không URI nghĩa là luồng nằm sẵn trong variant
-        // (RFC 8216 §4.3.4.2.1). Resolve `undefined` sẽ nặn ra chính URL master -> URL BỊA.
+        // Resolve ONLY when there's a real uri: a rendition with no URI means the track already lives
+        // inside the variant (RFC 8216 §4.3.4.2.1). Resolving `undefined` would produce the master
+        // URL itself -> a FABRICATED URL.
         ...(r.uri ? { uri: resolveUri(r.uri, manifestUrl) } : {}),
         ...(r.language !== undefined ? { language: r.language } : {}),
         default: r.default === true,
@@ -100,17 +102,21 @@ function flattenGroups(
 }
 
 /**
- * Danh sách rendition cho MỘT variant: bản sao của mọi rendition, cờ `selected` ở cái variant dùng.
+ * Rendition list for ONE variant: a copy of every rendition, with the `selected` flag on the one
+ * this variant uses.
  *
- * Chọn trong ĐÚNG group mà variant trỏ tới (`AUDIO=`), theo thứ tự RFC 8216 §4.3.4.1.1:
- * `DEFAULT=YES` -> `AUTOSELECT=YES` -> cái đầu group.
- * ⚠️ Phải tra qua group của CHÍNH variant: X cấp mỗi tier hình một group tiếng riêng
- * (`audio-128000`/`64000`/`32000`), lấy `#EXT-X-MEDIA` đầu tiên sẽ ghép tiếng 128k vào hình 480x270.
- * ⚠️ Bậc `AUTOSELECT` KHÔNG thừa: bỏ nó thì group có `Commentary` (AUTOSELECT=NO, có URI) đứng
- * TRƯỚC `Main` (AUTOSELECT=YES, không URI) sẽ chọn trúng tiếng bình luận — file ra hình đúng,
- * tiếng SAI HOÀN TOÀN, không một cảnh báo. Thứ tự khai trong manifest không được quyết định thay ta.
- * ⚠️ Bậc cuối "lấy cái đầu" cũng KHÔNG thừa: Twitter/X không khai `DEFAULT` bao giờ (đã đo trên
- * manifest thật) -> chỉ dựa vào DEFAULT sẽ chọn TRƯỢT và câm y cũ.
+ * Pick within the EXACT group the variant points to (`AUDIO=`), following RFC 8216 §4.3.4.1.1
+ * order: `DEFAULT=YES` -> `AUTOSELECT=YES` -> the first entry in the group.
+ * ⚠️ MUST look up via the variant's OWN group: X gives each video tier its own separate audio group
+ * (`audio-128000`/`64000`/`32000`); taking the first `#EXT-X-MEDIA` would pair 128k audio with a
+ * 480x270 video.
+ * ⚠️ The `AUTOSELECT` tier is NOT redundant: dropping it means a group where `Commentary`
+ * (AUTOSELECT=NO, has a URI) is declared BEFORE `Main` (AUTOSELECT=YES, no URI) would pick the
+ * commentary track — video comes out right, audio is COMPLETELY WRONG, with no warning at all. The
+ * declaration order in the manifest must not be allowed to decide this for us.
+ * ⚠️ The final "take the first one" tier is ALSO not redundant: Twitter/X never declares `DEFAULT`
+ * at all (measured on real manifests) -> relying on DEFAULT alone would miss and stay silently wrong,
+ * same as before.
  */
 function renditionsForVariant(
   all: RenditionInfo[],
@@ -123,11 +129,12 @@ function renditionsForVariant(
   const mine = copies.filter((r) => r.groupId === groupId);
   const chosen =
     mine.find((r) => r.default) ?? mine.find((r) => r.autoselect) ?? mine[0];
-  // ⚠️ Variant AUDIO-ONLY: uri của nó CHÍNH LÀ playlist tiếng (HLS Authoring Spec §2.3 bắt buộc
-  // master có một rendition audio-only; Apple/Shaka/Bento4/MediaConvert đều phát). Chọn nó nghĩa là
-  // tải CÙNG một playlist hai lần rồi ép `-map 0:v:0` lên một input KHÔNG có hình -> ffmpeg mã 234,
-  // job lỗi cứng. Mà trước W1.1 chính variant đó tải được (ra file chỉ-tiếng hợp lệ). Không chọn gì
-  // ở đây = trả về đường một-input đã chứng minh chạy, và hết tải đôi.
+  // ⚠️ AUDIO-ONLY variant: its uri IS the audio playlist itself (HLS Authoring Spec §2.3 requires
+  // the master to have an audio-only rendition; Apple/Shaka/Bento4/MediaConvert all emit one).
+  // Selecting it means downloading the SAME playlist twice and then forcing `-map 0:v:0` onto an
+  // input that HAS NO video -> ffmpeg exit code 234, job fails hard. Yet before W1.1 that very
+  // variant downloaded fine (produced a valid audio-only file). Selecting nothing here = return the
+  // proven-working single-input path, and no more double download.
   if (chosen && chosen.uri !== variantUri) chosen.selected = true;
   return copies;
 }
@@ -156,7 +163,7 @@ export function parseHlsManifest(
       const uri = resolveUri(p.uri, manifestUrl);
       const audioRenditions = renditionsForVariant(allAudio, attr.AUDIO, uri);
       return {
-        // Master HLS không có danh tính tự nhiên -> chỉ số là thứ duy nhất chắc chắn phân biệt được.
+        // An HLS master has no natural identity -> the index is the only thing guaranteed to distinguish it.
         id: uniqueVariantId(undefined, index, usedIds),
         uri,
         name: variantLabel(res?.height, bandwidth),
@@ -168,8 +175,8 @@ export function parseHlsManifest(
       };
     });
     sortVariantsDesc(variants);
-    // §7 — master quảng cáo DRM bằng #EXT-X-SESSION-KEY (nó không có segment nào để mà suy ra).
-    // Bỏ qua chỗ này thì mọi site DRM đi lọt ngay từ bước liệt kê chất lượng.
+    // §7 — a master advertises DRM via #EXT-X-SESSION-KEY (it has no segments to infer it from).
+    // Skipping this lets every DRM site slip through right at the quality-listing step.
     const masterDrm = drmSystemFromHlsPlaylist(text);
     return {
       isMaster: true,
@@ -192,131 +199,144 @@ export function parseHlsManifest(
 }
 
 /**
- * Mọi URL playlist CON mà một master khai ra: variant hình + rendition tiếng (đã resolve tuyệt đối).
+ * Every CHILD playlist URL a master declares: video variants + audio renditions (already resolved
+ * to absolute).
  *
- * Dùng cho W4.2: player fetch cả master lẫn con, webRequest thấy hết, nên một video hiện thành
- * nhiều dòng "HLS" giống hệt nhau trong popup. Biết tập con này thì ẩn được chúng đi.
+ * Used for W4.2: the player fetches both the master and its children, webRequest observes all of
+ * them, so a single video ends up showing as several identical "HLS" rows in the popup. Knowing
+ * this child set lets us hide them.
  *
- * ⚠️ Guard `isMaster` KHÔNG thừa: parse một MEDIA playlist trả về `variants: [{ uri: manifestUrl }]`
- * — tức CHÍNH NÓ. Bỏ guard thì mỗi playlist con tự khai mình là con của chính mình rồi tự ẩn ->
- * site nào phát thẳng media playlist (không master) sẽ có popup TRỐNG TRƠN.
- * ⚠️ Dedupe bằng Set là BẮT BUỘC: `audioRenditions` mang rendition của MỌI group ở MỌI variant
- * (thiết kế §3.2), nên cùng một URL tiếng xuất hiện lặp ở mỗi variant.
+ * ⚠️ The `isMaster` guard is NOT redundant: parsing a MEDIA playlist returns `variants: [{ uri: manifestUrl }]`
+ * — i.e. ITSELF. Without the guard, every child playlist would declare itself a child of itself and
+ * hide itself -> any site serving a media playlist directly (no master) would show an EMPTY popup.
+ * ⚠️ Deduping with a Set is REQUIRED: `audioRenditions` carries renditions from EVERY group on EVERY
+ * variant (§3.2 design), so the same audio URL shows up repeated across variants.
  */
 export function childUrlsOfMaster(parsed: HlsParseResult): string[] {
   if (!parsed.isMaster) return [];
   const out = new Set<string>();
   for (const v of parsed.variants) {
     out.add(v.uri);
-    // Rendition không có `uri` = tiếng nằm sẵn trong variant (RFC 8216 §4.3.4.2.1) -> không có
-    // URL riêng nào để ẩn. Nặn ra một cái ở đây sẽ ẩn nhầm chính master.
+    // A rendition with no `uri` = audio already lives inside the variant (RFC 8216 §4.3.4.2.1) ->
+    // there's no separate URL to hide. Fabricating one here would end up hiding the master itself.
     for (const r of v.audioRenditions ?? []) if (r.uri) out.add(r.uri);
   }
   return [...out];
 }
 
-// --- G5: phân tích segment để tải & giải mã ---
+// --- G5: segment analysis for downloading & decrypting ---
 
 export type HlsEncryption = 'none' | 'aes-128' | 'sample-aes' | 'other';
 
-/** Một đoạn byte trong file lớn. `offset` luôn TUYỆT ĐỐI (byte đầu tiên, tính từ 0). */
+/** A byte range within a larger file. `offset` is always ABSOLUTE (first byte, counted from 0). */
 export interface HlsByteRange {
   length: number;
   offset: number;
 }
 
 export interface HlsSegment {
-  /** URL tuyệt đối của segment (.ts/.m4s). */
+  /** Absolute URL of the segment (.ts/.m4s). */
   uri: string;
-  /** thời lượng (giây). */
+  /** duration (seconds). */
   duration: number;
-  /** media sequence number (dùng làm IV mặc định khi #EXT-X-KEY không khai báo IV). */
+  /** media sequence number (used as the default IV when #EXT-X-KEY doesn't declare one). */
   seq: number;
   keyMethod?: string;
-  /** URL tuyệt đối của key. */
+  /** Absolute URL of the key. */
   keyUri?: string;
-  /** IV 16 byte nếu khai báo tường minh trong #EXT-X-KEY. */
+  /** 16-byte IV if declared explicitly in #EXT-X-KEY. */
   iv?: Uint8Array;
-  /** URL tuyệt đối của init segment (fMP4) nếu có #EXT-X-MAP. */
+  /** Absolute URL of the init segment (fMP4) if #EXT-X-MAP is present. */
   initUri?: string;
   /**
-   * 🔴 KHOÁ CỦA RIÊNG INIT — KHÔNG được suy từ `keyMethod`/`keyUri` của segment.
+   * 🔴 THE INIT'S OWN KEY — must NOT be inferred from the segment's `keyMethod`/`keyUri`.
    *
-   * RFC 8216 §4.3.2.5 phân phạm vi khoá theo VỊ TRÍ TAG: một `#EXT-X-KEY` phủ các Media
-   * Initialization Section do `#EXT-X-MAP` khai giữa nó và `#EXT-X-KEY` kế tiếp. Nên:
-   *     KEY rồi tới MAP  -> init ĐƯỢC mã hoá bằng khoá đó
-   *     MAP rồi tới KEY  -> init TRONG SÁNG, chỉ segment mới mã hoá (hợp lệ và phổ biến:
-   *                         init trong sáng cho player đọc codec trước khi đi xin khoá)
+   * RFC 8216 §4.3.2.5 scopes keys by TAG POSITION: an `#EXT-X-KEY` covers the Media Initialization
+   * Sections declared by `#EXT-X-MAP` between it and the next `#EXT-X-KEY`. So:
+   *     KEY then MAP  -> init IS encrypted with that key
+   *     MAP then KEY  -> init is CLEAR, only the segment is encrypted (valid and common: a clear
+   *                      init lets the player read the codec before it goes to fetch the key)
    *
-   * ĐÃ ĐO (2026-07-20, m3u8-parser@7.2.0): parser mô hình ĐÚNG phạm vi này qua `segment.map.key`
-   * — có mặt ở thứ tự thứ nhất, VẮNG ở thứ tự thứ hai. Bản trước dùng khoá của segment nên đem
-   * giải mã một init vốn trong sáng -> lỗi padding -> giết oan một stream khoẻ kèm câu đổ tội máy
-   * chủ. Ca e2e `fmp4-clear-init` ghim chuyện này. **Đừng gộp mấy trường này về khoá của segment.**
+   * MEASURED (2026-07-20, m3u8-parser@7.2.0): the parser models this scope CORRECTLY via
+   * `segment.map.key` — present in the first ordering, ABSENT in the second. The previous version
+   * used the segment's key, so it decrypted an init that was actually clear -> padding error ->
+   * wrongly killed a healthy stream while blaming the server. The e2e case `fmp4-clear-init` pins
+   * this down. **Do not collapse these fields onto the segment's key.**
    */
   initKeyMethod?: string;
-  /** URL tuyệt đối của khoá init (có thể KHÁC khoá segment). */
+  /** Absolute URL of the init key (can be DIFFERENT from the segment key). */
   initKeyUri?: string;
-  /** IV tường minh của init. RFC bắt buộc khai IV khi khoá phủ init. */
+  /** Explicit IV of the init. RFC requires an IV to be declared whenever the key covers the init. */
   initIv?: Uint8Array;
   /**
-   * Đoạn byte của segment trong file lớn (#EXT-X-BYTERANGE). Có mặt = MỌI segment thường trỏ
-   * CÙNG một `uri`, chỉ khác đoạn -> tầng fetch BẮT BUỘC gửi header `Range`, nếu không sẽ tải
-   * nguyên file lớn một lần cho MỖI segment (đo thật: Apple fMP4 = 27MB x 101 lần).
+   * Byte range of the segment within a larger file (#EXT-X-BYTERANGE). Present = ALL segments
+   * typically point to the SAME `uri`, differing only by range -> the fetch layer MUST send a
+   * `Range` header, otherwise it downloads the entire large file once for EVERY segment (measured:
+   * Apple fMP4 = 27MB x 101 times).
    */
   byterange?: HlsByteRange;
-  /** Đoạn byte của init segment (#EXT-X-MAP BYTERANGE). Xem chú thích ở mapper. */
+  /** Byte range of the init segment (#EXT-X-MAP BYTERANGE). See the note on the mapper. */
   initByterange?: HlsByteRange;
 }
 
 export interface HlsSegmentsResult {
   segments: HlsSegment[];
   encryption: HlsEncryption;
-  /** true nếu nội dung được bảo vệ (SAMPLE-AES/DRM) -> KHÔNG hỗ trợ, phải DỪNG. */
+  /** true if the content is protected (SAMPLE-AES/DRM) -> NOT supported, must STOP. */
   isProtected: boolean;
-  /** Tên hãng DRM (FairPlay/PlayReady/Widevine/...) để thông báo nói rõ, không chỉ "không hỗ trợ". */
+  /** DRM vendor name (FairPlay/PlayReady/Widevine/...) to state clearly, not just "not supported". */
   drmName?: string;
   totalDuration: number;
-  /** có init segment fMP4 không. */
+  /** whether there is an fMP4 init segment. */
   hasInit: boolean;
   /**
-   * W1.5 — playlist parse được nhưng ta CỐ Ý không tải: nêu lý do người thường hiểu được.
+   * W1.5 — the playlist parses fine but we DELIBERATELY refuse to download it: give a reason an
+   * ordinary person can understand.
    *
-   * Khác `isProtected` (ranh giới DRM) ở chỗ đây là giới hạn kỹ thuật của ta, và khác "0 segment"
-   * ở chỗ nó nói ĐÚNG nguyên nhân. Sinh ra vì DASH đa Period ghép mù sẽ ra file hỏng mà ffmpeg
-   * vẫn nhận -> job báo "xong" trong khi file sai. Giao file hỏng im lặng tệ hơn từ chối thẳng.
+   * Differs from `isProtected` (the DRM boundary) in that this is one of OUR technical limitations,
+   * and differs from "0 segments" in that it states the ACTUAL cause. Introduced because blindly
+   * concatenating a multi-Period DASH stream produces a corrupt file that ffmpeg still accepts ->
+   * the job reports "done" while the file is wrong. Silently handing over a broken file is worse
+   * than an outright refusal.
    */
   unsupportedReason?: string;
   /**
-   * W1.5 — không có segment nào NHƯNG có một file media tải thẳng được (DASH SegmentBase: cả
-   * representation chỉ là một .mp4 + indexRange). Tầng trên định tuyến sang luồng progressive.
+   * W1.5 — no segments at all BUT there is a media file that can be downloaded directly (DASH
+   * SegmentBase: the whole representation is just one .mp4 + indexRange). The layer above routes
+   * this to the progressive-download path.
    */
   directUrl?: string;
   /**
-   * W1.4 — số CHỖ NỐI (timestamp reset) nằm BÊN TRONG danh sách segment sắp ghép, thường do chèn
-   * quảng cáo giữa chừng. > 0 nghĩa là byte-concat + `-c copy` sẽ đưa cho ffmpeg một dòng DTS
-   * KHÔNG đơn điệu -> file chạy được đoạn đầu rồi lệch tiếng/đứng hình/sai thời lượng, mà cảnh
-   * báo 'Non-monotonous DTS' chỉ rơi vào `console.debug` -> user vẫn nhận "Đã tải xong ✓".
+   * W1.4 — number of SEAMS (timestamp resets) INSIDE the segment list about to be concatenated,
+   * usually from a mid-stream ad insertion. > 0 means byte-concat + `-c copy` will hand ffmpeg a
+   * NON-monotonic DTS stream -> the file plays fine at first then desyncs audio/freezes/reports the
+   * wrong duration, while the 'Non-monotonous DTS' warning only lands in `console.debug` -> the user
+   * still sees "Download complete ✓".
    *
-   * BẮT BUỘC (không phải optional) là CỐ Ý: để trường này vắng được thì mọi tầng trên so
-   * `undefined > 0` ra false và cảnh báo biến mất KHÔNG một tiếng động — đúng lớp lỗi §2.1.
+   * REQUIRED (not optional) is DELIBERATE: if this field were allowed to be absent, every layer
+   * above comparing `undefined > 0` would get false and the warning would vanish WITHOUT A SOUND —
+   * exactly the class of bug §2.1 targets.
    */
   discontinuityCount: number;
 }
 
 /**
- * W1.4 — đếm CHỖ NỐI THẬT bên trong danh sách segment ta sắp ghép.
+ * W1.4 — count the REAL SEAMS inside the segment list we're about to concatenate.
  *
- * 🔬 ĐO THẬT (m3u8-parser@7.2.0, probe 2026-07-19) — **`discontinuityStarts.length` SAI CẢ HAI
- * CHIỀU**, đừng "đơn giản hoá" về lại nó:
- *  - Tag đứng TRƯỚC segment đầu tiên -> `[0]`. Đó là mốc reset so với đoạn ta KHÔNG tải; bên trong
- *    file ghép ra **không có chỗ nối nào**. Đếm nó = doạ user vô cớ (giết oan lượt tải khoẻ).
- *  - Hai tag LIỀN NHAU -> `[1,1]`: chỉ số **LẶP**, mà chỗ nối chỉ có MỘT -> đếm gấp đôi.
- *  - `#EXT-X-DISCONTINUITY-SEQUENCE:3` không kèm tag nào -> `[]` (đúng 0): nó đếm các lần đứt
- *    TRƯỚC cửa sổ này, không phải bên trong. Đừng dùng nó để đếm.
+ * 🔬 MEASURED (m3u8-parser@7.2.0, probed 2026-07-19) — **`discontinuityStarts.length` is WRONG IN
+ * BOTH DIRECTIONS**, don't "simplify" back to it:
+ *  - A tag positioned BEFORE the first segment -> `[0]`. That's a reset marker relative to a portion
+ *    we do NOT download; inside the concatenated file there **is no seam at all**. Counting it =
+ *    scaring the user for nothing (wrongly kills a healthy download).
+ *  - Two ADJACENT tags -> `[1,1]`: the index is **repeated**, but there's only ONE seam -> double
+ *    counted.
+ *  - `#EXT-X-DISCONTINUITY-SEQUENCE:3` with no accompanying tag -> `[]` (correctly 0): it counts
+ *    breaks BEFORE this window, not inside it. Don't use it for counting.
  *
- * Vậy luật là: **chỉ số PHÂN BIỆT và LỚN HƠN 0**. Gộp cả hai nguồn (mảng `discontinuityStarts` và
- * cờ trên từng segment) vì chúng là hai góc nhìn của cùng một thứ — lệch nhau thì lấy hợp là phía
- * an toàn: bỏ sót một chỗ nối thì file hỏng im lặng, còn `Set` đã chặn sẵn đường đếm trùng.
+ * So the rule is: **DISTINCT indices GREATER THAN 0**. Merge both sources (the `discontinuityStarts`
+ * array and the per-segment flag) because they're two views of the same thing — when they disagree,
+ * taking the union is the safe side: missing a seam means a silently broken file, while the `Set`
+ * already guards against double-counting.
  */
 export function countDiscontinuities(
   segments: readonly { discontinuity?: boolean }[],
@@ -333,13 +353,15 @@ export function countDiscontinuities(
 }
 
 /**
- * W2.3 — MỘT url đại diện cho MỖI host xuất hiện trong danh sách segment (segment.uri, keyUri,
- * initUri). Background dùng để bật spoof Referer/Origin cho MỌI host TRƯỚC khi tải.
+ * W2.3 — ONE representative url per HOST appearing in the segment list (segment.uri, keyUri,
+ * initUri). Used by background to turn on Referer/Origin spoofing for EVERY host BEFORE downloading.
  *
- * Vì sao cần: §2.4 — segment rất hay ở CDN khác host với playlist, và key AES gần như LUÔN ở host
- * khác, lại là thứ hay kiểm Referer nhất. Chỉ spoof host playlist thì job tới 'fetching' rồi mọi
- * segment/key 403 -> "Tải segment lỗi sau 4 lần thử: HTTP 403". Trả một url/host (không phải cả
- * host trần) để applySpoof dựng được Referer, và để không nở rule theo số segment.
+ * Why it's needed: §2.4 — segments are very often on a CDN with a different host than the playlist,
+ * and the AES key is almost ALWAYS on yet another host, which also happens to be the thing most
+ * likely to check Referer. Spoofing only the playlist host means the job reaches 'fetching' and then
+ * every segment/key 403s -> "Segment download failed after 4 attempts: HTTP 403". Returning one
+ * url/host (not the bare host) lets applySpoof construct the Referer, and keeps the rule count from
+ * growing with the segment count.
  */
 export function spoofTargetsFromSegments(segments: HlsSegment[]): string[] {
   const byHost = new Map<string, string>();
@@ -357,14 +379,15 @@ export function spoofTargetsFromSegments(segments: HlsSegment[]): string[] {
     add(s.uri);
     add(s.keyUri);
     add(s.initUri);
-    // Khoá của init có thể là URI KHÁC khoá segment (và khoá AES gần như luôn ở host khác) —
-    // bỏ sót nó là job đi tới 'fetching' rồi chết 403 ở đúng bước lấy khoá init.
+    // The init's key can be a DIFFERENT URI from the segment key (and the AES key is almost always
+    // on a different host) — missing it means the job reaches 'fetching' and then dies with a 403
+    // right at the init-key-fetch step.
     add(s.initKeyUri);
   }
   return [...byHost.values()];
 }
 
-/** Chuyển IV kiểu Uint32Array (m3u8-parser, 4 x uint32 big-endian) sang 16 byte. */
+/** Convert a Uint32Array-style IV (m3u8-parser, 4 x uint32 big-endian) to 16 bytes. */
 function ivToBytes(iv?: Uint32Array): Uint8Array | undefined {
   if (!iv || iv.length < 4) return undefined;
   const bytes = new Uint8Array(16);
@@ -374,8 +397,8 @@ function ivToBytes(iv?: Uint32Array): Uint8Array | undefined {
 }
 
 /**
- * Từ một MEDIA playlist -> danh sách segment (uri tuyệt đối, thời lượng, key/IV, init).
- * Xác định kiểu mã hoá; SAMPLE-AES/khác AES-128 -> isProtected (DỪNG, không hỗ trợ).
+ * From a MEDIA playlist -> segment list (absolute uri, duration, key/IV, init).
+ * Determines the encryption type; SAMPLE-AES/anything other than AES-128 -> isProtected (STOP, not supported).
  */
 export function parseHlsSegments(
   text: string,
@@ -392,15 +415,18 @@ export function parseHlsSegments(
 
   const segments: HlsSegment[] = raw.map((s, i) => {
     const key = s.key;
-    // W1.3 — HAI luật byterange KHÁC NHAU, đừng gộp làm một (đã đo thật ở m3u8-parser@7.2.0):
-    //  - segment: parser ĐÃ cộng dồn offset thành TUYỆT ĐỐI (thiếu `@offset` = nối tiếp segment
-    //    trước). Cộng dồn thêm lần nữa = nhân đôi offset = đọc sai chỗ.
-    //  - #EXT-X-MAP: KHÔNG cộng dồn, và thiếu `@offset` thì key `offset` VẮNG HẲN. RFC 8216
-    //    §4.3.2.5: vắng `@offset` nghĩa là bắt đầu từ byte 0 — KHÔNG phải nối tiếp gì cả.
+    // W1.3 — TWO DIFFERENT byterange rules, don't merge them into one (measured for real on
+    // m3u8-parser@7.2.0):
+    //  - segment: the parser has ALREADY accumulated the offset into an ABSOLUTE one (missing
+    //    `@offset` = follows right after the previous segment). Accumulating again = doubling the
+    //    offset = reading the wrong spot.
+    //  - #EXT-X-MAP: NOT accumulated, and when `@offset` is missing the `offset` key is ABSENT
+    //    entirely. RFC 8216 §4.3.2.5: a missing `@offset` means starting at byte 0 — NOT following
+    //    on from anything.
     const br = s.byterange;
     const mapBr = s.map?.byterange;
-    // Khoá của INIT lấy từ `s.map.key`, KHÔNG phải `s.key` — xem chú thích ở HlsSegment.initKeyMethod.
-    // Vắng `map.key` nghĩa là init nằm NGOÀI phạm vi mọi #EXT-X-KEY, tức để trần.
+    // The INIT's key comes from `s.map.key`, NOT `s.key` — see the note on HlsSegment.initKeyMethod.
+    // A missing `map.key` means the init falls OUTSIDE the scope of every #EXT-X-KEY, i.e. it's clear.
     const mapKey = s.map?.key;
     return {
       uri: resolveUri(s.uri, manifestUrl),
@@ -430,13 +456,14 @@ export function parseHlsSegments(
           ? 'other'
           : 'none';
 
-  // §7 — soi THẲNG văn bản: m3u8-parser nuốt `segment.key` với FairPlay/PlayReady/Widevine, nên
-  // mọi suy luận từ `encryption` (vốn dẫn từ segment.key) đều thấy playlist DRM là "sạch". ĐÃ ĐO.
+  // §7 — inspect the RAW TEXT directly: m3u8-parser swallows `segment.key` for FairPlay/PlayReady/
+  // Widevine, so any inference from `encryption` (which derives from segment.key) sees the DRM
+  // playlist as "clean". MEASURED.
   const drmName = drmSystemFromHlsPlaylist(text);
   return {
     segments,
     encryption,
-    // AES-128 giải mã được -> KHÔNG protected. SAMPLE-AES/khác (thường EME/DRM) -> protected.
+    // AES-128 can be decrypted -> NOT protected. SAMPLE-AES/other (usually EME/DRM) -> protected.
     isProtected:
       drmName !== null || encryption === 'sample-aes' || encryption === 'other',
     ...(drmName ? { drmName } : {}),

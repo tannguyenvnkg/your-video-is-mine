@@ -1,5 +1,5 @@
-// Test cho utils/remux-time.ts. Mọi con số kỳ vọng đều LẤY TỪ ĐO ĐẠC THẬT:
-// ffmpeg 8.1 `-c copy` trên chính các fixture đó, và AVPacket thật của bản libav.js ts2mp4d.
+// Test for utils/remux-time.ts. Every expected number is TAKEN FROM REAL MEASUREMENTS:
+// ffmpeg 8.1 `-c copy` on the same fixtures, and real AVPacket from the actual libav.js ts2mp4d build.
 import { describe, expect, it } from 'vitest';
 import {
   NOPTS_HI,
@@ -42,17 +42,17 @@ const pk = (
   timeBase: TimeBase = TB90,
 ): TimedPacket => ({ streamIndex, pts, dts, duration, timeBase });
 
-/* ══════════════ 1. Biểu diễn 64-bit ══════════════ */
-/** Lấy phần tử đầu, ném nếu rỗng — để test không phải rải `!` (noUncheckedIndexedAccess). */
+/* ══════════════ 1. 64-bit representation ══════════════ */
+/** Grab the first element, throw if empty — so tests don't have to sprinkle `!` (noUncheckedIndexedAccess). */
 function first<T>(xs: readonly T[]): T {
   const x = xs[0];
   if (x === undefined) throw new Error('mảng rỗng');
   return x;
 }
 
-describe('i64ToNumber — ghép cặp (lo, hi) của libav.js', () => {
-  // Bảng này ĐO ĐƯỢC: ghi giá trị vào AVPacket thật qua AVPacket_pts_s/AVPacket_ptshi_s
-  // rồi đọc lại bằng AVPacket_pts/AVPacket_ptshi. Word thấp trả về CÓ DẤU.
+describe('i64ToNumber — pairing libav.js (lo, hi)', () => {
+  // This table is MEASURED: write the value into a real AVPacket via AVPacket_pts_s/AVPacket_ptshi_s
+  // then read it back with AVPacket_pts/AVPacket_ptshi. The low word comes back SIGNED.
   const MEASURED: Array<[string, number, number, number]> = [
     ['zero', 0, 0, 0],
     ['one', 1, 0, 1],
@@ -72,21 +72,21 @@ describe('i64ToNumber — ghép cặp (lo, hi) của libav.js', () => {
     expect(i64ToNumber(lo, hi)).toBe(expected);
   });
 
-  it('KHÔNG được viết hi*2^32 + lo (dùng lo có dấu) — sai 6/15 ca đã đo', () => {
-    // Chính là defect (ii). 2^31 với lo = -2147483648.
+  it('MUST NOT write hi*2^32 + lo (using signed lo) — wrong on 6/15 measured cases', () => {
+    // This is exactly defect (ii). 2^31 with lo = -2147483648.
     const naive = 0 * 4294967296 + -2147483648;
     expect(naive).toBe(-2147483648);
     expect(i64ToNumber(-2147483648, 0)).toBe(2147483648);
     expect(i64ToNumber(-2147483648, 0)).not.toBe(naive);
   });
 
-  it('i64ToBigInt khớp i64ToNumber trong vùng an toàn của Number', () => {
+  it('i64ToBigInt matches i64ToNumber within Number safe range', () => {
     for (const [, lo, hi, expected] of MEASURED) {
       expect(i64ToBigInt(lo, hi)).toBe(BigInt(expected));
     }
   });
 
-  it('numberToI64 là nghịch đảo của i64ToNumber', () => {
+  it('numberToI64 is the inverse of i64ToNumber', () => {
     for (const [, lo, hi, v] of MEASURED) {
       const s = numberToI64(v);
       expect(i64ToNumber(s.lo, s.hi)).toBe(v);
@@ -97,16 +97,16 @@ describe('i64ToNumber — ghép cặp (lo, hi) của libav.js', () => {
 });
 
 describe('AV_NOPTS_VALUE', () => {
-  it('nhận đúng cặp đã đo (lo=0, hi=-2147483648)', () => {
+  it('accepts the exact measured pair (lo=0, hi=-2147483648)', () => {
     expect(NOPTS_LO).toBe(0);
     expect(NOPTS_HI).toBe(-2147483648);
     expect(isNoPts(NOPTS_LO, NOPTS_HI)).toBe(true);
   });
-  it('không nhận nhầm timestamp hợp lệ', () => {
+  it('does not mistake a valid timestamp for NOPTS', () => {
     expect(isNoPts(0, 0)).toBe(false);
-    expect(isNoPts(-2147483648, 0)).toBe(false); // đây là 2^31, KHÔNG phải NOPTS
+    expect(isNoPts(-2147483648, 0)).toBe(false); // this is 2^31, NOT NOPTS
   });
-  it('readPts/readDts trả null cho NOPTS, số cho giá trị thật', () => {
+  it('readPts/readDts return null for NOPTS, a number for real values', () => {
     expect(readPts({ pts: NOPTS_LO, ptshi: NOPTS_HI })).toBeNull();
     expect(readDts({ dts: NOPTS_LO, dtshi: NOPTS_HI })).toBeNull();
     expect(readPts({ pts: -1, ptshi: 1 })).toBe(8589934591);
@@ -114,79 +114,79 @@ describe('AV_NOPTS_VALUE', () => {
   });
 });
 
-/* ══════════════ 2. Đổi timebase ══════════════ */
+/* ══════════════ 2. Timebase conversion ══════════════ */
 describe('rescaleTs / toMicros / fromMicros', () => {
-  it('90kHz -> micro giây', () => {
+  it('90kHz -> microseconds', () => {
     expect(toMicros(90000, TB90)).toBe(1_000_000);
-    expect(toMicros(126000, TB90)).toBe(1_400_000); // mốc audio đã đo của fixture
+    expect(toMicros(126000, TB90)).toBe(1_400_000); // measured audio marker from the fixture
   });
-  it('khứ hồi không trôi ở các mốc đã đo', () => {
+  it('round-trip does not drift at the measured markers', () => {
     for (const v of [
       0, 2090, 126000, 128090, 7200128090, 2146943648, -540000,
     ]) {
       expect(fromMicros(toMicros(v, TB90), TB90)).toBe(v);
     }
   });
-  it('làm tròn nửa-ra-xa-số-0 (giống av_rescale_q)', () => {
+  it('rounds half-away-from-zero (like av_rescale_q)', () => {
     expect(rescaleTs(1, { num: 1, den: 3 }, { num: 1, den: 2 })).toBe(1);
     expect(rescaleTs(-1, { num: 1, den: 3 }, { num: 1, den: 2 })).toBe(-1);
   });
 });
 
-/* ══════════════ 3. So sánh packet ══════════════ */
-describe('comparePackets — PHẢI so trên giá trị 64-bit đã ghép', () => {
-  it('xếp đúng thứ tự khi DTS vượt qua 2^31', () => {
-    // ĐO ĐƯỢC trên fixture 2p31: word thấp nhảy +2147483647 -> -2147483648.
+/* ══════════════ 3. Packet comparison ══════════════ */
+describe('comparePackets — MUST compare on the reassembled 64-bit value', () => {
+  it('orders correctly when DTS crosses 2^31', () => {
+    // MEASURED on the 2p31 fixture: low word jumps +2147483647 -> -2147483648.
     const before = pk(0, 2147483647);
     const after = pk(0, 2147483648);
     expect(comparePackets(before, after)).toBeLessThan(0);
   });
-  it('bản sai (so word thấp) sẽ đảo — đây là hồi quy cần chặn', () => {
+  it('the wrong version (comparing low word) flips order — this is the regression to block', () => {
     const loBefore = numberToI64(2147483647).lo;
     const loAfter = numberToI64(2147483648).lo;
-    expect(loAfter - loBefore).toBeLessThan(0); // sai
+    expect(loAfter - loBefore).toBeLessThan(0); // wrong
     expect(comparePackets(pk(0, 2147483647), pk(0, 2147483648))).toBeLessThan(
       0,
-    ); // đúng
+    ); // correct
   });
-  it('quy về cùng timebase trước khi so', () => {
-    const v = pk(0, 90000, 0, 90000, TB90); // 1,0 s
-    const a = pk(1, 48000, 0, 48000, { num: 1, den: 48000 }); // 1,0 s
-    expect(comparePackets(v, a)).toBeLessThan(0); // hoà -> phân giải theo streamIndex
+  it('reduces to the same timebase before comparing', () => {
+    const v = pk(0, 90000, 0, 90000, TB90); // 1.0 s
+    const a = pk(1, 48000, 0, 48000, { num: 1, den: 48000 }); // 1.0 s
+    expect(comparePackets(v, a)).toBeLessThan(0); // tie -> resolved by streamIndex
   });
-  it('ổn định: hoà thì theo streamIndex', () => {
+  it('stable: ties resolve by streamIndex', () => {
     expect(comparePackets(pk(1, 100), pk(0, 100))).toBeGreaterThan(0);
   });
-  it('countDtsInversions phát hiện DTS đi lùi', () => {
+  it('countDtsInversions detects DTS going backwards', () => {
     expect(countDtsInversions([pk(0, 1), pk(0, 2), pk(0, 3)])).toBe(0);
     expect(countDtsInversions([pk(0, 1), pk(0, 5), pk(0, 3)])).toBe(1);
   });
 });
 
-/* ══════════════ 4. Kéo về 0 ══════════════ */
-describe('computeRebaseOffsetUs — MỘT offset chung cho mọi stream', () => {
-  it('dùng DTS nhỏ nhất TRÊN TOÀN BỘ stream, không phải của từng stream', () => {
-    // ĐO ĐƯỢC: fixture chuẩn video=128090, audio=126000 -> offset -1400000 us.
+/* ══════════════ 4. Pull to 0 ══════════════ */
+describe('computeRebaseOffsetUs — ONE shared offset for every stream', () => {
+  it('uses the smallest DTS ACROSS ALL streams, not per-stream', () => {
+    // MEASURED: standard fixture video=128090, audio=126000 -> offset -1400000 us.
     const off = computeRebaseOffsetUs([
       { streamIndex: 0, firstDts: 128090, timeBase: TB90 },
       { streamIndex: 1, firstDts: 126000, timeBase: TB90 },
     ]);
     expect(off).toBe(-1_400_000);
   });
-  it('không có stream nào -> 0', () => {
+  it('no streams -> 0', () => {
     expect(computeRebaseOffsetUs([])).toBe(0);
   });
 });
 
-describe('buildTimelinePlan + applyPlan — kéo mốc về 0', () => {
+describe('buildTimelinePlan + applyPlan — pull markers to 0', () => {
   const mk = (v0: number, a0: number) => ({
     video: [pk(0, v0, 3000), pk(0, v0 + 3000, 3000)],
     audio: [pk(1, a0, 2089), pk(1, a0 + 2089, 2089)],
   });
 
-  // ĐO ĐƯỢC: ffmpeg 8.1 -c copy cho 5 input này ra output GIỐNG HỆT NHAU
-  // (video start_pts=2070, audio=0, 360/518 frame, duration 12.027937).
-  // 2070 là 2090 sau khi MP4 lượng tử hoá theo movie timescale 1000.
+  // MEASURED: ffmpeg 8.1 -c copy on these 5 inputs produces IDENTICAL output
+  // (video start_pts=2070, audio=0, 360/518 frames, duration 12.027937).
+  // 2070 is 2090 after MP4 quantizes it to the movie timescale 1000.
   it.each([
     ['fixture chuẩn', 128090, 126000],
     ['PTS lớn (80000 s)', 7200128090, 7200126000],
@@ -200,16 +200,16 @@ describe('buildTimelinePlan + applyPlan — kéo mốc về 0', () => {
     expect(applyPlan(first(video), plan).dts).toBe(2090);
   });
 
-  it('stream bắt đầu SỚM nhất về 0, không phải mọi stream đều về 0', () => {
-    // ĐO ĐƯỢC trên fixture avoff: video 128090, audio 171000
-    // -> ffmpeg cho video start_pts=0, audio start_time=0,476009 s.
+  it('the EARLIEST-starting stream goes to 0, not every stream', () => {
+    // MEASURED on the avoff fixture: video 128090, audio 171000
+    // -> ffmpeg produces video start_pts=0, audio start_time=0.476009 s.
     const { video, audio } = mk(128090, 171000);
     const plan = buildTimelinePlan([video, audio]);
     expect(applyPlan(first(video), plan).dts).toBe(0);
-    expect(applyPlan(first(audio), plan).dts).toBe(42910); // 0,4767778 s
+    expect(applyPlan(first(audio), plan).dts).toBe(42910); // 0.4767778 s
   });
 
-  it('giữ nguyên quan hệ pts >= dts (an toàn với B-frame)', () => {
+  it('preserves the pts >= dts relationship (safe with B-frames)', () => {
     const v: TimedPacket = {
       streamIndex: 0,
       dts: 128090,
@@ -222,7 +222,7 @@ describe('buildTimelinePlan + applyPlan — kéo mốc về 0', () => {
     expect(o.pts! - o.dts!).toBe(6000);
   });
 
-  it('bỏ qua pts/dts null mà không ném lỗi', () => {
+  it('skips null pts/dts without throwing', () => {
     const v = pk(0, null, 3000, null);
     const plan = buildTimelinePlan([[pk(0, 90000, 3000)], [v]]);
     const o = applyPlan(v, plan);
@@ -231,10 +231,10 @@ describe('buildTimelinePlan + applyPlan — kéo mốc về 0', () => {
   });
 });
 
-/* ══════════════ 5. ĐỒNG BỘ A/V ══════════════ */
-describe('đồng bộ A/V — bất biến quan trọng nhất', () => {
-  // Video và audio phải dịch CÙNG một offset. Kéo mỗi stream về 0 riêng sẽ
-  // huỷ lệch A/V và không lỗi nào được ném ra.
+/* ══════════════ 5. A/V SYNC ══════════════ */
+describe('A/V sync — the most important invariant', () => {
+  // Video and audio must shift by the SAME offset. Pulling each stream to 0 independently
+  // would destroy A/V skew, and no error would ever be thrown.
   it.each([
     ['audio sớm 2090 tick', 128090, 126000, -2090],
     ['audio muộn 42910 tick', 128090, 171000, 42910],
@@ -242,48 +242,48 @@ describe('đồng bộ A/V — bất biến quan trọng nhất', () => {
     ['PTS lớn, audio sớm', 7200128090, 7200126000, -2090],
     ['vượt 2^31, audio sớm', 2146943648, 2146941558, -2090],
     ['sau wrap (âm), audio sớm', -540000, -542090, -2090],
-  ])('%s: lệch giữ nguyên TUYỆT ĐỐI 0 tick', (_n, v0, a0, skew) => {
+  ])('%s: skew stays EXACTLY 0 tick', (_n, v0, a0, skew) => {
     const video = [pk(0, v0, 3000), pk(0, v0 + 3000, 3000)];
     const audio = [pk(1, a0, 2089), pk(1, a0 + 2089, 2089)];
     const plan = buildTimelinePlan([video, audio]);
     const ov = applyPlan(first(video), plan).dts!;
     const oa = applyPlan(first(audio), plan).dts!;
     expect(a0 - v0).toBe(skew);
-    expect(oa - ov).toBe(skew); // 0 tick trôi
+    expect(oa - ov).toBe(skew); // 0 tick drift
   });
 
-  it('KHÔNG được kéo từng stream về 0 riêng lẻ', () => {
+  it('MUST NOT pull each stream to 0 individually', () => {
     const video = [pk(0, 128090, 3000)];
     const audio = [pk(1, 171000, 2089)];
     const plan = buildTimelinePlan([video, audio]);
-    expect(applyPlan(first(audio), plan).dts).not.toBe(0); // nếu bằng 0 là đã mất lệch 476 ms
+    expect(applyPlan(first(audio), plan).dts).not.toBe(0); // if it were 0, the 476ms skew would be lost
   });
 });
 
-/* ══════════════ 6. GIÁN ĐOẠN ══════════════ */
+/* ══════════════ 6. DISCONTINUITY ══════════════ */
 describe('detectSeams', () => {
-  it('không có gián đoạn -> không có seam', () => {
+  it('no discontinuity -> no seam', () => {
     const v = [pk(0, 0, 3000), pk(0, 3000, 3000), pk(0, 6000, 3000)];
     expect(detectSeams(v)).toHaveLength(0);
   });
 
-  it('kỳ vọng phải là dts + duration, KHÔNG phải dts trước đó', () => {
-    // ĐO ĐƯỢC: bỏ duration thì delta ra 3000003030 tick thay vì 3000000000
-    // (dính thêm 3030 tick khoảng cách tự nhiên = 33,7 ms).
+  it('the expected value must be dts + duration, NOT the previous dts', () => {
+    // MEASURED: dropping duration makes the delta come out as 3000003030 ticks instead of 3000000000
+    // (picks up an extra 3030-tick natural gap = 33.7 ms).
     const jump = 3_000_000_000;
     const v = [pk(0, 0, 3000), pk(0, 3000, 3000), pk(0, 6000 + jump, 3000)];
     const seams = detectSeams(v);
     expect(seams).toHaveLength(1);
-    // 3000000000 tick @90kHz = 33333333333,33 us — KHÔNG chia hết. `expected` cộng dồn
-    // duration đã làm tròn từng packet (33333 us mỗi cái) nên lệch dưới 1 us là ĐÚNG.
-    // ffmpeg cũng ra đúng con số này: log của nó ghi "new offset= -33333333334".
+    // 3000000000 ticks @90kHz = 33333333333.33 us — NOT divisible evenly. `expected` accumulates
+    // each packet's already-rounded duration (33333 us each), so a sub-1us drift here is CORRECT.
+    // ffmpeg also produces this exact number: its log reads "new offset= -33333333334".
     expect(seams[0]!.deltaUs).toBe(33_333_333_334);
     expect(
       Math.abs(seams[0]!.deltaUs - toMicros(jump, TB90)),
     ).toBeLessThanOrEqual(2);
   });
 
-  it('nhảy nhỏ hơn ngưỡng KHÔNG phải seam', () => {
+  it('a jump smaller than the threshold is NOT a seam', () => {
     const v = [
       pk(0, 0, 3000),
       pk(0, 3000, 3000),
@@ -292,7 +292,7 @@ describe('detectSeams', () => {
     expect(detectSeams(v)).toHaveLength(0);
   });
 
-  it('bắt cả nhảy LÙI (PTS tụt về)', () => {
+  it('also catches BACKWARD jumps (PTS resets)', () => {
     const v = [
       pk(0, 90000 * 100, 3000),
       pk(0, 90000 * 100 + 3000, 3000),
@@ -303,7 +303,7 @@ describe('detectSeams', () => {
     expect(seams[0]!.deltaUs).toBeLessThan(0);
   });
 
-  it('nhiều seam (nhiều lần chèn quảng cáo)', () => {
+  it('multiple seams (multiple ad insertions)', () => {
     const J = 3_000_000_000;
     const v = [
       pk(0, 0, 3000),
@@ -316,12 +316,12 @@ describe('detectSeams', () => {
   });
 });
 
-describe('mergeSeams — MỘT seam dù nhiều stream cùng thấy', () => {
-  // ⚠️ HỒI QUY ĐÃ TỪNG XẢY RA: bản đầu giữ offset chạy dần theo thứ tự nạp packet.
-  // `ff_read_frame_multi` trả packet GOM THEO STREAM, nên video vá seam xong thì audio
-  // vá LẠI chính seam đó -> offset -66666666678 us thay vì -33333333334 us (gấp đôi),
-  // và output lệch 33333 s so với ffmpeg.
-  it('seam của video và audio ở cùng chỗ chỉ tính MỘT lần', () => {
+describe('mergeSeams — ONE seam even if multiple streams see it', () => {
+  // ⚠️ REGRESSION THAT ACTUALLY HAPPENED: the first version kept an offset that ran forward as
+  // packets were consumed. `ff_read_frame_multi` returns packets GROUPED BY STREAM, so after
+  // video patched a seam, audio would patch that SAME seam AGAIN -> offset -66666666678 us
+  // instead of -33333333334 us (double), and the output drifted 33333 s from ffmpeg.
+  it('a seam seen at the same spot by video and audio counts ONCE', () => {
     const J = 3_000_000_000;
     const seamsV = detectSeams([
       pk(0, 0, 3000),
@@ -338,7 +338,7 @@ describe('mergeSeams — MỘT seam dù nhiều stream cùng thấy', () => {
     expect(mergeSeams([seamsV, seamsA])).toHaveLength(1);
   });
 
-  it('stream tới trước chốt delta (khớp lựa chọn của ffmpeg)', () => {
+  it("the stream that arrives first locks in the delta (matches ffmpeg's choice)", () => {
     const a: Seam = {
       atRawUs: 1_000_000_000,
       deltaUs: 33_333_333_334,
@@ -355,7 +355,7 @@ describe('mergeSeams — MỘT seam dù nhiều stream cùng thấy', () => {
     expect(m[0]!.detectedBy).toBe(0);
   });
 
-  it('hai seam CÁCH XA nhau vẫn là hai seam', () => {
+  it('two seams FAR APART are still two seams', () => {
     const a: Seam = { atRawUs: 1_000_000_000, deltaUs: 3.3e10, detectedBy: 0 };
     const b: Seam = { atRawUs: 9_000_000_000, deltaUs: 3.3e10, detectedBy: 0 };
     expect(mergeSeams([[a, b]])).toHaveLength(2);
@@ -368,18 +368,18 @@ describe('correctionAtUs', () => {
     deltaUs: 33_333_333_334,
     detectedBy: 0,
   };
-  it('trước seam: không hiệu chỉnh', () => {
+  it('before the seam: no correction', () => {
     expect(correctionAtUs(1_400_000, [seam])).toBe(0);
   });
-  it('sau seam: trừ đúng delta', () => {
+  it('after the seam: subtracts the exact delta', () => {
     expect(correctionAtUs(33_340_756_556, [seam])).toBe(-33_333_333_334);
   });
-  it('phân tách bằng TRUNG ĐIỂM nên mọi stream cùng phía dù lệch A/V', () => {
+  it('splits at the MIDPOINT so every stream lands on the same side despite A/V skew', () => {
     const mid = seam.atRawUs - seam.deltaUs / 2;
     expect(correctionAtUs(mid - 1_000_000, [seam])).toBe(0);
     expect(correctionAtUs(mid + 1_000_000, [seam])).toBe(-seam.deltaUs);
   });
-  it('nhiều seam cộng dồn', () => {
+  it('multiple seams accumulate', () => {
     const s2: Seam = {
       atRawUs: 66_000_000_000,
       deltaUs: 30_000_000_000,
@@ -389,10 +389,10 @@ describe('correctionAtUs', () => {
   });
 });
 
-describe('gián đoạn đầu-cuối: file 12 s vẫn phải ra 12 s', () => {
-  it('nuốt seam và giữ đồng bộ A/V', () => {
-    // ĐO ĐƯỢC trên fixture disc: 3 segment đầu ở PTS thường, 3 segment sau nhảy
-    // +3000000000 tick. TS thô báo duration 33345 s; ffmpeg -c copy vẫn ra 12,027937 s.
+describe('start-to-end discontinuity: a 12s file must still come out 12s', () => {
+  it('swallows the seam and keeps A/V sync', () => {
+    // MEASURED on the disc fixture: the first 3 segments have normal PTS, the next 3 jump
+    // +3000000000 ticks. The raw TS reports a duration of 33345 s; ffmpeg -c copy still outputs 12.027937 s.
     const J = 3_000_000_000;
     const video: TimedPacket[] = [];
     const audio: TimedPacket[] = [];
@@ -404,10 +404,10 @@ describe('gián đoạn đầu-cuối: file 12 s vẫn phải ra 12 s', () => {
       audio.push(pk(1, 126000 + i * 2089 + J, 2089));
 
     const plan = buildTimelinePlan([video, audio]);
-    expect(plan.seams).toHaveLength(1); // KHÔNG phải 2
+    expect(plan.seams).toHaveLength(1); // NOT 2
     expect(plan.rebaseOffsetUs).toBe(-1_400_000);
 
-    // Có seam -> BẮT BUỘC đi qua rebaser (applyPlan nay ném lỗi, cố ý).
+    // There's a seam -> MUST go through the rebaser (applyPlan now throws on purpose).
     const rb = createRebaser(plan);
     const outV = video.map((p) => rebasePacket(rb, p).dts!);
     const outA = audio.map((p) => rebasePacket(rb, p).dts!);
@@ -416,17 +416,17 @@ describe('gián đoạn đầu-cuối: file 12 s vẫn phải ra 12 s', () => {
     expect(countDtsInversions(outA.map((d) => pk(1, d)))).toBe(0);
     expect(outA[0]).toBe(0);
     expect(outV[0]).toBe(2090);
-    // 12 s, không phải 9 tiếng
+    // 12 s, not 9 hours
     expect((outV[outV.length - 1]! - outV[0]!) / 90000).toBeCloseTo(11.967, 3);
-    // lệch A/V giữ nguyên qua seam
+    // A/V skew preserved across the seam
     expect(outA[259]! - outV[180]!).toBe(audio[259]!.dts! - video[180]!.dts!);
   });
 });
 
-/* ══════════════ 7. Quét theo luồng ══════════════ */
-describe('SeamScanner — lượt 1 phải chạy với bộ nhớ O(số seam)', () => {
-  // ĐO ĐƯỢC: giữ lại mọi TimedPacket tốn 65 B/packet -> phim 3 tiếng ~49 MB.
-  // Scanner chỉ giữ seam nên không phụ thuộc độ dài phim.
+/* ══════════════ 7. Streaming scan ══════════════ */
+describe('SeamScanner — pass 1 must run with O(number of seams) memory', () => {
+  // MEASURED: keeping every TimedPacket costs 65 B/packet -> a 3-hour movie is ~49 MB.
+  // The scanner only keeps seams, so it doesn't depend on the movie's length.
   const build = () => {
     const J = 3_000_000_000;
     const video: TimedPacket[] = [];
@@ -440,7 +440,7 @@ describe('SeamScanner — lượt 1 phải chạy với bộ nhớ O(số seam)'
     return { video, audio };
   };
 
-  it('cho ra plan GIỐNG HỆT bản nhận mảng', () => {
+  it('produces a plan IDENTICAL to the array-based version', () => {
     const { video, audio } = build();
     const sc = createSeamScanner();
     for (const p of video) scanTimestamp(sc, p);
@@ -448,7 +448,7 @@ describe('SeamScanner — lượt 1 phải chạy với bộ nhớ O(số seam)'
     expect(finishScan(sc)).toEqual(buildTimelinePlan([video, audio]));
   });
 
-  it('không phụ thuộc thứ tự nạp GIỮA các stream', () => {
+  it('does not depend on the feed order BETWEEN streams', () => {
     const { video, audio } = build();
     const a = createSeamScanner();
     for (const p of video) scanTimestamp(a, p);
@@ -456,54 +456,56 @@ describe('SeamScanner — lượt 1 phải chạy với bộ nhớ O(số seam)'
     const b = createSeamScanner();
     for (const p of audio) scanTimestamp(b, p);
     for (const p of video) scanTimestamp(b, p);
-    expect(finishScan(a)).toEqual(finishScan(b)); // xen kẽ kiểu gì cũng vậy
+    expect(finishScan(a)).toEqual(finishScan(b)); // any interleaving gives the same result
   });
 
-  it('bỏ qua packet không có timestamp', () => {
+  it('skips packets without a timestamp', () => {
     const sc = createSeamScanner();
     scanTimestamp(sc, pk(0, null, 3000, null));
     expect(finishScan(sc).rebaseOffsetUs).toBe(0);
   });
 });
 
-/* ══════════════ 8. Chốt hằng số ══════════════ */
-describe('hằng số', () => {
-  it('TIME_BASE_US khớp AV_TIME_BASE của ffmpeg', () => {
+/* ══════════════ 8. Pinning constants ══════════════ */
+describe('constants', () => {
+  it("TIME_BASE_US matches ffmpeg's AV_TIME_BASE", () => {
     expect(TIME_BASE_US).toBe(1_000_000);
   });
 });
 
 /* ══════════════════════════════════════════════════════════════════════════════
- * LỖI DO PHẢN BIỆN ĐỐI KHÁNG TÌM RA (2026-07-19)
+ * BUGS FOUND BY ADVERSARIAL REVIEW (2026-07-19)
  *
- * Bốn ca dưới đây ĐỎ trên bản đầu tiên, dù bản đó đã có 60 test xanh VÀ đã qua
- * mutation test với 2 bản cố tình hỏng. Bài học: mutation test chứng minh test bắn
- * đúng theo Ý ĐỊNH, KHÔNG chứng minh ý định đúng.
+ * The four cases below were RED on the first version, even though that version already had
+ * 60 passing tests AND had passed mutation testing against 2 deliberately-broken versions.
+ * Lesson: mutation testing proves the tests fire correctly according to INTENT, it does
+ * NOT prove that intent is correct.
  *
- * Điểm mù chung của bộ test cũ: mọi fixture đều `pts == dts` và mọi seam đều dấu DƯƠNG.
- * Ba trong bốn lỗi nằm ngoài đúng vùng đó. Đừng thu hẹp bộ fixture lại như cũ.
+ * Shared blind spot of the old test suite: every fixture had `pts == dts` and every seam had a
+ * POSITIVE sign. Three out of the four bugs fall outside exactly that region. Don't narrow the
+ * fixture set back down like before.
  * ══════════════════════════════════════════════════════════════════════════════ */
 
-describe('B1 — seam LÙI (PTS reset về 0): dạng gián đoạn HLS phổ biến NHẤT', () => {
-  // Mỗi đoạn quảng cáo được mã hoá độc lập từ 0, nên seam LÙI mới là ca thường gặp,
-  // không phải seam tiến. Bản cũ chỉ test PHÁT HIỆN được seam lùi; mọi test
-  // correctionAtUs đều dùng delta DƯƠNG -> nhánh âm chưa từng chạy.
+describe('B1 — BACKWARD seam (PTS reset to 0): the MOST common HLS discontinuity shape', () => {
+  // Each ad segment is encoded independently starting from 0, so a backward seam is actually the
+  // common case, not a forward one. The old version only tested DETECTING a backward seam; every
+  // correctionAtUs test used a POSITIVE delta -> the negative branch never ran.
   //
-  // 🔴 Và khi chạy thì lộ ra: seam lùi làm mốc thô TRƯỚC và SAU seam TRÙNG DẢI GIÁ TRỊ
-  // (đều là 0..10s), nên KHÔNG hàm thuần theo-giá-trị nào phân biệt nổi. Vì vậy phải đi
-  // qua `rebasePacket` (bám theo THỨ TỰ) chứ không phải `applyPlan`.
+  // 🔴 And once it ran, it surfaced this: for a backward seam, the raw markers BEFORE and AFTER the
+  // seam land in the SAME VALUE RANGE (both 0..10s), so no pure value-based function can tell them
+  // apart. That's why it has to go through `rebasePacket` (which tracks ORDER) rather than `applyPlan`.
   const s = 90_000;
   const pre = Array.from({ length: 60 }, (_, i) => pk(0, i * s, s));
   const post = Array.from({ length: 10 }, (_, i) => pk(0, i * s, s));
 
-  it('phát hiện đúng MỘT seam, độ lớn âm', () => {
+  it('detects exactly ONE seam, with a negative magnitude', () => {
     const plan = buildTimelinePlan([[...pre, ...post]]);
     expect(plan.seams).toHaveLength(1);
     expect(plan.seams[0]!.deltaUs).toBeLessThan(0);
   });
 
-  it('70 giây nội dung ra đúng ~70 giây, không phải 120 giây', () => {
-    // ĐO ĐƯỢC trên bản cũ: span 120,04s + còn 1 chỗ đảo DTS.
+  it('70 seconds of content comes out as ~70 seconds, not 120 seconds', () => {
+    // MEASURED on the old version: span 120.04s + still one DTS inversion left.
     const plan = buildTimelinePlan([[...pre, ...post]]);
     const rb = createRebaser(plan);
     const out = [...pre, ...post].map((p) => rebasePacket(rb, p));
@@ -514,17 +516,17 @@ describe('B1 — seam LÙI (PTS reset về 0): dạng gián đoạn HLS phổ bi
   });
 });
 
-describe('B2 — mốc rebase là min first-PTS, KHÔNG phải min first-DTS', () => {
-  // Hai quy tắc chỉ trùng nhau khi pts == dts, mà toàn bộ fixture cũ đều vậy.
-  // Có B-frame là lệch ngay. ĐO ĐƯỢC bằng ffmpeg -c copy trên fixture bf.ts:
-  //   vào : video pts=7200 dts=0 | audio pts=dts=5280
-  //   ffmpeg ra: offset -5280 tick -> video pts 1920 dts -5280, audio 0
-  //   ffprobe format start_time = 0.058667 = first PTS của audio
-  it('nội dung có B-frame: offset lấy theo PTS nhỏ nhất', () => {
-    const video = [pk(0, 0, 3000, 7200)]; // dts 0 nhưng pts 7200
+describe('B2 — the rebase marker is the min first-PTS, NOT the min first-DTS', () => {
+  // The two rules only coincide when pts == dts, which every old fixture happened to satisfy.
+  // Add a B-frame and they diverge immediately. MEASURED with ffmpeg -c copy on the bf.ts fixture:
+  //   input : video pts=7200 dts=0 | audio pts=dts=5280
+  //   ffmpeg output: offset -5280 ticks -> video pts 1920 dts -5280, audio 0
+  //   ffprobe format start_time = 0.058667 = audio's first PTS
+  it('content with B-frames: offset is taken from the smallest PTS', () => {
+    const video = [pk(0, 0, 3000, 7200)]; // dts 0 but pts 7200
     const audio = [pk(1, 5280, 1024, 5280)];
     const plan = buildTimelinePlan([video, audio]);
-    // min first-PTS = 5280 tick = 58666,67 µs -> offset âm chừng đó
+    // min first-PTS = 5280 ticks = 58666.67 µs -> offset should be roughly that, negative
     expect(plan.rebaseOffsetUs).toBeCloseTo(-58_667, 0);
     expect(applyPlan(video[0]!, plan).pts).toBe(1920);
     expect(applyPlan(video[0]!, plan).dts).toBe(-5280);
@@ -532,19 +534,19 @@ describe('B2 — mốc rebase là min first-PTS, KHÔNG phải min first-DTS', (
   });
 });
 
-describe('C1 — DTS phải ĐƠN ĐIỆU theo từng stream sau hiệu chỉnh', () => {
-  // Lỗi nghiêm trọng nhất. Offset toàn cục do stream VIDEO chốt, nhưng biên segment
-  // audio không trùng biên video (khung AAC 21,3ms; đo: video 4,000s vs audio 4,032s),
-  // nên sau hiệu chỉnh audio CHỒNG LÊN CHÍNH NÓ.
-  // av_interleaved_write_frame() TỪ CHỐI dts không đơn điệu -> mux lỗi/mất packet câm.
-  it('audio lệch biên so với video: không được sinh ra chỗ đảo nào', () => {
+describe('C1 — DTS must be MONOTONIC per stream after correction', () => {
+  // The most serious bug. The global offset is locked in by the VIDEO stream, but the audio
+  // segment boundaries don't line up with the video's (AAC frame is 21.3ms; measured: video 4.000s
+  // vs audio 4.032s), so after correction audio OVERLAPS ITSELF.
+  // av_interleaved_write_frame() REJECTS non-monotonic dts -> silent mux failure/dropped packets.
+  it('audio boundary misaligned with video: must not produce any inversion', () => {
     const s = 90_000;
-    const vDur = 4 * s; // video 4,000s mỗi phần
-    const aDur = Math.round(4.032 * s); // audio 4,032s — lệch biên, đúng như đo được
+    const vDur = 4 * s; // video 4.000s per part
+    const aDur = Math.round(4.032 * s); // audio 4.032s — boundary offset, as actually measured
     const video: TimedPacket[] = [];
     const audio: TimedPacket[] = [];
     for (let part = 0; part < 3; part++) {
-      const jump = part * 20_000 * s; // mỗi phần nhảy 20000s (quảng cáo)
+      const jump = part * 20_000 * s; // each part jumps 20000s (ad break)
       for (let i = 0; i < 4; i++)
         video.push(pk(0, jump + i * (vDur / 4), vDur / 4));
       for (let i = 0; i < 4; i++)
@@ -559,25 +561,25 @@ describe('C1 — DTS phải ĐƠN ĐIỆU theo từng stream sau hiệu chỉnh'
   });
 });
 
-describe('C2 — dò seam KHÔNG được báo động oan (luật dự án: giết oan tệ hơn treo)', () => {
-  it('packet duration<=0 (timed-ID3) không được sinh seam', () => {
-    // ĐO ĐƯỢC: luồng timed-ID3 rất phổ biến trong HLS thật, phát 1 packet
-    // duration=0 mỗi segment -> bản cũ ra 9 seam giả.
+describe('C2 — seam detection MUST NOT false-positive (project rule: a false kill is worse than a hang)', () => {
+  it('packets with duration<=0 (timed-ID3) must not produce a seam', () => {
+    // MEASURED: timed-ID3 tracks are very common in real HLS, emitting one duration=0 packet
+    // per segment -> the old version produced 9 false seams.
     const s = 90_000;
     const meta = Array.from({ length: 10 }, (_, i) => pk(2, i * 12 * s, 0));
     expect(detectSeams(meta)).toEqual([]);
   });
 
-  it('khoảng lặng audio HỢP LỆ không được cắt đôi video khoẻ', () => {
-    // ĐO ĐƯỢC trên bản cũ (ca FP-4): video liên tục 59,96s + audio nghỉ 30s
-    // -> sinh 1 seam -> video còn 30,02s. MẤT MỘT NỬA VIDEO.
+  it('a legitimate audio silence gap must not chop a healthy video in half', () => {
+    // MEASURED on the old version (case FP-4): video continuous for 59.96s + audio pauses for 30s
+    // -> produced 1 seam -> video ended up only 30.02s. HALF THE VIDEO WAS LOST.
     const s = 90_000;
     const video = Array.from({ length: 60 }, (_, i) =>
       pk(0, i * s, s, i * s, TB90),
     );
     const audio = [
       ...Array.from({ length: 15 }, (_, i) => pk(1, i * s, s)),
-      // nghỉ 30s rồi hát tiếp — hợp lệ, không phải gián đoạn
+      // 30s of silence then resumes — legitimate, not a discontinuity
       ...Array.from({ length: 15 }, (_, i) => pk(1, (45 + i) * s, s)),
     ];
     const plan = buildTimelinePlan([video, audio]);
@@ -588,15 +590,15 @@ describe('C2 — dò seam KHÔNG được báo động oan (luật dự án: gi�
   });
 });
 
-describe('applyPlan phải TỪ CHỐI khi có seam (chặn cái bẫy, không trả số sai)', () => {
-  it('ném lỗi và chỉ sang rebaser', () => {
+describe('applyPlan MUST REJECT when there is a seam (guard the trap instead of returning a wrong number)', () => {
+  it('throws and points to the rebaser', () => {
     const plan = {
       seams: [{ atRawUs: 0, deltaUs: 1, detectedBy: 0 }],
       rebaseOffsetUs: 0,
     };
     expect(() => applyPlan(pk(0, 0, 90_000), plan)).toThrow(/rebasePacket/);
   });
-  it('vẫn chạy bình thường khi plan không có seam', () => {
+  it('still runs normally when the plan has no seams', () => {
     expect(
       applyPlan(pk(0, 90_000, 90_000), {
         seams: [],
@@ -606,13 +608,14 @@ describe('applyPlan phải TỪ CHỐI khi có seam (chặn cái bẫy, không t
   });
 });
 
-describe('Seam LÙI DƯỚI NGƯỠNG — ca tự tìm ra khi kiểm chứng trên fixture thật', () => {
-  // Không nằm trong danh sách phản biện. Lộ ra khi dựng lại ca "PTS reset về 0" từ packet
-  // THẬT: đoạn chỉ dài 3,56s nên cú lùi (-3,56s) NHỎ HƠN ngưỡng 10s.
-  // Bản dùng `Math.abs(delta) > ngưỡng` không coi đó là seam -> kẹp đơn điệu sau đó nén
-  // 90 packet vào ~1ms: span giữ nguyên 3,56s thay vì 7,12s, KHÔNG đảo DTS, KHÔNG lỗi.
-  // Nội dung mất sạch trong im lặng. Vì vậy luật dò seam phải BẤT ĐỐI XỨNG.
-  it('cú lùi nhỏ vẫn là seam; nội dung không bị nén lại', () => {
+describe('Backward seam BELOW the threshold — case found while verifying against a real fixture', () => {
+  // Not part of the adversarial-review list. Surfaced when reconstructing the "PTS reset to 0" case
+  // from a REAL packet: the segment is only 3.56s long, so the backward jump (-3.56s) is SMALLER
+  // than the 10s threshold.
+  // A version using `Math.abs(delta) > threshold` doesn't count that as a seam -> the monotonic clamp
+  // afterward compresses 90 packets into ~1ms: span stays 3.56s instead of 7.12s, NO DTS inversion,
+  // NO error. Content disappears silently. That's why the seam-detection rule must be ASYMMETRIC.
+  it('a small backward jump is still a seam; content does not get compressed', () => {
     const s = 90_000;
     const one = Array.from({ length: 90 }, (_, i) =>
       pk(0, Math.round(i * s * 0.04), Math.round(s * 0.04)),
@@ -627,28 +630,29 @@ describe('Seam LÙI DƯỚI NGƯỠNG — ca tự tìm ra khi kiểm chứng tr�
     const dts = out.map((p) => p.dts!);
     const spanIn = (one[one.length - 1]!.dts! - one[0]!.dts!) / s;
     const spanOut = (Math.max(...dts) - Math.min(...dts)) / s;
-    expect(spanOut).toBeCloseTo(spanIn * 2, 0); // KHÔNG được bằng spanIn
+    expect(spanOut).toBeCloseTo(spanIn * 2, 0); // must NOT equal spanIn
     expect(countDtsInversions(out)).toBe(0);
   });
 
-  it('khoảng hở TIẾN dưới ngưỡng vẫn KHÔNG phải seam (giữ chống báo động oan)', () => {
-    expect(isSeamDelta(5_000_000, 10_000_000)).toBe(false); // hở tiến 5s: bình thường
-    expect(isSeamDelta(11_000_000, 10_000_000)).toBe(true); // hở tiến 11s: gián đoạn
-    expect(isSeamDelta(-100, 10_000_000)).toBe(true); // lùi tí xíu: vẫn là gián đoạn
+  it('a FORWARD gap below the threshold is still NOT a seam (keeps the anti-false-positive guard)', () => {
+    expect(isSeamDelta(5_000_000, 10_000_000)).toBe(false); // 5s forward gap: normal
+    expect(isSeamDelta(11_000_000, 10_000_000)).toBe(true); // 11s forward gap: discontinuity
+    expect(isSeamDelta(-100, 10_000_000)).toBe(true); // tiny backward jump: still a discontinuity
   });
 });
 
-/* ───────────── Scanner theo LUỒNG phải khớp bản mảng ở CẢ BA lỗi đã vá ─────────────
+/* ───────────── The STREAMING scanner must match the array version on ALL THREE fixed bugs ─────────────
  *
- * 🔴 ĐO ĐƯỢC 2026-07-19: vòng phản biện trước chỉ vá `buildTimelinePlan` (bản nhận MẢNG,
- * dùng cho test), còn `createSeamScanner`/`finishScan` — bản mà PRODUCTION bắt buộc phải
- * dùng vì bộ nhớ có chặn trên — vẫn mang NGUYÊN cả ba lỗi. Ba test dưới đây từng ĐỎ hết:
- *   S1 -> seam giả ở 30s (đúng lỗi FP-4: video khoẻ bị cắt còn một nửa)
- *   S2 -> offset 0 thay vì −58667 (lỗi B2: lấy min first-DTS thay vì min first-PTS)
- *   S3 -> 2 seam giả (lỗi C3: hai input cùng streamIndex 0 lẫn danh tính nhau)
- * Bài học: "đã vá" ở tầng test KHÔNG có nghĩa là đã vá ở tầng chạy thật.
+ * 🔴 MEASURED 2026-07-19: the previous adversarial-review round only fixed `buildTimelinePlan` (the
+ * ARRAY-based version, used by tests), while `createSeamScanner`/`finishScan` — the version PRODUCTION
+ * actually has to use because memory is bounded — still carried all three bugs. The three tests below
+ * used to be ALL RED:
+ *   S1 -> false seam at 30s (exactly bug FP-4: a healthy video gets cut in half)
+ *   S2 -> offset 0 instead of −58667 (bug B2: using min first-DTS instead of min first-PTS)
+ *   S3 -> 2 false seams (bug C3: two inputs sharing streamIndex 0 get their identities mixed up)
+ * Lesson: "fixed" at the test layer does NOT mean "fixed" at the actually-running layer.
  */
-describe('scanner theo luồng phải khớp bản mảng ở CẢ BA lỗi đã vá', () => {
+describe('the streaming scanner must match the array version on ALL THREE fixed bugs', () => {
   const scanAll = (...lists: TimedPacket[][]) => {
     const sc = createSeamScanner();
     for (const l of lists) for (const p of l) scanTimestamp(sc, p);
@@ -656,7 +660,7 @@ describe('scanner theo luồng phải khớp bản mảng ở CẢ BA lỗi đã
   };
   const TB90 = { num: 1, den: 90_000 };
 
-  it('S1 (FP-4): khoảng lặng audio hợp lệ KHÔNG được sinh seam', () => {
+  it('S1 (FP-4): a legitimate audio silence gap must NOT produce a seam', () => {
     const video: TimedPacket[] = Array.from({ length: 30 }, (_, i) => ({
       streamIndex: 0,
       pts: i * 180_000,
@@ -677,7 +681,7 @@ describe('scanner theo luồng phải khớp bản mảng ở CẢ BA lỗi đã
     expect(scanAll(video, audio).seams).toHaveLength(0);
   });
 
-  it('S2 (B2): mốc rebase lấy min first-PTS, không phải min first-DTS', () => {
+  it('S2 (B2): the rebase marker is the min first-PTS, not the min first-DTS', () => {
     const video: TimedPacket[] = [
       { streamIndex: 0, pts: 7200, dts: 0, duration: 3000, timeBase: TB90, mediaType: 'video' },
     ];
@@ -685,11 +689,11 @@ describe('scanner theo luồng phải khớp bản mảng ở CẢ BA lỗi đã
       { streamIndex: 1, pts: 5280, dts: 5280, duration: 1920, timeBase: TB90, mediaType: 'audio' },
     ];
     const want = buildTimelinePlan([video, audio]);
-    expect(want.rebaseOffsetUs).toBe(-58_667); // khớp ffmpeg trên fixture bf.ts
+    expect(want.rebaseOffsetUs).toBe(-58_667); // matches ffmpeg on the bf.ts fixture
     expect(scanAll(video, audio).rebaseOffsetUs).toBe(want.rebaseOffsetUs);
   });
 
-  it('S3 (C3): hai input đều có streamIndex 0 thì KHÔNG được lẫn danh tính', () => {
+  it('S3 (C3): two inputs that both have streamIndex 0 must NOT have their identities mixed up', () => {
     const video: TimedPacket[] = Array.from({ length: 30 }, (_, i) => ({
       streamIndex: 0,
       inputIndex: 0,
@@ -713,33 +717,35 @@ describe('scanner theo luồng phải khớp bản mảng ở CẢ BA lỗi đã
   });
 });
 
-/* ───────────────── VFR / timelapse: `duration` khai báo SAI, nội dung thì lành ─────────────────
+/* ───────────────── VFR/timelapse: declared `duration` is WRONG, but the content is healthy ─────────────────
  *
- * 🔴 ĐO ĐƯỢC 2026-07-19 (vòng phản biện đối kháng, bản remux-time.ts ĐANG chạy):
- * stream có khung cách nhau THẬT 15 giây nhưng demuxer khai `r_frame_rate=25/1` -> mỗi packet
- * `duration` = 0,04 s. `expected = dts + 0,04s` sai 14,96 s ở MỌI packet -> **11 seam GIẢ trên
- * 12 packet**, và sau hiệu chỉnh thì **165 giây nội dung còn 0,44 giây**. File vẫn đủ 12 khung,
- * vẫn decode sạch, `av_write_trailer` vẫn trả 0 — không một tín hiệu nào.
+ * 🔴 MEASURED 2026-07-19 (adversarial review round, on the CURRENTLY running remux-time.ts): a
+ * stream with frames REALLY spaced 15 seconds apart but where the demuxer declares
+ * `r_frame_rate=25/1` -> each packet's `duration` = 0.04 s. `expected = dts + 0.04s` is wrong by
+ * 14.96 s on EVERY packet -> **11 FALSE seams on 12 packets**, and after correction **165 seconds of
+ * content shrinks to 0.44 seconds**. The file still has all 12 frames, still decodes cleanly,
+ * `av_write_trailer` still returns 0 — no signal anywhere.
  *
- * Guard `duration <= 0` KHÔNG che được ca này (ở đây duration = 0,04 > 0). Cách vá: so
- * `duration` khai báo với NHỊP QUAN SÁT ĐƯỢC của chính stream; lệch quá 2 lần thì tin nhịp.
+ * The `duration <= 0` guard does NOT cover this case (here duration = 0.04 > 0). The fix: compare
+ * the declared `duration` against the stream's own OBSERVED cadence; if it's off by more than 2x,
+ * trust the cadence.
  */
-describe('VFR/timelapse KHÔNG được báo động oan', () => {
+describe('VFR/timelapse must NOT false-positive', () => {
   const TBV = { num: 1, den: 90_000 };
   const vfr: TimedPacket[] = Array.from({ length: 12 }, (_, i) => ({
     streamIndex: 0,
     pts: i * 15 * 90_000,
     dts: i * 15 * 90_000,
-    duration: Math.round(0.04 * 90_000), // demuxer khai 25 fps, thực tế 1 khung/15s
+    duration: Math.round(0.04 * 90_000), // demuxer declares 25 fps, actually 1 frame/15s
     timeBase: TBV,
     mediaType: 'video',
   }));
 
-  it('không sinh seam giả', () => {
+  it('does not produce a false seam', () => {
     expect(buildTimelinePlan([vfr]).seams).toHaveLength(0);
   });
 
-  it('không nén mất nội dung (165s vẫn là 165s, không phải 0,44s)', () => {
+  it('does not compress away content (165s stays 165s, not 0.44s)', () => {
     const plan = buildTimelinePlan([vfr]);
     const rb = createRebaser(plan);
     const out = vfr.map((p) => rebasePacket(rb, p));
@@ -747,8 +753,8 @@ describe('VFR/timelapse KHÔNG được báo động oan', () => {
     expect(span).toBeCloseTo(165, 1);
   });
 
-  it('vẫn bắt được gián đoạn THẬT trên chính nội dung VFR đó', () => {
-    // Cùng nhịp 15s, nhưng nhảy vọt 300s ở giữa = quảng cáo thật.
+  it('still catches a REAL discontinuity within that same VFR content', () => {
+    // Same 15s cadence, but a 300s jump in the middle = a real ad break.
     const withSeam: TimedPacket[] = vfr.map((p, i) => ({
       ...p,
       pts: p.pts! + (i >= 6 ? 300 * 90_000 : 0),

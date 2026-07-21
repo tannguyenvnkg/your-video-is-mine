@@ -1,38 +1,38 @@
-// W2.7 — phát hiện "bộ xử lý video đã chết" (§2.14).
+// W2.7 — detect a "dead video processor" (§2.14).
 //
-// VẤN ĐỀ: offscreen document có thể bị Chrome giết bất cứ lúc nào (Task Manager, OOM, tab crash).
-// Nó chết IM LẶNG — không có sự kiện nào báo về background. Job đang chạy nằm lại storage ở phase
-// 'fetching' VĨNH VIỄN, popup quay spinner không lời giải thích. Đó là kết cục tệ nhất của một app
-// tải: user không biết nên chờ tiếp hay bấm lại.
+// PROBLEM: the offscreen document can be killed by Chrome at any time (Task Manager, OOM, tab
+// crash). It dies SILENTLY — no event reports back to background. The running job stays stuck in
+// storage at phase 'fetching' FOREVER, the popup spins forever with no explanation. That's the
+// worst possible outcome for a download app: the user doesn't know whether to keep waiting or retry.
 //
-// CÁCH CHỮA: offscreen đập nhịp tim đều đặn; background đóng dấu `lastSeenAt` mỗi lần nhận tin, và
-// một tick định kỳ đánh dấu LỖI THẬT cho job nào im quá lâu.
+// FIX: offscreen sends a steady heartbeat; background stamps `lastSeenAt` on every message
+// received, and a periodic tick marks a REAL ERROR for any job that's been silent too long.
 //
-// 🔴 ĐỒNG HỒ THEO IM LẶNG, KHÔNG THEO TỔNG THỜI GIAN — y hệt bài học W2.5/W2.6. Một job HLS hợp lệ
-// chạy 30 phút là bình thường; cái BẤT THƯỜNG là 60 giây không một tiếng động nào.
+// 🔴 CLOCK BY SILENCE, NOT BY TOTAL DURATION — same lesson as W2.5/W2.6. A valid HLS job running
+// for 30 minutes is normal; what's ABNORMAL is 60 seconds without a single sound.
 //
-// Logic thuần (không đụng browser API) để unit test được — background.ts là entrypoint, vitest
-// không chạm tới.
+// Pure logic (no browser API) so it's unit-testable — background.ts is an entrypoint that vitest
+// doesn't touch.
 
 import type { DownloadEntry, HlsJob, HlsPhase } from './storage';
 
-/** Nhịp tim offscreen gửi mỗi ngần này (đủ dày để 60s ngưỡng không báo động giả). */
+/** How often offscreen sends a heartbeat (dense enough that the 60s threshold doesn't false-alarm). */
 export const HEARTBEAT_INTERVAL_MS = 5_000;
 
 /**
- * Im lâu hơn ngần này = bộ xử lý đã chết.
+ * Silence longer than this = the processor has died.
  *
- * Vì sao 60s mà không ngắn hơn: nhịp tim đi qua `runtime.sendMessage`, và service worker có thể
- * đang ngủ/khởi động lại — vài nhịp rớt là chuyện thường. 60s = 12 nhịp liên tiếp mất trắng, lúc đó
- * kết luận "chết" mới an toàn. Ngắn hơn = giết oan job khoẻ.
+ * Why 60s and not shorter: the heartbeat goes through `runtime.sendMessage`, and the service worker
+ * may be asleep/restarting — dropping a few beats is normal. 60s = 12 consecutive missed beats,
+ * at which point concluding "dead" is safe. Shorter would kill healthy jobs.
  */
 export const HEARTBEAT_TIMEOUT_MS = 60_000;
 
-/** Thông báo khi bộ xử lý chết — phải nói RÕ chuyện gì xảy ra và làm gì tiếp, không phải mã lỗi trần. */
+/** Message shown when the processor dies — must state CLEARLY what happened and what to do next, not a bare error code. */
 export const DEAD_OFFSCREEN_ERROR =
   'Bộ xử lý video đã dừng đột ngột (thường do hết bộ nhớ hoặc trình duyệt thu hồi). Hãy thử tải lại — nếu video rất lớn, chọn chất lượng thấp hơn.';
 
-/** Phase còn CHẠY = phải có nhịp tim. Phase kết thúc thì im là đúng, đừng theo dõi nữa. */
+/** Phase still RUNNING = must have a heartbeat. Silence during a finished phase is normal — stop tracking it. */
 const ACTIVE_PHASES: readonly HlsPhase[] = [
   'queued',
   'loading',
@@ -46,12 +46,12 @@ export function isActiveHlsPhase(phase: HlsPhase): boolean {
 }
 
 /**
- * Job nào đã im quá lâu -> id của chúng (caller đánh dấu lỗi).
+ * Which jobs have been silent too long -> their ids (the caller marks the error).
  *
- * Hai lớp bảo vệ chống GIẾT OAN:
- * - `>` chứ không `>=`: đúng ngưỡng chưa tính là chết (giật nhẹ đồng hồ không thành án tử).
- * - thiếu `lastSeenAt` -> BỎ QUA. Job tạo trước bản nâng cấp này không có dấu thời gian; không có
- *   bằng chứng sống thì cũng không có bằng chứng chết, mà giết oan tệ hơn là bỏ sót.
+ * Two layers of protection against WRONGFUL KILLS:
+ * - `>` instead of `>=`: exactly at the threshold doesn't count as dead yet (a small clock jitter isn't a death sentence).
+ * - missing `lastSeenAt` -> SKIPPED. A job created before this upgrade has no timestamp; no proof of
+ *   life also means no proof of death, and a wrongful kill is worse than a miss.
  */
 export function findDeadHlsJobs(
   jobs: Record<string, HlsJob>,
@@ -68,15 +68,17 @@ export function findDeadHlsJobs(
 }
 
 /**
- * W2.7 — lượt tải PROGRESSIVE nào đã im quá lâu -> khoá của chúng.
+ * W2.7 — which PROGRESSIVE downloads have been silent too long -> their keys.
  *
- * Vì sao đường này cũng cần lưới: W2.5 định tuyến .mp4 qua offscreen (để mang được Referer spoof),
- * nên từ đó progressive PHỤ THUỘC offscreen y như HLS. Offscreen chết ⇒ `finally` của nó không chạy
- * ⇒ không có `download/progress` 'interrupted' nào được gửi ⇒ entry kẹt `in_progress` vĩnh viễn.
+ * Why this path also needs a safety net: W2.5 routes .mp4 through offscreen (to carry the Referer
+ * spoof), so from then on progressive downloads DEPEND on offscreen just like HLS does. Offscreen
+ * dies ⇒ its `finally` doesn't run ⇒ no `download/progress` 'interrupted' ever gets sent ⇒ the
+ * entry stays stuck at `in_progress` forever.
  *
- * 🔴 CHỈ soi phase FETCH (`chromeDownloadId === undefined`). Có id rồi tức là offscreen đã giao blob
- * xong và `chrome.downloads` đang cầm lái — lượt đó KHÔNG còn phụ thuộc offscreen nữa, và nó im
- * lặng là chuyện bình thường (downloads.onChanged mới là nguồn tin). Soi nhầm = giết oan lượt lưu.
+ * 🔴 ONLY watch the FETCH phase (`chromeDownloadId === undefined`). Once there's an id, offscreen
+ * has already handed off the blob and `chrome.downloads` is in charge — that download NO LONGER
+ * depends on offscreen, and silence from it is normal (downloads.onChanged is the source of truth
+ * there). Watching it too would wrongfully kill the save phase.
  */
 export function findDeadDownloads(
   entries: Record<string, DownloadEntry>,
@@ -94,16 +96,18 @@ export function findDeadDownloads(
 }
 
 /**
- * Gộp mọi lời gọi CÙNG LÚC vào một lượt chạy duy nhất.
+ * Coalesces every SIMULTANEOUS call into a single in-flight run.
  *
- * Vì sao cần (§2.14): hai `handleHlsDownload` gọi `ensureOffscreen()` sát nhau -> cả hai vào
- * `createDocument`, cái thứ hai ném "single offscreen document" rồi bị NUỐT, caller tưởng offscreen
- * đã sẵn sàng và bắn `hls/run` vào một document CHƯA đăng ký listener xong -> job kẹt 'queued' mãi.
- * Đúng lớp lỗi đã làm HLS chết câm suốt nhiều commit đầu dự án.
+ * Why this is needed (§2.14): two `handleHlsDownload` calls hit `ensureOffscreen()` back to back ->
+ * both enter `createDocument`, the second one throws "single offscreen document" and gets SWALLOWED,
+ * the caller thinks offscreen is ready and fires `hls/run` at a document that HASN'T finished
+ * registering its listener -> the job gets stuck at 'queued' forever. This is exactly the class of
+ * bug that made HLS die silently for many of the project's early commits.
  *
- * 🔴 KHÔNG cache kết quả sau khi xong: offscreen có thể chết bất cứ lúc nào, nên lần gọi sau PHẢI
- * dò lại từ đầu. Chỉ gộp trong lúc còn đang bay.
- * 🔴 Ném thì cũng xoá chuyến bay: giữ lại promise hỏng = mọi lần thử sau đều hỏng theo vĩnh viễn.
+ * 🔴 Does NOT cache the result once done: offscreen can die at any moment, so the next call MUST
+ * probe again from scratch. Only coalesces while still in flight.
+ * 🔴 On throw, also clears the in-flight slot: keeping a broken promise around would make every
+ * subsequent attempt fail forever.
  */
 export function singleFlight<T>(fn: () => Promise<T>): () => Promise<T> {
   let inFlight: Promise<T> | null = null;

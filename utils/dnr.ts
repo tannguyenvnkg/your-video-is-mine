@@ -1,7 +1,7 @@
-// Xây dựng session rule cho chrome.declarativeNetRequest để SPOOF Referer/Origin,
-// vượt hotlink-protection/403 ở mức KHÔNG-DRM. MV3 webRequest chỉ QUAN SÁT (không sửa được
-// header) -> phải dùng DNR (declarativeNetRequestWithHostAccess) để sửa request header.
-// Logic thuần (không phụ thuộc chrome API) -> unit test được.
+// Builds a session rule for chrome.declarativeNetRequest to SPOOF Referer/Origin,
+// bypassing hotlink-protection/403 at the NON-DRM level. MV3 webRequest only OBSERVES (cannot
+// modify headers) -> must use DNR (declarativeNetRequestWithHostAccess) to modify request headers.
+// Pure logic (no chrome API dependency) -> unit testable.
 
 export interface DnrModifyHeader {
   header: string;
@@ -19,29 +19,30 @@ export interface DnrRule {
   condition: {
     requestDomains: string[];
     resourceTypes: string[];
-    /** -1 = request KHÔNG gắn với tab nào (do SW/offscreen của extension phát). */
+    /** -1 = request NOT tied to any tab (issued by the extension's SW/offscreen). */
     tabIds: number[];
     /**
-     * Neo rule vào ĐÚNG một origin (vd `|https://example.com/`).
+     * Anchors the rule to EXACTLY one origin (e.g. `|https://example.com/`).
      *
-     * 🔴 BẮT BUỘC cho rule mang header nhạy cảm: `requestDomains:['example.com']` của DNR khớp
-     * **cả subdomain** (`api.`, `accounts.`, `cdn.`) -> token `Authorization` của media trên apex
-     * sẽ rò sang mọi subdomain extension fetch tới. `|` neo vào đầu URL nên
-     * `https://api.example.com/` KHÔNG khớp `|https://example.com/`.
+     * 🔴 REQUIRED for a rule carrying a sensitive header: DNR's `requestDomains:['example.com']`
+     * matches **every subdomain too** (`api.`, `accounts.`, `cdn.`) -> an `Authorization` token for
+     * media on the apex would leak to every subdomain the extension fetches to. `|` anchors to the
+     * start of the URL, so `https://api.example.com/` does NOT match `|https://example.com/`.
      */
     urlFilter?: string;
   };
 }
 
 /**
- * Dải id dành riêng cho rule spoof. Mọi rule của cơ chế này đều >= MIN, nhờ vậy đối soát
- * (staleSpoofRuleIds) biết chắc id nào là của mình mà không đụng rule của cơ chế khác.
- * SPAN đủ lớn để bộ đếm hầu như không bao giờ quay vòng trong một phiên trình duyệt.
+ * Id range reserved for spoof rules. Every rule from this mechanism is >= MIN, so reconciliation
+ * (staleSpoofRuleIds) can tell for certain which ids belong to it without touching other
+ * mechanisms' rules. SPAN is large enough that the counter almost never wraps within one browser
+ * session.
  */
 export const SPOOF_RULE_ID_MIN = 2000;
 export const SPOOF_RULE_ID_SPAN = 1_000_000;
 
-/** hostname của URL, hoặc null nếu URL không hợp lệ. */
+/** hostname of a URL, or null if the URL is invalid. */
 export function hostFromUrl(url: string): string | null {
   try {
     return new URL(url).hostname;
@@ -50,7 +51,7 @@ export function hostFromUrl(url: string): string | null {
   }
 }
 
-/** origin (scheme://host[:port]) của URL, hoặc null. */
+/** origin (scheme://host[:port]) of a URL, or null. */
 export function originFromUrl(url: string): string | null {
   try {
     return new URL(url).origin;
@@ -59,19 +60,22 @@ export function originFromUrl(url: string): string | null {
   }
 }
 
-// Áp cho các loại request mà CHÍNH EXTENSION phát ra khi tải media.
-// `fetch()` (từ SW/offscreen) map sang 'xmlhttprequest'; 'other' phủ các đường còn lại (vd
-// chrome.downloads.download). ĐÃ BỎ 'media'/'sub_frame'/'object' — đó là loại request của PLAYER
-// TRANG, spoof chúng là ghi đè Referer/Origin lên chính traffic của trang (§2.10 — W2.4).
+// Applies to the request types issued by the EXTENSION ITSELF when downloading media.
+// `fetch()` (from SW/offscreen) maps to 'xmlhttprequest'; 'other' covers the rest (e.g.
+// chrome.downloads.download). 'media'/'sub_frame'/'object' were REMOVED — those are request types
+// from the PAGE'S PLAYER, and spoofing them would overwrite Referer/Origin on the page's own
+// traffic (§2.10 — W2.4).
 const SPOOFED_RESOURCE_TYPES = ['xmlhttprequest', 'other'];
 
 /**
- * Rule set Referer + Origin cho request tới `host`.
+ * A rule that sets Referer + Origin for requests to `host`.
  *
- * W2.4: `id` do CALLER cấp (một id riêng cho mỗi cặp download×host) chứ không suy từ host nữa.
- * Trước đây id = hash(host) -> hai download cùng CDN dùng chung một rule, cái nào xong trước giật
- * rule khỏi tay cái đang chạy -> cái kia 403 giữa chừng (§2.10). Id riêng thì không đụng nhau.
- * `tabIds:[-1]` giới hạn rule vào ĐÚNG request do extension phát -> không đụng duyệt web của user.
+ * W2.4: `id` is now assigned by the CALLER (one id per download×host pair) instead of being
+ * derived from the host. Previously id = hash(host) -> two downloads on the same CDN shared one
+ * rule, and whichever finished first yanked the rule out from under the one still running ->
+ * the other 403'd mid-download (§2.10). Per-download ids don't collide.
+ * `tabIds:[-1]` restricts the rule to requests issued BY the extension only -> does not touch the
+ * user's own browsing.
  */
 export function buildRefererSpoofRule(
   id: number,
@@ -83,23 +87,24 @@ export function buildRefererSpoofRule(
 }
 
 /**
- * W2.1 — rule đặt CHÍNH XÁC tập header được giao, không thêm không bớt.
+ * W2.1 — a rule that sets EXACTLY the given set of headers, nothing added, nothing dropped.
  *
- * Khác `buildRefererSpoofRule` (bản BỊA: luôn kèm đúng 2 header ta nghĩ ra) ở chỗ caller quyết
- * định hoàn toàn danh sách, nên **quy tắc vàng §2.11** thi hành được: trang không gửi header nào
- * thì không có mục nào cho header đó. Việc set `Origin` vô điều kiện lên GET từng có thể TỰ GÂY
- * 403 trên CDN coi Origin lạ là vi phạm CORS.
+ * Unlike `buildRefererSpoofRule` (the OLD FAKED version: always carries the same 2 headers we
+ * guessed at), the caller fully controls the list here, which lets the **§2.11 golden rule** be
+ * enforced: if the page didn't send a given header, no entry is generated for it. Setting
+ * `Origin` unconditionally on GET could ITSELF CAUSE a 403 on CDNs that treat a stray Origin as a
+ * CORS violation.
  *
- * 🔬 ĐO THẬT (Edge, fetch từ SW, tabId -1): DNR đặt được MỌI header đã thử — cookie, referer,
- * origin, authorization, user-agent, accept-language và header lạ (`x-playback-session-id`).
- * Nhờ vậy phát lại KHÔNG cần luồn header qua 5 tầng vào offscreen, và tránh được bẫy đè mất
- * `Range` của byterange trong `utils/retry.ts`.
+ * 🔬 MEASURED (Edge, fetch from SW, tabId -1): DNR can set EVERY header tried — cookie, referer,
+ * origin, authorization, user-agent, accept-language and an unknown header (`x-playback-session-id`).
+ * This means the replay does NOT need to thread headers through 5 layers into offscreen, and it
+ * avoids the trap in `utils/retry.ts` that overwrites the byterange `Range`.
  */
 export function buildHeaderSpoofRule(
   id: number,
   host: string,
   headers: Readonly<Record<string, string>>,
-  /** Neo theo origin — dùng khi rule mang header nhạy cảm (xem `condition.urlFilter`). */
+  /** Anchors by origin — used when the rule carries a sensitive header (see `condition.urlFilter`). */
   anchorOrigin?: string,
 ): DnrRule {
   return {
@@ -180,13 +185,13 @@ export function hasConflictingSensitiveRule(
 }
 
 /**
- * Đối soát rule rò rỉ (W2.4 sweep): trong `sessionRuleIds` hiện có, những id nào thuộc dải spoof
- * (>= MIN) mà KHÔNG còn nằm trong tập `aliveRuleIds` (id của job/download còn sống) thì là RÁC -> xoá.
+ * Reconciles leaked rules (W2.4 sweep): among the current `sessionRuleIds`, any id in the spoof
+ * range (>= MIN) that is NOT in the `aliveRuleIds` set (ids of still-live jobs/downloads) is JUNK -> delete.
  *
- * Vì sao BẮT BUỘC có sweep: id theo bộ đếm mất tính "re-add cùng host thay thế rule cũ" mà hash-host
- * từng cho, nên một rule rò rỉ (job chết trước khi dọn) sẽ sống mãi tới khi restart trình duyệt.
- * Chốt chặn id >= MIN: TUYỆT ĐỐI không đụng rule id nhỏ hơn (của cơ chế khác), dù không thấy trong
- * tập sống.
+ * Why a sweep is REQUIRED: counter-based ids lose the "re-adding the same host replaces the old
+ * rule" property that hash-host used to give, so a leaked rule (job died before cleanup) would
+ * live forever until the browser restarts. The id >= MIN cutoff: NEVER touch a lower rule id (from
+ * another mechanism), even if it's not found in the live set.
  */
 export function staleSpoofRuleIds(
   sessionRuleIds: readonly number[],

@@ -5,8 +5,8 @@ import prettier from 'eslint-config-prettier';
 import globals from 'globals';
 import autoImports from './.wxt/eslint-auto-imports.mjs';
 
-// ESLint flat config (ESLint 9+). Import auto-imports của WXT để không báo "no-undef"
-// cho các global như `browser`, `defineBackground`, `defineContentScript`, `storage`, ...
+// ESLint flat config (ESLint 9+). Import WXT's auto-imports so it doesn't report "no-undef"
+// for globals like `browser`, `defineBackground`, `defineContentScript`, `storage`, ...
 export default tseslint.config(
   {
     ignores: [
@@ -35,7 +35,7 @@ export default tseslint.config(
     rules: {
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'warn',
-      // Chủ dự án cho phép `any` khi bắt buộc (kèm chú thích) -> để cảnh báo, không chặn build.
+      // Project owner allows `any` when required (with a comment) -> warn only, don't block the build.
       '@typescript-eslint/no-explicit-any': 'warn',
       '@typescript-eslint/no-unused-vars': [
         'error',

@@ -1,14 +1,14 @@
-// Offscreen document — chạy việc nặng cần DOM/WASM: ghép/remux HLS bằng libav.js,
-// fetch + giải mã segment, tạo blob URL để tải. Service worker MV3 KHÔNG làm được các việc này.
+// Offscreen document — runs heavy work that needs DOM/WASM: mux/remux HLS with libav.js,
+// fetch + decrypt segments, create blob URLs for download. MV3 service worker CANNOT do this.
 //
-// W3.1 — @ffmpeg/core (GPL, 32,2 MB, gom cả video vào RAM) ĐÃ ĐƯỢC GỠ, thay bằng bản libav.js
-// tự dựng (variant `ts2mp4d`, LGPL-2.1, 1,56 MB wasm, 0 encoder) chạy trong một Worker và
-// truyền byte qua OPFS. Ba lý do, theo đúng thứ tự quan trọng:
-//   1. PHÁP LÝ: @ffmpeg/core dựng với --enable-gpl nên là GPL, trong khi dự án khai MIT.
-//   2. Bộ nhớ: bản cũ giữ cả video trong RAM; bản này RAM PHẲNG (đo tới input 1,19 GB).
-//   3. Kích thước bundle: 34,8 MB -> ~2,4 MB.
-// Việc ghép nằm ở `mux-worker.ts` (nơi duy nhất có FileSystemSyncAccessHandle); lõi thuần
-// ở `utils/remux-core.ts` + `utils/remux-time.ts` để chạy test được dưới node.
+// W3.1 — @ffmpeg/core (GPL, 32.2 MB, holds the whole video in RAM) HAS BEEN REMOVED, replaced by a
+// self-built libav.js (variant `ts2mp4d`, LGPL-2.1, 1.56 MB wasm, 0 encoders) running in a Worker and
+// streaming bytes through OPFS. Three reasons, in order of importance:
+//   1. LEGAL: @ffmpeg/core is built with --enable-gpl so it's GPL, while the project declares MIT.
+//   2. Memory: the old build kept the whole video in RAM; this one has FLAT RAM (measured up to a 1.19 GB input).
+//   3. Bundle size: 34.8 MB -> ~2.4 MB.
+// The muxing lives in `mux-worker.ts` (the only place with FileSystemSyncAccessHandle); the pure
+// core is in `utils/remux-core.ts` + `utils/remux-time.ts` so it can be tested under node.
 import {
   MuxCancelledError,
   MuxSession,
@@ -20,13 +20,13 @@ import { decryptAes128Cbc, segmentIv } from '@/utils/crypto';
 import { DRM_UNSUPPORTED_ERROR } from '@/utils/drm';
 import { describeError } from '@/utils/errors';
 import type { HlsSegmentsResult } from '@/utils/hls';
-// ⚠️ `utils/dash` chỉ kéo theo mpd-parser + types + hls + drm — TOÀN BỘ không đụng chrome.storage
-// và declarativeNetRequest, nên an toàn cho offscreen (nơi CHỈ có chrome.runtime). Giữ nguyên
-// tính chất đó: thêm một import storage/dnr vào chuỗi này là TypeError lúc chạy mà mọi cổng tĩnh
-// đều không thấy — đúng con bug từng làm HLS chết câm nhiều commit đầu.
+// ⚠️ `utils/dash` only pulls in mpd-parser + types + hls + drm — NONE of it touches chrome.storage
+// or declarativeNetRequest, so it's safe for offscreen (where ONLY chrome.runtime exists). Keep this
+// property intact: adding a storage/dnr import into this chain is a runtime TypeError that no static
+// gate catches — the exact bug that made HLS die silently in the first several commits.
 import { parseTrackSegments } from '@/utils/dash';
-// An toàn với ràng buộc "offscreen KHÔNG có chrome.storage": liveness.ts chỉ import KIỂU từ
-// storage.ts (bị xoá lúc biên dịch) nên không kéo theo một dòng chrome.storage nào.
+// Safe with the "offscreen has NO chrome.storage" constraint: liveness.ts only imports TYPES from
+// storage.ts (erased at compile time) so it doesn't pull in a single line of chrome.storage.
 import { HEARTBEAT_INTERVAL_MS } from '@/utils/liveness';
 import {
   CancelledError,
@@ -48,15 +48,17 @@ import type {
   OffscreenRequest,
 } from '@/utils/messages';
 
-// RÀNG BUỘC NỀN TẢNG (đo được, không phải suy đoán): offscreen document CHỈ được cấp
-// `chrome.runtime` — `chrome.storage` là UNDEFINED ở đây (`Object.keys(chrome)` = loadTimes,csi,runtime).
-// => TUYỆT ĐỐI không import hàm đọc/ghi storage vào file này: nó sẽ ném TypeError lúc chạy mà mọi
-// cổng tĩnh (tsc/eslint/vitest) đều không thấy. Mọi state đi qua background bằng runtime message.
+// FOUNDATIONAL CONSTRAINT (measured, not guessed): the offscreen document is granted ONLY
+// `chrome.runtime` — `chrome.storage` is UNDEFINED here (`Object.keys(chrome)` = loadTimes,csi,runtime).
+// => ABSOLUTELY do not import any storage read/write function into this file: it throws a runtime
+// TypeError that no static gate (tsc/eslint/vitest) catches. All state goes through background via
+// runtime messages.
 //
-// KHÔNG NÉM RA NGOÀI (W0.1): hàm này được gọi ~mọi bước của một job có thể chạy 30 phút, và cả
-// trong khối `catch` báo lỗi ở cuối runHlsJob. Nếu nó ném thì (1) một trục trặc nhắn tin nhất
-// thời giết trọn job, và (2) khối catch tự ném -> LỖI GỐC BỊ XOÁ, user nhận job treo không lời
-// giải thích. Nuốt lỗi ở đây là CÓ CHỦ ĐÍCH — nhưng không im lặng: vẫn phải log ra.
+// MUST NOT THROW OUTWARD (W0.1): this function is called at ~every step of a job that can run 30
+// minutes, including inside the `catch` block that reports errors at the end of runHlsJob. If it
+// throws: (1) a transient messaging hiccup kills the whole job, and (2) the catch block itself
+// throwing -> THE ORIGINAL ERROR IS ERASED, leaving the user with a hung job and no explanation.
+// Swallowing errors here is INTENTIONAL — but not silent: it must still be logged.
 async function updateHlsJob(
   jobId: string,
   patch: Partial<HlsJob>,
@@ -71,60 +73,62 @@ async function updateHlsJob(
   }
 }
 
-// Xếp hàng job HLS TUẦN TỰ: chỉ có 1 instance ffmpeg -> KHÔNG chạy 2 job song song
-// (tránh đụng độ tên file trong FS ảo dùng chung).
+// Queue HLS jobs SEQUENTIALLY: only 1 ffmpeg instance -> DO NOT run 2 jobs concurrently
+// (avoid filename collisions in the shared virtual FS).
 let jobChain: Promise<void> = Promise.resolve();
 
-// W2.6 — mỗi job một AbortController. TRƯỚC W2.6 đây là `Set<string>` cờ huỷ, mà cờ thì chỉ đọc
-// được GIỮA hai bước: worker đang kẹt trong `await fetch` không bao giờ nhìn thấy nó, nên "Huỷ"
-// không giật nổi request đang bay -> popup báo đã huỷ trong khi mạng vẫn chạy. Controller thì
-// abort thẳng vào request.
+// W2.6 — one AbortController per job. BEFORE W2.6 this was a `Set<string>` cancel-flag, but a flag
+// can only be read BETWEEN steps: a worker stuck inside `await fetch` never sees it, so "Cancel"
+// couldn't yank an in-flight request -> popup reports cancelled while the network keeps running.
+// A controller aborts the request directly.
 const jobAborts = new Map<string, AbortController>();
 
-// Phần trăm mux đã báo gần nhất — throttle theo bước 1% để không spam storage.
-// (Job chạy TUẦN TỰ nên chỉ có 1 mux tại một thời điểm; không cần khoá theo jobId.)
+// Last-reported mux percentage — throttled in 1% steps to avoid spamming storage.
+// (Jobs run SEQUENTIALLY so there's only 1 mux at a time; no need to key by jobId.)
 let lastMuxPct = -1;
 
-// Các blob URL đang giữ (thu hồi khi background báo tải xong, hoặc sau timeout dự phòng).
+// blob URLs currently held (revoked once background reports the download finished, or after a
+// fallback timeout).
 const activeBlobUrls = new Set<string>();
 const BLOB_TTL_MS = 10 * 60 * 1000;
 
 /**
- * blob URL -> tên file OPFS đứng sau nó.
+ * blob URL -> the OPFS filename backing it.
  *
- * 🔴 KHÔNG xoá file OPFS ngay sau khi gửi `download/blob`: background xử lý tin đó theo kiểu
- * bắn-rồi-quên (`background.ts:405-416` trả `undefined`, không ACK), nên offscreen KHÔNG biết
- * `chrome.downloads.download()` đã được gọi hay chưa. ĐO ĐƯỢC là xoá SAU khi `download()` trả
- * id thì an toàn tuyệt đối (tải xong đủ byte kể cả khi xoá file, giết offscreen, hay nạp lại
- * cả extension giữa chừng) — nhưng "sau khi trả id" là mốc mà chỉ background nhìn thấy.
- * Nên bám vào tín hiệu đã có sẵn trong giao thức: background gửi `revoke` khi lượt tải kết
- * thúc. Kèm hạn chót TTL và lượt quét lúc khởi động để không bao giờ rò rỉ file.
+ * 🔴 DO NOT delete the OPFS file right after sending `download/blob`: background handles that
+ * message fire-and-forget (`background.ts:405-416` returns `undefined`, no ACK), so offscreen has
+ * NO WAY to know whether `chrome.downloads.download()` has actually been called yet. MEASURED: it's
+ * absolutely safe to delete AFTER `download()` returns an id (the download completes with full bytes
+ * even if the file is deleted, offscreen is killed, or the whole extension is reloaded mid-flight) —
+ * but "after it returns an id" is a milestone only background can see. So instead hook into a signal
+ * that already exists in the protocol: background sends `revoke` when the download finishes. Plus a
+ * TTL deadline and a startup sweep so a file can never leak forever.
  */
 const opfsByBlobUrl = new Map<string, string>();
 
-// W2.5 — AbortController của từng lượt fetch progressive đang bay (huỷ = .abort() giật request ngay).
+// W2.5 — AbortController for each in-flight progressive fetch (cancel = .abort() yanks the request immediately).
 const progressiveAborts = new Map<string, AbortController>();
 
-// Trần thời gian tải playlist (manifest chỉ vài KB -> 30s là quá rộng rãi).
+// Playlist fetch timeout cap (a manifest is only a few KB -> 30s is generously wide).
 const PLAYLIST_TIMEOUT_MS = 30_000;
 
 /**
- * Tự kiểm bộ ghép video.
+ * Self-test the mux engine.
  *
- * Chạy ĐÚNG đường thật: nạp libav trong Worker, nối một segment MPEG-TS thật (18 KB, kèm
- * trong bundle) vào OPFS, ghép ra mp4, đọc lại kích thước. Không phải "đã nạp được wasm" —
- * nó đi trọn demux -> chỉnh timestamp -> muxer -> writer device -> OPFS.
+ * Runs the EXACT real path: load libav in a Worker, append one real MPEG-TS segment (18 KB,
+ * bundled) into OPFS, mux to mp4, read back the size. Not just "wasm loaded" — it goes through
+ * the full demux -> timestamp fixup -> muxer -> writer device -> OPFS pipeline.
  *
- * Bản ffmpeg cũ dựng video test bằng `-f lavfi testsrc`, tức là dùng ENCODER. Bản libav.js
- * này CỐ Ý không có encoder nào (đó là lý do nó nhỏ 1,56 MB và không dính GPL), nên phép thử
- * phải đổi sang remux — và remux mới đúng là việc extension làm thật.
+ * The old ffmpeg build made its test video with `-f lavfi testsrc`, i.e. using an ENCODER. This
+ * libav.js build DELIBERATELY has no encoder at all (that's why it's only 1.56 MB and avoids GPL),
+ * so the test had to switch to remux instead — and remux is actually what the extension does for real.
  */
 async function runEngineSelfTest(): Promise<EngineSelfTestResponse> {
   let session: MuxSession | null = null;
   try {
     session = await MuxSession.start('selftest');
-    // ⚠️ Đuôi `.bin` chứ KHÔNG phải `.ts`: đây là MPEG-TS, mà `tsc` thấy đuôi .ts là coi nó
-    // như TypeScript và cả `pnpm compile` gãy ngay ("File appears to be binary").
+    // ⚠️ `.bin` extension, NOT `.ts`: this is MPEG-TS, but `tsc` sees a `.ts` extension and treats
+    // it as TypeScript, breaking `pnpm compile` immediately ("File appears to be binary").
     const res = await fetch(browser.runtime.getURL('/libav/selftest.bin'));
     if (!res.ok)
       throw new Error(`Không đọc được tệp thử (HTTP ${res.status}).`);
@@ -146,18 +150,18 @@ async function runEngineSelfTest(): Promise<EngineSelfTestResponse> {
   }
 }
 
-// --- G5: tải & ghép HLS (chạy tuần tự qua jobChain) ---
+// --- G5: download & mux HLS (runs sequentially through jobChain) ---
 //
-// Tối ưu tốc độ (v0.5.0): tách FETCH (mạng, song song) khỏi WRITE (FS ảo, cần ffmpeg) để
-// chồng lấn việc tải segment với việc nạp ffmpeg.wasm. Prefetch CÓ TRẦN RAM (MAX_BUFFERED)
-// để không giữ toàn bộ video trong bộ nhớ.
+// Speed optimization (v0.5.0): separate FETCH (network, parallel) from WRITE (virtual FS, needs
+// ffmpeg) to overlap segment downloading with loading ffmpeg.wasm. Prefetch has a RAM CAP
+// (MAX_BUFFERED) so it doesn't hold the whole video in memory.
 
-/** Tải + parse một media playlist. Ném lỗi RÕ thay vì để body trang lỗi (403/404) lọt vào parser. */
+/** Download + parse a media playlist. Throws a CLEAR error instead of letting an error page's body (403/404) leak into the parser. */
 /**
- * Tải NGUYÊN VĂN một manifest (m3u8 hoặc mpd) với timeout + kiểm status.
+ * Downloads the RAW TEXT of a manifest (m3u8 or mpd) with a timeout + status check.
  *
- * Tách khỏi `loadPlaylist` cho W1.5: DASH cần chính đoạn text đó để parse NHIỀU track (hình +
- * tiếng nằm chung một .mpd), nên phần "tải" phải dùng lại được mà không kèm phần "parse".
+ * Split out of `loadPlaylist` for W1.5: DASH needs that exact text to parse MULTIPLE tracks (video +
+ * audio share one .mpd), so the "download" part must be reusable without the "parse" part attached.
  */
 async function loadPlaylistText(
   url: string,
@@ -165,12 +169,13 @@ async function loadPlaylistText(
   jobSignal?: AbortSignal,
 ): Promise<string> {
   let text: string;
-  // W2.6: ghép timeout với signal huỷ của job -> bấm Huỷ trong lúc đang tải playlist cũng đứt ngay
-  // (trước đây chỉ có timeout: huỷ phải chờ hết 30s mới có tác dụng).
+  // W2.6: chain the timeout with the job's cancel signal -> pressing Cancel while a playlist is
+  // downloading aborts immediately too (previously there was only the timeout: cancel had to wait
+  // the full 30s to take effect).
   const { signal, dispose } = timeoutSignal(PLAYLIST_TIMEOUT_MS, jobSignal);
   try {
-    // Playlist PHẢI có timeout + kiểm status. Không timeout thì một request treo = job treo VĨNH
-    // VIỄN ở 'loading', không lỗi, không cách nào biết.
+    // Playlist download MUST have a timeout + status check. Without a timeout, one hung request =
+    // the job hangs FOREVER at 'loading', no error, no way to tell.
     const res = await fetch(url, {
       credentials: 'include',
       signal,
@@ -178,8 +183,8 @@ async function loadPlaylistText(
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     text = await res.text();
   } catch (e) {
-    // Huỷ KHÔNG phải lỗi tải: bọc nó thành "Không tải được playlist" sẽ báo cho user một thông
-    // báo lỗi đỏ trong khi thứ vừa xảy ra là chính họ bấm Huỷ.
+    // Cancellation is NOT a download error: wrapping it as "Failed to download playlist" would
+    // show the user a red error message when what actually happened is they pressed Cancel.
     if (jobSignal?.aborted) throw new CancelledError('Đã huỷ');
     throw new Error(`Không tải được playlist ${label}: ${describeError(e)}`, {
       cause: e,
@@ -190,7 +195,7 @@ async function loadPlaylistText(
   return text;
 }
 
-/** Tải + parse một media playlist theo ĐÚNG định dạng của nó. */
+/** Downloads + parses a media playlist in its EXACT format. */
 async function loadPlaylist(
   url: string,
   label: string,
@@ -202,25 +207,27 @@ async function loadPlaylist(
   return parseTrackSegments(text, url, mediaType, trackId);
 }
 
-/** Kết quả tải một track: đã nối bao nhiêu segment và bao nhiêu byte vào file OPFS. */
+/** Result of downloading a track: how many segments and how many bytes were appended to the OPFS file. */
 interface TrackBytes {
   segments: number;
-  /** Byte SAU giải mã — đúng số byte nằm trên đĩa. */
+  /** Bytes AFTER decryption — the exact byte count on disk. */
   bytes: number;
 }
 
 /**
- * Tải trọn segment của MỘT playlist vào FS ảo của ffmpeg.
+ * Downloads every segment of ONE playlist into ffmpeg's virtual FS.
  *
- * W1.1 tách hàm này ra khỏi runHlsJob để dùng lại cho luồng TIẾNG tách rời: hình và tiếng là hai
- * playlist độc lập, mỗi bên có #EXT-X-KEY, #EXT-X-MAP và SỐ SEGMENT riêng (đo trên fixture thật:
- * hình 10 segment, tiếng 11) -> mọi giả định "hai bên giống nhau" đều sai.
+ * W1.1 split this function out of runHlsJob so it's reusable for a separate AUDIO stream: video
+ * and audio are two independent playlists, each with its own #EXT-X-KEY, #EXT-X-MAP and SEGMENT
+ * COUNT (measured on a real fixture: 10 video segments, 11 audio) -> any assumption "both sides are
+ * the same" is wrong.
  *
- * `prefix` tách không gian tên file OPFS của hai track (`ymv-<job>-v.bin` vs `ymv-<job>-a.bin`).
+ * `prefix` separates the OPFS filename namespace between the two tracks (`ymv-<job>-v.bin` vs `ymv-<job>-a.bin`).
  *
- * W3.1: byte KHÔNG còn đi vào FS ảo của ffmpeg nữa mà nối thẳng vào MỘT file OPFS mỗi track,
- * qua Worker. Đây chính là chỗ bỏ được trần RAM: trước đây mỗi segment tồn tại hai lần (buffer
- * vừa fetch + bản sao trong MEMFS), nay nó đi thẳng từ mạng xuống đĩa.
+ * W3.1: bytes NO LONGER go into ffmpeg's virtual FS, instead they're appended straight into ONE
+ * OPFS file per track, through the Worker. This is exactly where the RAM cap got removed: previously
+ * every segment existed twice (the buffer just fetched + a copy in MEMFS), now it goes straight from
+ * network to disk.
  */
 async function downloadTrack(o: {
   session: MuxSession;
@@ -228,25 +235,27 @@ async function downloadTrack(o: {
   prefix: string;
   concurrency: number;
   throwIfCancelled: () => void;
-  /** W2.6 — signal huỷ của JOB: abort giật mọi request đang bay ra ngay, không chờ vòng lặp. */
+  /** W2.6 — the JOB's cancel signal: abort yanks every in-flight request immediately, without waiting for the loop. */
   signal: AbortSignal;
-  /** Báo 1 segment vừa fetch xong (byte thô, trước giải mã) -> gộp tiến trình mọi track. */
+  /** Reports 1 segment just fetched (raw bytes, before decryption) -> combined progress across every track. */
   onSegment: (bytes: number) => Promise<void>;
-  /** W2.6 — báo "đang thử lại" để popup không đứng hình câm suốt cả phút. */
+  /** W2.6 — report "retrying" so the popup doesn't sit silently frozen for a whole minute. */
   onRetry?: (info: { attempt: number; total: number; reason: string }) => void;
 }): Promise<TrackBytes> {
   const { session, parsed, prefix, concurrency, throwIfCancelled, signal } = o;
   const total = parsed.segments.length;
 
-  // ⚠️ Cache key AES RIÊNG mỗi track: rendition tiếng thường có #EXT-X-KEY riêng, dùng chung cache
-  // theo URI vẫn đúng nhưng để riêng thì không có đường lẫn key giữa hai playlist.
+  // ⚠️ SEPARATE AES key cache per track: the audio rendition often has its own #EXT-X-KEY; sharing
+  // the cache by URI would still be correct, but keeping it separate means there's no way for keys
+  // to cross between the two playlists.
   //
-  // 🔴 Cache PROMISE chứ không cache KẾT QUẢ (đã ĐO 2026-07-19): vòng tải gọi `getKey` từ nhiều
-  // segment SONG SONG, nên bản cache-kết-quả để mọi lượt cùng trượt cache rồi cùng fetch — đo
-  // thật trên fixture 10 segment: **3-5 lượt tải khoá cho 1-2 khoá thật**, và con số còn đổi
-  // giữa các lần chạy. Ngoài đời đó là N request thừa lên đúng endpoint mà CDN hay giới hạn nhịp.
-  // Cache promise thì lượt sau bám vào lượt đầu -> đúng 1 request mỗi URI, và số đó TẤT ĐỊNH nên
-  // ca e2e mới ghim được "xoay khoá phải lấy ĐÚNG 2 khoá".
+  // 🔴 Cache the PROMISE, not the RESULT (measured 2026-07-19): the download loop calls `getKey` from
+  // multiple segments IN PARALLEL, so a cache-the-result version lets every caller miss the cache and
+  // fetch at the same time — measured for real on a 10-segment fixture: **3-5 key downloads for 1-2
+  // actual keys**, and the number even varied between runs. In production that's N wasted requests
+  // against the exact endpoint CDNs tend to rate-limit. Caching the promise means later callers latch
+  // onto the first one -> exactly 1 request per URI, and that count is DETERMINISTIC, which is what
+  // lets the e2e case pin down "key rotation must fetch EXACTLY 2 keys".
   const keyCache = new Map<string, Promise<ArrayBuffer>>();
   const getKey = (keyUri: string): Promise<ArrayBuffer> => {
     const cached = keyCache.get(keyUri);
@@ -256,14 +265,14 @@ async function downloadTrack(o: {
       label: 'khoá giải mã (AES-128)',
       onRetry: o.onRetry,
     }).catch((e: unknown) => {
-      // Hỏng thì BỎ khỏi cache để lượt sau được thử lại — NHƯNG CHỈ với lỗi đáng thử lại.
+      // On failure, REMOVE from cache so a later attempt can retry — BUT ONLY for errors worth retrying.
       //
-      // 🔴 Với 401/403/404/410 (`FatalFetchError`) thì KHÔNG được xoá: `fetchWithRetry` cố ý
-      // không thử lại mấy mã đó, mà tới 6 worker fetch chạy song song đều gọi `getKey` sau khi
-      // segment riêng của chúng về. Xoá cache = mỗi worker phát thêm một request lên đúng
-      // endpoint khoá vừa từ chối dứt khoát -> tối đa 6 cú đập, đúng thứ nâng rủi ro từ throttle
-      // mềm lên chặn IP cứng (xem chú thích isFatalHttpStatus ở utils/retry.ts).
-      // Huỷ job (`CancelledError`) cũng vậy: không có lượt sau nào để mà phục vụ.
+      // 🔴 For 401/403/404/410 (`FatalFetchError`) it must NOT be removed: `fetchWithRetry` deliberately
+      // does not retry those codes, yet up to 6 parallel fetch workers all call `getKey` once their own
+      // segment comes back. Clearing the cache means every worker fires one more request at the exact
+      // key endpoint that just refused outright -> up to 6 hits, exactly the kind of thing that escalates
+      // risk from soft throttling to a hard IP block (see the isFatalHttpStatus comment in utils/retry.ts).
+      // Same for job cancellation (`CancelledError`): there's no later caller left to serve.
       if (!(e instanceof FatalFetchError) && !(e instanceof CancelledError)) {
         keyCache.delete(keyUri);
       }
@@ -274,13 +283,14 @@ async function downloadTrack(o: {
   };
 
   /**
-   * Giải mã một segment, và QUAN TRỌNG NHẤT: biến lỗi WebCrypto thành lời người đọc được.
+   * Decrypts a segment, and MOST IMPORTANTLY: turns a WebCrypto error into a human-readable message.
    *
-   * 🔴 ĐÃ ĐO trên bản trước bản vá này (2026-07-19, e2e `aes128-bad-key`): sai khoá -> WebCrypto
-   * ném `DOMException(OperationError)` mà **`message` RỖNG** -> job kết thúc với `error: ""` ->
-   * popup hiện một dòng đỏ TRỐNG KHÔNG. Khoá trả về không phải 16 byte (CDN chuyển hướng về trang
-   * đăng nhập — rất hay gặp) thì được câu tiếng Anh `"AES key data must be 128 or 256 bits"`,
-   * cũng vô nghĩa với người dùng. Cả hai đều là hỏng-âm-thầm: không phân biệt nổi với mất mạng.
+   * 🔴 MEASURED on the build prior to this fix (2026-07-19, e2e `aes128-bad-key`): a wrong key ->
+   * WebCrypto throws `DOMException(OperationError)` whose **`message` is EMPTY** -> the job ends
+   * with `error: ""` -> the popup shows an EMPTY red line. If the returned key isn't 16 bytes (the
+   * CDN redirecting to a login page — very common) you get the English string
+   * `"AES key data must be 128 or 256 bits"`, which is just as meaningless to the user. Both are
+   * silent failures: indistinguishable from a dropped connection.
    */
   const decryptSegment = async (
     data: ArrayBuffer,
@@ -288,8 +298,8 @@ async function downloadTrack(o: {
     iv: Uint8Array<ArrayBuffer>,
     label: string,
   ): Promise<ArrayBuffer> => {
-    // Kiểm độ dài TRƯỚC: đây là ca "server trả HTML thay khoá", và nói thẳng ra thì hữu ích hơn
-    // nhiều so với việc để importKey ném câu tiếng Anh về số bit.
+    // Check length FIRST: this is the "server returned HTML instead of a key" case, and spelling
+    // that out directly is far more useful than letting importKey throw an English message about bit counts.
     if (keyBytes.byteLength !== 16) {
       throw new Error(
         `Khoá giải mã AES-128 không hợp lệ: nhận ${keyBytes.byteLength} byte thay vì 16. ` +
@@ -299,7 +309,7 @@ async function downloadTrack(o: {
     try {
       return await decryptAes128Cbc(data, keyBytes, iv);
     } catch (e) {
-      // KHÔNG chuyển tiếp e.message: nó rỗng ở đúng ca hay gặp nhất (sai khoá).
+      // DO NOT forward e.message: it's empty in exactly the most common case (wrong key).
       const raw = e instanceof Error ? e.message.trim() : '';
       throw new Error(
         `Giải mã AES-128 thất bại ở ${label} — khoá không khớp với dữ liệu. ` +
@@ -313,22 +323,23 @@ async function downloadTrack(o: {
   const fetchSegmentBytes = async (i: number): Promise<Uint8Array> => {
     throwIfCancelled();
     const seg = parsed.segments[i]!;
-    // An toàn: segment giữa chừng dùng mã hoá khác AES-128 (mixed method) -> DỪNG.
+    // Safety: a mid-stream segment using a different encryption than AES-128 (mixed method) -> STOP.
     const method = seg.keyMethod;
     if (method && method !== 'NONE' && method !== 'AES-128') {
       throw new Error(`Segment dùng mã hoá không hỗ trợ: ${method}`);
     }
-    // 🔴 Khai AES-128 mà KHÔNG có địa chỉ khoá (`#EXT-X-KEY` thiếu URI, hoặc URI rỗng bị
-    // `utils/hls.ts` biến thành undefined): nhánh giải mã bên dưới có điều kiện `&& seg.keyUri`
-    // nên nó sẽ ÂM THẦM BỎ QUA và ghi thẳng ciphertext xuống OPFS. Kết quả là file rác, hoặc một
-    // lỗi demux khó hiểu đổ tội cho khâu ghép. Ném ở đây để lỗi nói đúng nguyên nhân.
+    // 🔴 Declares AES-128 but has NO key address (`#EXT-X-KEY` missing URI, or an empty URI turned
+    // into undefined by `utils/hls.ts`): the decryption branch below is gated on `&& seg.keyUri`,
+    // so it would SILENTLY SKIP decryption and write the ciphertext straight to OPFS. The result is
+    // a garbage file, or a confusing demux error that wrongly blames the muxing stage. Throw here so
+    // the error names the real cause.
     if (method === 'AES-128' && !seg.keyUri) {
       throw new Error(
         'Segment khai mã hoá AES-128 nhưng playlist không cho biết địa chỉ khoá ' +
           '(#EXT-X-KEY thiếu URI).',
       );
     }
-    // W1.3: có byterange -> chỉ kéo đúng đoạn của segment này, KHÔNG kéo cả file.
+    // W1.3: has a byterange -> pull only this segment's exact slice, NOT the whole file.
     let buf = await fetchWithRetry(seg.uri, {
       signal,
       label: `${prefix === 'a' ? 'segment tiếng' : 'segment'} #${i + 1}/${total}`,
@@ -350,10 +361,10 @@ async function downloadTrack(o: {
     return new Uint8Array(buf);
   };
 
-  // Tải init segment (fMP4) SONG SONG với prefetch bên dưới.
-  // W1.3: init cũng có thể là một ĐOẠN của file lớn (#EXT-X-MAP:BYTERANGE) — Apple fMP4 để init
-  // ở 719 byte ĐẦU của chính file 27MB chứa mọi segment. Bỏ qua byterange ở đây = nạp 27MB byte
-  // rác làm "header" -> ffmpeg "error reading header".
+  // Download the init segment (fMP4) IN PARALLEL with the prefetch below.
+  // W1.3: the init segment can also be a SLICE of a larger file (#EXT-X-MAP:BYTERANGE) — Apple fMP4
+  // puts init in the FIRST 719 bytes of the very same 27MB file that holds every segment. Ignoring
+  // the byterange here means loading 27MB of garbage bytes as the "header" -> ffmpeg "error reading header".
   const firstInitSeg = parsed.segments.find((s) => s.initUri);
   const initPromise: Promise<Uint8Array | null> = firstInitSeg?.initUri
     ? fetchWithRetry(firstInitSeg.initUri, {
@@ -366,36 +377,38 @@ async function downloadTrack(o: {
       }).then((b) => new Uint8Array(b))
     : Promise.resolve(null);
 
-  // Prefetch CÓ TRẦN RAM: tối đa MAX_BUFFERED segment chưa-ghi nằm trong bộ nhớ (backpressure).
+  // Prefetch has a RAM CAP: at most MAX_BUFFERED not-yet-written segments held in memory (backpressure).
   const MAX_BUFFERED = Math.min(2 * concurrency, 12);
   const names = new Array<string>(total);
   const buffers = new Array<Uint8Array | undefined>(total);
-  let nextFetch = 0; // chỉ số segment kế tiếp cần fetch
-  let nextWrite = 0; // chỉ số segment kế tiếp cần ghi FS
+  let nextFetch = 0; // index of the next segment to fetch
+  let nextWrite = 0; // index of the next segment to write to FS
   let failed: unknown = null;
 
   let writtenBytes = 0;
-  // init PHẢI nằm ĐẦU file, trước segment 0 — nó là phần header của cả track.
+  // init MUST sit at the START of the file, before segment 0 — it's the header for the whole track.
   let initBytes = await initPromise;
-  // 🔴 RFC 8216 §4.3.2.5: khoá AES-128 áp cho MỌI Media Segment **VÀ** cho Media Initialization
-  // Section khai bởi #EXT-X-MAP nằm trong tầm của #EXT-X-KEY đó (và chính vì vậy chuẩn BẮT BUỘC
-  // khai IV tường minh cho ca này). Trước bản vá, init được ghi THẲNG không giải mã -> ciphertext
-  // nằm đúng chỗ `ftyp`/`moov`, tức byte ĐẦU TIÊN của file, trong khi mọi segment phía sau lại
-  // đúng -> libav không nhận ra định dạng và job chết với thông báo đổ tội cho khâu GHÉP.
+  // 🔴 RFC 8216 §4.3.2.5: an AES-128 key applies to EVERY Media Segment **AND** to any Media
+  // Initialization Section declared by #EXT-X-MAP that falls within that #EXT-X-KEY's scope (and
+  // that is exactly why the spec REQUIRES an explicit IV for this case). Before this fix, init was
+  // written STRAIGHT without decryption -> ciphertext ended up right where `ftyp`/`moov` should be,
+  // i.e. the very FIRST bytes of the file, while every segment after it was correct -> libav couldn't
+  // recognize the format and the job died with a message that wrongly blamed the MUX stage.
   //
-  // 🔴 NHƯNG PHẠM VI KHOÁ ĐI THEO VỊ TRÍ TAG, KHÔNG THEO SEGMENT (lỗi do review đối kháng bắt,
-  // 2026-07-20). Dùng `firstInitSeg.keyMethod/keyUri` (khoá của SEGMENT) là SAI: playlist khai
-  // `#EXT-X-MAP` TRƯỚC `#EXT-X-KEY` có init TRONG SÁNG — hình dạng hợp lệ và phổ biến, vì init
-  // trong sáng cho player đọc codec trước khi đi xin khoá. Bản cũ đem giải mã init đó -> WebCrypto
-  // ném lỗi padding -> **giết oan một stream khoẻ** kèm câu đổ tội máy chủ phát nhầm khoá. Nay đọc
-  // khoá RIÊNG của init (`initKeyMethod/initKeyUri/initIv`, lấy từ `segment.map.key` — đã đo là
-  // m3u8-parser mô hình đúng phạm vi). Ca `fmp4-clear-init` ghim chiều này, `fmp4-aes-init` ghim
-  // chiều kia. **Đừng suy khoá init từ khoá segment nữa.**
+  // 🔴 BUT KEY SCOPE FOLLOWS TAG POSITION, NOT SEGMENT (bug caught by adversarial review, 2026-07-20).
+  // Using `firstInitSeg.keyMethod/keyUri` (the SEGMENT's key) is WRONG: a playlist that declares
+  // `#EXT-X-MAP` BEFORE `#EXT-X-KEY` has a CLEAR init — a valid and common shape, since a clear init
+  // lets the player read the codec before going to fetch a key. The old build decrypted that init
+  // anyway -> WebCrypto threw a padding error -> **a healthy stream got killed for no reason**, with a
+  // message wrongly blaming the server for sending the wrong key. Now it reads init's OWN key
+  // (`initKeyMethod/initKeyUri/initIv`, taken from `segment.map.key` — verified that m3u8-parser
+  // models the scope correctly). The `fmp4-clear-init` case pins this direction, `fmp4-aes-init` pins
+  // the other. **Never infer the init key from the segment key again.**
   const initMethod = firstInitSeg?.initKeyMethod;
   if (initMethod && initMethod !== 'NONE' && initMethod !== 'AES-128') {
     throw new Error(`Init segment dùng mã hoá không hỗ trợ: ${initMethod}`);
   }
-  // Khai AES-128 cho init mà thiếu URI khoá: ném thay vì âm thầm ghi ciphertext làm header.
+  // AES-128 declared for init but missing key URI: throw instead of silently writing ciphertext as the header.
   if (initMethod === 'AES-128' && !firstInitSeg?.initKeyUri) {
     throw new Error(
       'Phần đầu tệp (init) khai mã hoá AES-128 nhưng playlist không cho biết địa chỉ khoá ' +
@@ -422,28 +435,29 @@ async function downloadTrack(o: {
     await session.appendSegment(prefix, initBytes);
   }
 
-  // Vòng writer: nối tuần tự theo thứ tự index để giải phóng RAM sớm.
+  // Writer loop: appends sequentially in index order to free up RAM early.
   //
-  // PHẢI "xí phần" chỉ số (nextWrite++) TRƯỚC khi await. writeReady() được gọi từ NHIỀU worker
-  // fetch song song; nếu tăng sau await thì worker B đọc lại đúng nextWrite mà worker A đang ghi
-  // dở -> ghi trùng một buffer. Mà `appendSegment` TRANSFER (detach) ArrayBuffer sang Worker —
-  // y hệt `ffmpeg.writeFile` ngày trước — nên lần ghi thứ hai nổ "ArrayBuffer is detached".
-  // Ràng buộc MỚI của W3.1: thứ tự cũng là thứ tự BYTE trên đĩa, nên vòng này còn là thứ giữ
-  // cho segment nối đúng trình tự phát.
+  // MUST "claim" the index (nextWrite++) BEFORE the await. writeReady() is called from MULTIPLE
+  // parallel fetch workers; incrementing after the await means worker B reads back the exact
+  // nextWrite that worker A is still in the middle of writing -> double-writing the same buffer.
+  // And `appendSegment` TRANSFERS (detaches) the ArrayBuffer to the Worker — exactly like the old
+  // `ffmpeg.writeFile` — so the second write blows up with "ArrayBuffer is detached".
+  // W3.1's NEW constraint: index order is also BYTE order on disk, so this loop is also what keeps
+  // segments concatenated in correct playback order.
   const writeReady = async (): Promise<void> => {
     while (nextWrite < total && buffers[nextWrite] !== undefined) {
       throwIfCancelled();
       const i = nextWrite;
       nextWrite++;
       const bytes = buffers[i]!;
-      buffers[i] = undefined; // nhả tham chiếu ngay: buffer sắp bị transfer sang Worker
+      buffers[i] = undefined; // release the reference immediately: the buffer is about to be transferred to the Worker
       writtenBytes += bytes.byteLength;
       await session.appendSegment(prefix, bytes);
       names[i] = 'ok';
     }
   };
 
-  // Worker fetch có backpressure: dừng lấy segment mới khi bộ đệm đầy.
+  // Fetch worker with backpressure: stops picking up new segments once the buffer is full.
   const worker = async (): Promise<void> => {
     while (failed === null) {
       if (nextFetch - nextWrite >= MAX_BUFFERED) {
@@ -466,11 +480,12 @@ async function downloadTrack(o: {
     }
   };
 
-  // W2.6 — TRẦN 6 worker: Chrome chỉ mở tối đa 6 kết nối đồng thời tới MỘT host, request thứ 7
-  // trở đi nằm XẾP HÀNG trong pool. Mà đồng hồ chờ-header của ta bấm giờ từ lúc GỌI fetch, nên
-  // thời gian nằm xếp hàng bị tính oan -> mạng chậm + concurrency cao (cho phép tới 16) = segment
-  // bị giết dù server hoàn toàn khoẻ. Trên >6 cũng KHÔNG nhanh hơn thật (Chrome vẫn xếp hàng),
-  // nên trần này không mất tốc độ, chỉ bỏ đi phần chờ vô hình.
+  // W2.6 — CAP OF 6 workers: Chrome opens at most 6 concurrent connections to ONE host; the 7th
+  // request onward sits QUEUED in the pool. And our wait-for-headers clock starts counting from the
+  // moment fetch is CALLED, so queued time gets wrongly counted -> slow network + high concurrency
+  // (up to 16 allowed) = segments get killed even though the server is perfectly healthy. Above 6
+  // is ALSO not actually faster (Chrome still queues), so this cap costs no speed, it only removes
+  // the invisible wait.
   const MAX_INFLIGHT_PER_HOST = 6;
   const workerCount = Math.min(
     Math.max(1, concurrency),
@@ -479,12 +494,13 @@ async function downloadTrack(o: {
   );
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
   if (failed !== null) throw failed;
-  await writeReady(); // ghi nốt phần còn lại
+  await writeReady(); // write out anything left over
   throwIfCancelled();
 
-  // W1.2: ném LỚN TIẾNG thay vì mux một danh sách có lỗ. `names.join('|')` render một ô trống
-  // thành chuỗi rỗng -> `concat:a.ts||c.ts` -> ffmpeg nuốt lỗ hổng và ra file THIẾU ĐOẠN mà không
-  // báo gì. Chính cái nuốt im lặng đó biến lỗi race từ "crash" thành "file hỏng" — tệ hơn nhiều.
+  // W1.2: throw LOUDLY instead of muxing a list with a hole in it. `names.join('|')` renders an
+  // empty slot as an empty string -> `concat:a.ts||c.ts` -> ffmpeg swallows the gap and produces a
+  // file MISSING A CHUNK without reporting anything. That silent swallowing is exactly what turns a
+  // race-condition bug from "crash" into "corrupted file" — far worse.
   const missing = names.findIndex((n) => n === undefined);
   if (nextWrite !== total || missing >= 0) {
     throw new Error(
@@ -508,9 +524,10 @@ async function runHlsJob(
     tabId,
     spoofRuleIds,
   } = req;
-  // W2.6 — controller của job này. `hls/cancel` gọi .abort() -> request đang bay đứt NGAY, và
-  // `abortableSleep` trong backoff cũng thức dậy ngay thay vì ngồi hết 8 giây.
-  // Huỷ có thể tới TRƯỚC khi job rời hàng đợi (job xếp tuần tự): giữ lại controller đã có sẵn.
+  // W2.6 — this job's controller. `hls/cancel` calls .abort() -> in-flight requests break NOW, and
+  // `abortableSleep` inside the backoff also wakes up immediately instead of sitting out the full 8 seconds.
+  // Cancellation can arrive BEFORE the job leaves the queue (jobs are queued sequentially): keep any
+  // controller that already exists.
   const ac = jobAborts.get(jobId) ?? new AbortController();
   jobAborts.set(jobId, ac);
   const throwIfCancelled = () => {
@@ -524,17 +541,18 @@ async function runHlsJob(
     throwIfCancelled();
     await updateHlsJob(jobId, { phase: 'loading' });
 
-    // Dựng Worker + nạp libav SONG SONG với việc tải playlist (chưa await vội).
-    // `jobKey` làm mọi file OPFS của job này KHÔNG ĐỤNG job khác: ĐO ĐƯỢC là file OPFS sống
-    // sót qua cả việc giết offscreen, nạp lại extension và khởi động lại trình duyệt, nên tên
-    // cố định kiểu `in.ts`/`out.mp4` sẽ khiến job sau lặng lẽ dùng lại rác của job trước.
+    // Spin up the Worker + load libav IN PARALLEL with downloading the playlist (don't await yet).
+    // `jobKey` keeps every OPFS file of this job from COLLIDING with other jobs: MEASURED that OPFS
+    // files survive killing offscreen, reloading the extension, and even restarting the browser, so
+    // a fixed name like `in.ts`/`out.mp4` would let a later job silently reuse a previous job's leftovers.
     const jobKey = jobId.replace(/[^a-zA-Z0-9_-]/g, '');
     const sessionPromise = MuxSession.start(jobKey);
 
-    // W1.1: tải SONG SONG playlist hình và playlist tiếng (nếu master khai tiếng tách rời).
-    // W1.5 — DASH để CẢ hình lẫn tiếng trong MỘT file .mpd: tải một lần rồi parse hai track theo
-    // id. Gọi loadPlaylist hai lần ở đây sẽ tải nguyên manifest hai lượt và, tệ hơn, không có
-    // cách nào phân biệt track vì `resolvedUri` của mọi representation đều là chính file .mpd.
+    // W1.1: download the video playlist and the audio playlist IN PARALLEL (if the master declares audio separately).
+    // W1.5 — DASH keeps BOTH video and audio in ONE .mpd file: download it once, then parse two
+    // tracks by id. Calling loadPlaylist twice here would download the whole manifest twice and,
+    // worse, there'd be no way to tell tracks apart since every representation's `resolvedUri` is
+    // the same .mpd file.
     const mediaType = req.mediaType;
     let parsed: HlsSegmentsResult;
     let parsedAudio: HlsSegmentsResult | null = null;
@@ -553,8 +571,8 @@ async function runHlsJob(
       ]);
     }
 
-    // Ranh giới cứng: SAMPLE-AES/EME -> DỪNG. Phải kiểm CẢ HAI playlist: tiếng có thể được bảo vệ
-    // trong khi hình thì không.
+    // Hard boundary: SAMPLE-AES/EME -> STOP. Must check BOTH playlists: audio can be protected
+    // while video is not.
     if (parsed.isProtected || parsedAudio?.isProtected) {
       await updateHlsJob(jobId, {
         phase: 'error',
@@ -562,8 +580,9 @@ async function runHlsJob(
       });
       return;
     }
-    // W1.5 — ta parse ĐƯỢC nhưng CỐ Ý không ghép (vd DASH đa Period, mỗi Period một init khác
-    // nhau): ghép mù thì ffmpeg vẫn nhận, job vẫn báo "xong", file thì hỏng. Nói thẳng lý do.
+    // W1.5 — cases we CAN parse but DELIBERATELY refuse to mux (e.g. multi-Period DASH, each
+    // Period with a different init): muxing blindly would still be accepted by ffmpeg, the job
+    // would still report "done", but the file would be corrupted. State the reason plainly instead.
     const refuse = parsed.unsupportedReason ?? parsedAudio?.unsupportedReason;
     if (refuse) {
       await updateHlsJob(jobId, { phase: 'error', error: refuse });
@@ -576,8 +595,8 @@ async function runHlsJob(
       });
       return;
     }
-    // Playlist tiếng rỗng = ghép ra file CÂM. Thà báo lỗi còn hơn im lặng giao file hỏng — đó
-    // chính là căn bệnh §2.1 mà W1.1 sinh ra để chữa.
+    // An empty audio playlist = muxes to a SILENT file. Better to report an error than silently
+    // hand over a broken file — that's exactly the §2.1 disease W1.1 was created to cure.
     if (parsedAudio && parsedAudio.segments.length === 0) {
       await updateHlsJob(jobId, {
         phase: 'error',
@@ -589,7 +608,7 @@ async function runHlsJob(
     const concurrency = req.concurrency;
     const total = parsed.segments.length + (parsedAudio?.segments.length ?? 0);
 
-    // Vào 'fetching' NGAY (dù ffmpeg còn đang nạp) -> KHÔNG còn khoảng "chết".
+    // Enter 'fetching' RIGHT AWAY (even while ffmpeg is still loading) -> NO "dead" gap left.
     await updateHlsJob(jobId, {
       phase: 'fetching',
       segmentsTotal: total,
@@ -598,7 +617,7 @@ async function runHlsJob(
       startedAt: Date.now(),
     });
 
-    // Tiến trình GỘP mọi track: user chỉ quan tâm "còn bao nhiêu", không quan tâm hình hay tiếng.
+    // Progress COMBINED across every track: the user only cares "how much is left", not video vs audio.
     let done = 0;
     let bytesDownloaded = 0;
     const step = Math.max(1, Math.floor(total / 33));
@@ -610,11 +629,12 @@ async function runHlsJob(
       }
     };
 
-    session = await sessionPromise; // chờ Worker sẵn sàng trước khi ghi byte nào
+    session = await sessionPromise; // wait for the Worker to be ready before writing any bytes
     const activeSession = session;
-    // Bấm Huỷ trong lúc ĐANG GHÉP: báo thẳng vào Worker để nó dừng ở lô packet kế tiếp.
-    // Khác hẳn bản ffmpeg cũ — `exec` của ffmpeg.wasm KHÔNG ngắt được, huỷ chỉ có tác dụng
-    // sau khi ghép xong. ĐO ĐƯỢC: postMessage tới Worker đang ghép tới nơi trong ~5ms.
+    // Pressing Cancel WHILE MUXING: signal the Worker directly so it stops at the next packet batch.
+    // Very different from the old ffmpeg build — ffmpeg.wasm's `exec` COULD NOT be interrupted,
+    // cancel only took effect after muxing finished. MEASURED: postMessage reaches a Worker mid-mux
+    // within ~5ms.
     ac.signal.addEventListener('abort', () => void activeSession.cancel(), {
       once: true,
     });
@@ -625,15 +645,15 @@ async function runHlsJob(
       throwIfCancelled,
       signal: ac.signal,
       onSegment,
-      // Không await: đây chỉ là ghi chú hiển thị, không được chặn vòng tải.
+      // No await: this is only a display note, must not block the download loop.
       onRetry: (info: { attempt: number; total: number; reason: string }) => {
         void updateHlsJob(jobId, {
           note: `Mạng trục trặc (${info.reason}) — đang thử lại lần ${info.attempt}/${info.total}…`,
         });
       },
     };
-    // Tuần tự hình rồi tiếng: dùng lại đúng vòng tải đã chứng minh chạy được, và tiếng nhẹ hơn
-    // hình cả chục lần nên phần thêm vào không đáng kể.
+    // Video then audio, sequentially: reuses the exact download loop already proven to work, and
+    // audio is a dozen times lighter than video so the added time is negligible.
     const video = await downloadTrack({
       ...shared,
       parsed,
@@ -643,17 +663,19 @@ async function runHlsJob(
       ? await downloadTrack({ ...shared, parsed: parsedAudio, prefix: 'a' })
       : null;
 
-    // Cổng cuối trước khi ghép: track rỗng byte = chắc chắn ra file hỏng. Bản ffmpeg cũ dò
-    // lỗ bằng ô `undefined` trong mảng tên file; nối byte vào một file thì dấu vết đó không
-    // còn, nên phải đếm byte. (Worker còn đối chiếu lần nữa với `getSize()` trên đĩa.)
+    // Final gate before muxing: a zero-byte track guarantees a corrupted file. The old ffmpeg build
+    // detected gaps via an `undefined` slot in the filename array; once bytes are appended into one
+    // file, that trace disappears, so bytes must be counted instead. (The Worker also cross-checks
+    // once more with `getSize()` on disk.)
     if (video.bytes === 0 || (audio !== null && audio.bytes === 0)) {
       throw new Error(
         `Tải về 0 byte (hình ${video.bytes}, tiếng ${audio?.bytes ?? 0}) — không ghép để tránh ra file hỏng.`,
       );
     }
 
-    // Ghép bằng libav.js trong Worker: đọc thẳng từ OPFS, ghi thẳng ra OPFS.
-    // Xoá ghi chú "đang thử lại": đã qua khâu tải, để lại thì user tưởng vẫn đang trục trặc.
+    // Mux with libav.js inside the Worker: reads straight from OPFS, writes straight to OPFS.
+    // Clear the "retrying" note: the download stage is done, leaving it would make the user think
+    // there's still a network problem.
     await updateHlsJob(jobId, { phase: 'muxing', muxProgress: 0, note: '' });
     const tracks: MuxTrackSpec[] = audio
       ? [
@@ -674,26 +696,29 @@ async function runHlsJob(
       void updateHlsJob(jobId, { muxProgress: fraction });
     });
     if (!outcome.moovAtFront) {
-      // Không phải lỗi: file vẫn đúng, chỉ là moov nằm cuối nên phát qua mạng sẽ phải tải
-      // hết mới bắt đầu. Ghi log để còn biết đường lùi đã được dùng.
+      // Not an error: the file is still correct, it's just that moov ends up at the tail so
+      // streaming over the network requires downloading everything before playback can start. Log
+      // it so we still know the fallback path was taken.
       console.warn('[offscreen] phải lùi về moov ở cuối file cho job', jobId);
     }
 
     await updateHlsJob(jobId, { phase: 'saving' });
 
-    // Nếu user đã huỷ trong lúc mux/lưu -> DỪNG, không tải file về (tránh "hoàn tất giả").
+    // If the user cancelled while muxing/saving -> STOP, don't hand off the file for download
+    // (avoid a "fake completion").
     throwIfCancelled();
 
-    // 🔬 ĐO ĐƯỢC (Edge 150, extension thật, file 1,2 GB): `getFile()` 0,0 ms +
-    // `createObjectURL()` 0,1 ms, RSS PHẲNG, JS heap không đổi -> blob này là THAM CHIẾU tới
-    // file trên đĩa, KHÔNG phải bản sao trong RAM. Nếu nó nạp hết vào RAM thì cả kiến trúc
-    // OPFS của W3.1 vô nghĩa; vì vậy con số này là thứ cần đo lại nếu Chrome đổi hành vi.
+    // 🔬 MEASURED (Edge 150, real extension, a 1.2 GB file): `getFile()` 0.0 ms +
+    // `createObjectURL()` 0.1 ms, FLAT RSS, unchanged JS heap -> this blob is a REFERENCE to the
+    // file on disk, NOT a copy in RAM. If it loaded everything into RAM the whole W3.1 OPFS
+    // architecture would be pointless; so this figure is what needs to be re-measured if Chrome
+    // ever changes this behavior.
     const outFile = await MuxSession.openOutput(outcome.outName);
     const blobUrl = URL.createObjectURL(outFile);
     activeBlobUrls.add(blobUrl);
     opfsByBlobUrl.set(blobUrl, outcome.outName);
     deliveredOpfs = outcome.outName;
-    // Dự phòng chống rò rỉ: tự thu hồi sau TTL nếu background chưa báo revoke.
+    // Anti-leak fallback: auto-revoke after the TTL if background never reports revoke.
     setTimeout(() => revokeBlob(blobUrl), BLOB_TTL_MS);
     await browser.runtime.sendMessage({
       kind: 'download/blob',
@@ -709,15 +734,16 @@ async function runHlsJob(
       segmentsDone: total,
     });
   } catch (e) {
-    // Worker báo huỷ bằng lớp lỗi riêng của nó -> quy về đúng một nhánh 'cancelled'.
+    // The Worker reports cancellation with its own error class -> normalize both into one 'cancelled' branch.
     if (e instanceof CancelledError || e instanceof MuxCancelledError) {
       await updateHlsJob(jobId, { phase: 'cancelled', error: 'Đã huỷ' });
     } else {
       await updateHlsJob(jobId, { phase: 'error', error: describeError(e) });
     }
   } finally {
-    // Dọn file OPFS dù thành công/lỗi/huỷ. GIỮ LẠI file kết quả nếu nó đã được giao cho
-    // background (blob URL đang trỏ vào đó) — nó sẽ được xoá lúc `revoke` hoặc hết TTL.
+    // Clean up the OPFS file regardless of success/error/cancel. KEEP the result file if it has
+    // already been handed off to background (a blob URL points at it) — it gets deleted on
+    // `revoke` or once the TTL expires.
     if (session) {
       await session.cleanup(deliveredOpfs);
       session.dispose();
@@ -729,25 +755,27 @@ async function runHlsJob(
 function enqueueHlsJob(
   req: Extract<OffscreenRequest, { kind: 'hls/run' }>,
 ): void {
-  // W2.7 — NHỊP TIM. Offscreen có thể bị Chrome giết bất cứ lúc nào (Task Manager, hết RAM, crash)
-  // và nó chết IM LẶNG: không sự kiện nào báo về background, job nằm lại 'fetching' vĩnh viễn.
-  // Nhịp này là bằng chứng SỐNG duy nhất. Patch RỖNG là cố ý — background chỉ cần biết "vẫn còn
-  // tiếng", nó tự đóng dấu `lastSeenAt` bằng đồng hồ của chính nó.
+  // W2.7 — HEARTBEAT. Offscreen can be killed by Chrome at any moment (Task Manager, OOM, crash)
+  // and it dies SILENTLY: no event reaches background, the job sits at 'fetching' forever.
+  // This heartbeat is the only LIVE proof. An EMPTY patch is intentional — background only needs to
+  // know "still there", it stamps `lastSeenAt` itself with its own clock.
   //
-  // 🔴 ĐẬP TỪ LÚC XẾP HÀNG, KHÔNG PHẢI TỪ LÚC CHẠY — đã ĐO bằng e2e `queued-not-reaped`: job chạy
-  // TUẦN TỰ (chỉ 1 instance ffmpeg), nên job #2 nằm im trong hàng đợi suốt thời gian job #1 tải.
-  // Đặt nhịp tim trong `runHlsJob` thì job #2 im >60s và bị tick W2.7 **GIẾT OAN sau 61,2s** dù
-  // offscreen hoàn toàn khoẻ. Giết oan một lượt tải khoẻ còn TỆ HƠN cái treo mà W2.7 sinh ra để
-  // chữa — đúng bẫy "trần theo tổng thời gian" mà W2.5/W2.6 đã trả giá hai lần. Đừng dời vào trong.
+  // 🔴 TICKS FROM THE MOMENT IT'S QUEUED, NOT FROM WHEN IT RUNS — measured with e2e
+  // `queued-not-reaped`: jobs run SEQUENTIALLY (only 1 ffmpeg instance), so job #2 sits idle in the
+  // queue for the whole time job #1 is downloading. Placing the heartbeat inside `runHlsJob` would
+  // leave job #2 silent for >60s and get **WRONGLY KILLED after 61.2s** by the W2.7 tick even though
+  // offscreen is perfectly healthy. Killing a healthy download is WORSE than the hang W2.7 exists to
+  // cure — exactly the "cap on total elapsed time" trap that W2.5/W2.6 already paid for twice.
+  // Don't move this inside.
   const heartbeat = setInterval(() => {
     void updateHlsJob(req.jobId, {});
   }, HEARTBEAT_INTERVAL_MS);
   jobChain = jobChain
     .then(() => runHlsJob(req))
     .catch(() => undefined)
-    // Dọn ở ĐÂY chứ không trong `runHlsJob`: nhịp tim sinh ra trước khi job chạy nên phải chết sau
-    // khi job kết thúc. Còn đập tiếp = mỗi 5 giây một message rác, và một job đã chốt 'error' sẽ bị
-    // nhịp tim lỡ tay hồi sinh mốc thời gian.
+    // Clean up HERE, not inside `runHlsJob`: the heartbeat is created before the job runs, so it
+    // must die after the job ends. Still ticking = a wasted message every 5 seconds, and a job
+    // already settled at 'error' would have its timestamp accidentally revived by the heartbeat.
     .finally(() => clearInterval(heartbeat));
 }
 
@@ -756,9 +784,10 @@ function revokeBlob(url: string): void {
     URL.revokeObjectURL(url);
     activeBlobUrls.delete(url);
   }
-  // Tới đây lượt tải đã kết thúc (background báo revoke) hoặc đã quá TTL -> xoá file OPFS.
-  // ĐO ĐƯỢC: xoá file trong lúc `chrome.downloads` đang đọc nó VẪN tải xong đủ byte (ngữ nghĩa
-  // unlink kiểu POSIX), nên ở đây không có cửa sổ nguy hiểm nào.
+  // By this point the download has ended (background reported revoke) or the TTL has expired ->
+  // delete the OPFS file. MEASURED: deleting the file while `chrome.downloads` is still reading it
+  // STILL finishes with the full byte count (POSIX-style unlink semantics), so there's no dangerous
+  // window here.
   const opfsName = opfsByBlobUrl.get(url);
   if (opfsName !== undefined) {
     opfsByBlobUrl.delete(url);
@@ -766,14 +795,15 @@ function revokeBlob(url: string): void {
   }
 }
 
-// --- W2.5: tải progressive qua offscreen ---
+// --- W2.5: progressive download through offscreen ---
 //
-// VÌ SAO (đã ĐO 2026-07-18): `chrome.downloads.download({url})` phát request KHÔNG nhận rule DNR
-// modifyHeaders -> server chống hotlink nhận `Referer: NONE` -> 403. `fetch()` của extension ở đây
-// là `xmlhttprequest` tab-less -> KHỚP rule spoof (W2.4) -> qua 403. `chrome.downloads.download` do
-// đó chỉ còn là công cụ LƯU (nhận blob: URL), đúng bất biến của VDH.
+// WHY (measured 2026-07-18): `chrome.downloads.download({url})` fires a request that does NOT pick
+// up the DNR modifyHeaders rule -> a hotlink-protected server sees `Referer: NONE` -> 403. The
+// extension's own `fetch()` here is `xmlhttprequest`, tab-less -> MATCHES the spoof rule (W2.4) ->
+// gets past the 403. `chrome.downloads.download` is therefore reduced to a SAVE-only tool (it takes
+// a blob: URL), which matches VDH's invariant.
 
-/** Báo tiến trình/kết thúc một lượt fetch progressive về background. KHÔNG ném (như updateHlsJob). */
+/** Reports progress/completion of a progressive fetch back to background. Does NOT throw (unlike updateHlsJob). */
 async function updateProgressiveDownload(
   key: string,
   patch: Partial<DownloadEntry>,
@@ -792,13 +822,14 @@ async function updateProgressiveDownload(
   }
 }
 
-/** Bước report byte tối thiểu (~1MB) — stream trả nhiều mảnh nhỏ, đừng spam storage mỗi mảnh. */
+/** Minimum byte-report step (~1MB) — the stream returns many small chunks, don't spam storage on every one. */
 const PROGRESS_REPORT_STEP = 1024 * 1024;
 
 /**
- * Đọc trọn `res.body` (stream) thành Blob, báo tiến trình theo bước. Fallback arrayBuffer nếu không
- * có body. `heartbeat()` gọi mỗi lần nhận byte -> reset watchdog chống treo. Chặn cứng khi vượt trần
- * (server nói dối content-length / không gửi) để offscreen không OOM câm.
+ * Reads all of `res.body` (a stream) into a Blob, reporting progress in steps. Falls back to
+ * arrayBuffer if there's no body. `heartbeat()` is called on every byte received -> resets the
+ * anti-hang watchdog. Hard-caps once the limit is exceeded (server lies about content-length /
+ * sends none) so offscreen doesn't OOM silently.
  */
 async function readBodyToBlob(o: {
   res: Response;
@@ -809,7 +840,7 @@ async function readBodyToBlob(o: {
 }): Promise<Blob> {
   const { res, type, total, key, heartbeat } = o;
   if (!res.body) {
-    // Không đọc được stream -> ôm cả file một lần (chấp nhận, file nhỏ).
+    // Can't read as a stream -> hold the whole file at once (acceptable, small file).
     const buf = await res.arrayBuffer();
     if (buf.byteLength > MAX_PROGRESSIVE_BYTES) {
       throw new Error(tooLargeMessage(buf.byteLength));
@@ -831,8 +862,8 @@ async function readBodyToBlob(o: {
     if (done) break;
     heartbeat();
     received += value.byteLength;
-    // Chặn trước khi RAM phình vỡ: tổng có thể không biết trước (không content-length) nên phải
-    // canh ngay trong lúc đọc. Huỷ reader để nhả kết nối.
+    // Cap it before RAM blows up: the total may be unknown upfront (no content-length), so this
+    // must be checked while reading. Cancel the reader to release the connection.
     if (received > MAX_PROGRESSIVE_BYTES) {
       await reader.cancel().catch(() => undefined);
       throw new Error(tooLargeMessage(received));
@@ -848,9 +879,10 @@ async function readBodyToBlob(o: {
 }
 
 /**
- * Tải file theo Range chunk. Server PHẢI trả 206 ĐÚNG độ dài mỗi đoạn.
- * ⚠️ KHÔNG bó RAM: Blob cuối vẫn ôm trọn file (xem chú thích progressive.ts). Lợi ích: tiến trình +
- * bắt server không tôn trọng Range. `heartbeat()` reset watchdog chống treo.
+ * Downloads a file in Range chunks. The server MUST return 206 with the EXACT length of each chunk.
+ * ⚠️ Does NOT cap RAM: the final Blob still holds the whole file (see the comment in progressive.ts).
+ * The benefit is progress reporting + catching a server that doesn't honor Range.
+ * `heartbeat()` resets the anti-hang watchdog.
  */
 async function fetchByRangeChunks(o: {
   url: string;
@@ -870,8 +902,8 @@ async function fetchByRangeChunks(o: {
       headers: { Range: `bytes=${c.start}-${c.end}` },
       signal,
     });
-    // Server PHẢI tôn trọng Range: 200 = trả nguyên file cho mỗi đoạn -> ôm N lần cả file (đúng bẫy
-    // W1.3). Thà FAIL LỚN TIẾNG hơn là ghép byte rác.
+    // Server MUST honor Range: 200 = returns the whole file for every chunk -> ends up holding N
+    // copies of the whole file (exactly the W1.3 trap). Better to FAIL LOUDLY than concatenate garbage bytes.
     if (r.status !== 206) {
       throw new Error(
         `Máy chủ không hỗ trợ tải theo đoạn (Range): trả HTTP ${r.status} thay vì 206.`,
@@ -879,8 +911,9 @@ async function fetchByRangeChunks(o: {
     }
     const buf = new Uint8Array(await r.arrayBuffer());
     heartbeat();
-    // 206 NGẮN HƠN range yêu cầu (RFC cho phép; proxy/CDN cap range) -> cộng theo kích thước KẾ HOẠCH
-    // sẽ nhảy cóc phần đuôi, ghép Blob thiếu byte mà vẫn 'complete'. Kiểm độ dài THẬT, fail lớn tiếng.
+    // 206 SHORTER than the requested range (RFC allows this; a proxy/CDN can cap the range) ->
+    // summing by the PLANNED size would skip the tail, assembling a Blob that's missing bytes yet
+    // still marked 'complete'. Check the REAL length, fail loudly.
     const want = c.end - c.start + 1;
     if (buf.byteLength !== want) {
       throw new Error(
@@ -895,9 +928,11 @@ async function fetchByRangeChunks(o: {
 }
 
 /**
- * Không có byte mới trong ngần này = coi như server treo -> abort. Reset mỗi lần nhận byte (heartbeat)
- * nên KHÔNG cắt oan download chậm-nhưng-đang-chạy; chỉ cắt khi đứng im. Đường HLS đã có bất biến này
- * (PLAYLIST_TIMEOUT_MS); progressive từng đánh rơi -> job kẹt 'in_progress' mãi + rule spoof leak.
+ * No new bytes within this window = treat the server as stuck -> abort. Reset on every byte
+ * received (heartbeat) so it does NOT wrongly cut off a slow-but-still-running download; it only
+ * cuts when things go completely still. The HLS path already has this invariant
+ * (PLAYLIST_TIMEOUT_MS); progressive once dropped it -> jobs got stuck at 'in_progress' forever + a
+ * leaked spoof rule.
  */
 const PROGRESSIVE_STALL_MS = 60_000;
 
@@ -908,16 +943,17 @@ async function runProgressiveDownload(
   const ac = new AbortController();
   progressiveAborts.set(key, ac);
 
-  // W2.7 — NHỊP TIM LIVENESS (khác hẳn `heartbeat` watchdog bên dưới: cái đó canh SERVER câm, cái
-  // này chứng minh OFFSCREEN còn sống). W2.5 đưa .mp4 qua offscreen nên đường này phụ thuộc offscreen
-  // y như HLS; offscreen bị giết ⇒ `finally` không chạy ⇒ không ai gửi 'interrupted' ⇒ entry kẹt
-  // `in_progress` vĩnh viễn (ĐÃ ĐO: e2e `progressive-offscreen-death` kẹt >150s trước bản vá này).
+  // W2.7 — LIVENESS HEARTBEAT (very different from the `heartbeat` watchdog below: that one watches
+  // for a SILENT SERVER, this one proves OFFSCREEN is still alive). W2.5 routes .mp4 through
+  // offscreen so this path depends on offscreen exactly like HLS does; if offscreen is killed ⇒
+  // `finally` never runs ⇒ nobody sends 'interrupted' ⇒ the entry is stuck at `in_progress` forever
+  // (MEASURED: e2e `progressive-offscreen-death` stuck >150s before this fix).
   const livenessPing = setInterval(() => {
     void updateProgressiveDownload(key, {});
   }, HEARTBEAT_INTERVAL_MS);
 
-  // Watchdog chống treo: không tiến triển trong PROGRESSIVE_STALL_MS -> abort. `stalled` phân biệt
-  // với user-cancel để báo lỗi đúng (treo mạng vs bấm Hủy).
+  // Anti-hang watchdog: no progress within PROGRESSIVE_STALL_MS -> abort. `stalled` distinguishes
+  // this from a user-cancel so the right error message is reported (network hang vs pressing Cancel).
   let stalled = false;
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   const heartbeat = (): void => {
@@ -929,9 +965,10 @@ async function runProgressiveDownload(
   };
 
   try {
-    heartbeat(); // canh cả cú probe: server không trả headers trong 60s -> abort.
-    // Probe Range 1 byte: (1) đo tổng file + server có hỗ trợ Range không; (2) là cú fetch ĐẦU tiên
-    // qua rule spoof -> 403 ở đây = spoof không áp (báo lỗi rõ thay vì tải byte rác).
+    heartbeat(); // also covers the probe: server not returning headers within 60s -> abort.
+    // 1-byte Range probe: (1) measures the total file size + whether the server supports Range;
+    // (2) is the FIRST fetch through the spoof rule -> a 403 here means the spoof isn't applying
+    // (report a clear error instead of downloading garbage bytes).
     const probe = await fetch(url, {
       credentials: 'include',
       headers: { Range: 'bytes=0-0' },
@@ -947,8 +984,9 @@ async function runProgressiveDownload(
         ? parseContentRangeTotal(probe.headers.get('content-range'))
         : Number(probe.headers.get('content-length')) || null;
 
-    // Trần cứng: file quá lớn -> BÁO LỖI RÕ, đừng để offscreen OOM-crash câm (mất cả nhánh catch dưới
-    // -> job kẹt mãi + rule leak). Bó RAM thật là Đợt 3 (OPFS). Tổng không biết -> canh mid-stream.
+    // Hard cap: file too large -> REPORT A CLEAR ERROR, don't let offscreen silently OOM-crash
+    // (losing the catch branch below -> job stuck forever + a leaked rule). Real RAM-capping is
+    // Wave 3 (OPFS). If the total is unknown -> checked mid-stream instead.
     if (total != null && total > MAX_PROGRESSIVE_BYTES) {
       throw new Error(tooLargeMessage(total));
     }
@@ -959,7 +997,7 @@ async function runProgressiveDownload(
       total != null &&
       total > CHUNK_THRESHOLD_BYTES
     ) {
-      // File LỚN + server hỗ trợ Range -> chunk. Bỏ body probe (1 byte).
+      // LARGE file + server supports Range -> chunk it. Drop the probe body (1 byte).
       await probe.body?.cancel().catch(() => undefined);
       blob = await fetchByRangeChunks({
         url,
@@ -970,7 +1008,7 @@ async function runProgressiveDownload(
         heartbeat,
       });
     } else if (probe.status === 200) {
-      // Server phớt Range -> body probe LÀ nguyên file, đọc luôn (không fetch lại).
+      // Server ignores Range -> the probe body IS the whole file, read it directly (no re-fetch).
       blob = await readBodyToBlob({
         res: probe,
         type: contentType,
@@ -979,7 +1017,7 @@ async function runProgressiveDownload(
         heartbeat,
       });
     } else {
-      // File nhỏ (206) hoặc tổng không rõ -> một GET nguyên file, stream body.
+      // Small file (206) or total unknown -> a single GET for the whole file, stream the body.
       await probe.body?.cancel().catch(() => undefined);
       const res = await fetch(url, {
         credentials: 'include',
@@ -998,7 +1036,7 @@ async function runProgressiveDownload(
       });
     }
 
-    // Giao blob về background để LƯU qua chrome.downloads (chỉ nhận blob: URL — bất biến VDH).
+    // Hand the blob to background to SAVE via chrome.downloads (only accepts a blob: URL — VDH's invariant).
     const blobUrl = URL.createObjectURL(blob);
     activeBlobUrls.add(blobUrl);
     setTimeout(() => revokeBlob(blobUrl), BLOB_TTL_MS);
@@ -1008,7 +1046,7 @@ async function runProgressiveDownload(
       filename,
       mediaUrl,
       tabId,
-      // Không phải job HLS: dùng downloadKey để background gắn vào ĐÚNG DownloadEntry đang fetch.
+      // Not an HLS job: use downloadKey so background attaches this to the CORRECT DownloadEntry being fetched.
       jobId: key,
       downloadKey: key,
       spoofRuleIds,
@@ -1043,9 +1081,9 @@ function asOffscreenRequest(m: unknown): OffscreenRequest | null {
   return null;
 }
 
-// Hợp đồng giống background (xem chú thích ở entrypoints/background.ts): `true` ĐỒNG BỘ cho
-// nhánh async, KHÔNG trả Promise. Message không phải của offscreen -> trả `undefined` để KHÔNG
-// cướp kênh trả lời của background.
+// Same contract as background (see the comment in entrypoints/background.ts): return `true`
+// SYNCHRONOUSLY for the async branch, do NOT return a Promise. A message that isn't for offscreen
+// -> return `undefined` so it does NOT hijack background's response channel.
 browser.runtime.onMessage.addListener(
   (
     message: unknown,
@@ -1068,8 +1106,9 @@ browser.runtime.onMessage.addListener(
         enqueueHlsJob(req);
         return undefined;
       case 'hls/cancel':
-        // Huỷ có thể tới TRƯỚC khi job rời hàng đợi (jobChain tuần tự) -> tạo sẵn controller đã
-        // abort để runHlsJob nhặt lên và thoát ngay, thay vì tải xong rồi mới biết mình bị huỷ.
+        // Cancellation can arrive BEFORE the job leaves the queue (jobChain is sequential) -> create
+        // a controller that's already aborted so runHlsJob picks it up and exits immediately, rather
+        // than finishing the download and only then discovering it was cancelled.
         {
           const existing = jobAborts.get(req.jobId);
           if (existing) existing.abort();
@@ -1077,9 +1116,10 @@ browser.runtime.onMessage.addListener(
             const pre = new AbortController();
             pre.abort();
             jobAborts.set(req.jobId, pre);
-            // Huỷ một job đã kết thúc (hoặc chưa từng tồn tại) sẽ để lại entry này VĨNH VIỄN —
-            // offscreen là trang bền nên Map chỉ phình lên. Hẹn giờ dọn: nếu job có thật thì nó
-            // đã nhặt controller lên và runHlsJob tự xoá trong finally, xoá lại là vô hại.
+            // Cancelling a job that's already finished (or never existed) would leave this entry
+            // FOREVER — offscreen is a persistent page so the Map would just keep growing. Schedule
+            // a cleanup: if the job was real, it already picked up the controller and runHlsJob
+            // deletes it itself in `finally`, so deleting again here is harmless.
             setTimeout(() => {
               if (jobAborts.get(req.jobId) === pre) jobAborts.delete(req.jobId);
             }, 60_000);
@@ -1090,8 +1130,9 @@ browser.runtime.onMessage.addListener(
         revokeBlob(req.url);
         return undefined;
       case 'download/run':
-        // Progressive KHÔNG dùng ffmpeg/FS ảo -> chạy ĐỘC LẬP với jobChain (không cần tuần tự như
-        // HLS). runProgressiveDownload tự bắt lỗi + báo về background, nên chỉ cần nuốt rejection thừa.
+        // Progressive does NOT use ffmpeg/the virtual FS -> runs INDEPENDENTLY of jobChain (no need
+        // to be sequential like HLS). runProgressiveDownload catches its own errors and reports them
+        // to background, so this only needs to swallow the leftover rejection.
         void runProgressiveDownload(req).catch((e: unknown) =>
           console.warn(
             '[offscreen] tải progressive lỗi ngoài dự kiến:',
@@ -1106,17 +1147,18 @@ browser.runtime.onMessage.addListener(
   },
 );
 
-// W3.1 — quét file OPFS mồ côi của các job đã chết (offscreen bị giết giữa chừng, trình duyệt
-// tắt ngang). ĐO ĐƯỢC: file OPFS sống sót qua closeDocument, reload extension, và cả khởi động
-// lại trình duyệt — không có ai tự dọn hộ. Chạy lúc offscreen vừa dựng: thời điểm đó chắc chắn
-// chưa có job nào đang chạy, nên không thể xoá nhầm file đang dùng.
+// W3.1 — sweeps orphaned OPFS files left by dead jobs (offscreen killed mid-flight, browser closed
+// abruptly). MEASURED: OPFS files survive closeDocument, extension reload, and even a browser
+// restart — nobody cleans them up automatically. Runs right when offscreen is set up: at that
+// moment no job can possibly be running yet, so it can never accidentally delete a file still in use.
 void sweepOrphanOpfsFiles()
   .then((n) => {
     if (n > 0) console.log('[offscreen] đã dọn', n, 'tệp tạm mồ côi');
   })
   .catch(() => undefined);
 
-// W3.1 — KHÔNG còn prewarm engine ở đây. Bản ffmpeg cũ phải nạp sẵn 32 MB wasm vì nạp mất
-// nhiều giây; libav.js chỉ 1,56 MB và Worker được dựng NGAY khi job bắt đầu, song song với
-// việc tải playlist (`MuxSession.start` gọi trước `await` đầu tiên trong runHlsJob), nên
-// khoảng chết đã được che mà không phải giữ wasm sống suốt phiên.
+// W3.1 — engine prewarming is NO LONGER done here. The old ffmpeg build had to preload 32 MB of
+// wasm since loading it took several seconds; libav.js is only 1.56 MB and its Worker is spun up
+// IMMEDIATELY when a job starts, in parallel with downloading the playlist (`MuxSession.start` is
+// called before the first `await` in runHlsJob), so the dead time is already covered without
+// having to keep wasm alive for the whole session.

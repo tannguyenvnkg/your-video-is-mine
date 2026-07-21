@@ -1,8 +1,8 @@
 import { defineConfig } from 'vitest/config';
 import { WxtVitest } from 'wxt/testing';
 
-// Vitest chạy unit test cho logic thuần (parser HLS/DASH, crypto AES-128, detect...).
-// WxtVitest() nạp auto-imports của WXT + fakeBrowser để test code phụ thuộc browser API.
+// Vitest runs unit tests for pure logic (HLS/DASH parser, AES-128 crypto, detect...).
+// WxtVitest() loads WXT's auto-imports + fakeBrowser to test code that depends on browser APIs.
 export default defineConfig({
   plugins: [WxtVitest()],
   test: {

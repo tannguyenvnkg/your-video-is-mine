@@ -12,13 +12,13 @@ import {
 import type { MediaItem } from './types';
 
 describe('classifyMedia', () => {
-  it('HLS theo đuôi .m3u8', () => {
+  it('HLS by .m3u8 extension', () => {
     expect(classifyMedia({ url: 'https://a.com/master.m3u8?token=1' })).toBe(
       'hls',
     );
   });
 
-  it('HLS theo Content-Type (URL không có đuôi)', () => {
+  it('HLS by Content-Type (URL has no extension)', () => {
     expect(
       classifyMedia({
         url: 'https://a.com/stream',
@@ -27,7 +27,7 @@ describe('classifyMedia', () => {
     ).toBe('hls');
   });
 
-  it('DASH theo .mpd và theo content-type', () => {
+  it('DASH by .mpd and by content-type', () => {
     expect(classifyMedia({ url: 'https://a.com/v.mpd' })).toBe('dash');
     expect(
       classifyMedia({
@@ -37,7 +37,7 @@ describe('classifyMedia', () => {
     ).toBe('dash');
   });
 
-  it('Progressive theo đuôi mở rộng', () => {
+  it('Progressive by extension', () => {
     for (const ext of ['mp4', 'webm', 'm4v', 'mov', 'mkv', 'ogg']) {
       expect(classifyMedia({ url: `https://a.com/clip.${ext}` })).toBe(
         'progressive',
@@ -45,57 +45,57 @@ describe('classifyMedia', () => {
     }
   });
 
-  it('Progressive theo Content-Type video/*', () => {
+  it('Progressive by Content-Type video/*', () => {
     expect(
       classifyMedia({ url: 'https://a.com/file', contentType: 'video/mp4' }),
     ).toBe('progressive');
   });
 
-  it('Bỏ qua segment .ts / .m4s', () => {
+  it('Skip .ts / .m4s segments', () => {
     expect(classifyMedia({ url: 'https://a.com/seg-000.ts' })).toBeNull();
     expect(classifyMedia({ url: 'https://a.com/seg1.m4s' })).toBeNull();
   });
 
-  it('Bỏ qua init segment fMP4 (init.mp4)', () => {
+  it('Skip fMP4 init segment (init.mp4)', () => {
     expect(classifyMedia({ url: 'https://a.com/init.mp4' })).toBeNull();
     expect(classifyMedia({ url: 'https://a.com/video_init-1.mp4' })).toBeNull();
   });
 
-  it('Bỏ qua segment theo Content-Type video/mp2t', () => {
+  it('Skip segment by Content-Type video/mp2t', () => {
     expect(
       classifyMedia({ url: 'https://a.com/seg', contentType: 'video/mp2t' }),
     ).toBeNull();
   });
 
-  it('Trả null với tài nguyên không phải media', () => {
+  it('Return null for a non-media resource', () => {
     expect(classifyMedia({ url: 'https://a.com/app.js' })).toBeNull();
     expect(classifyMedia({ url: 'https://a.com/pic.png' })).toBeNull();
   });
 });
 
 describe('isLikelySegment', () => {
-  it('nhận diện .ts là segment', () => {
+  it('recognizes .ts as a segment', () => {
     expect(isLikelySegment('https://a.com/x.ts')).toBe(true);
   });
-  it('mp4 thường KHÔNG phải segment', () => {
+  it('mp4 is normally NOT a segment', () => {
     expect(isLikelySegment('https://a.com/movie.mp4')).toBe(false);
   });
 });
 
 describe('getExtension', () => {
-  it('bỏ query/hash', () => {
+  it('strips query/hash', () => {
     expect(getExtension('https://a.com/v.MP4?x=1#y')).toBe('.mp4');
   });
-  it('không có đuôi -> ""', () => {
+  it('no extension -> ""', () => {
     expect(getExtension('https://a.com/stream')).toBe('');
   });
 });
 
 describe('shortenUrl', () => {
-  it('giữ nguyên khi ngắn', () => {
+  it('keeps as-is when short', () => {
     expect(shortenUrl('https://a.com/v.mp4', 60)).toBe('https://a.com/v.mp4');
   });
-  it('rút gọn khi dài, có dấu …', () => {
+  it('truncates when long, with a … mark', () => {
     const long = 'https://a.com/' + 'x'.repeat(100) + '/v.mp4';
     const s = shortenUrl(long, 30);
     expect(s.length).toBe(30);
@@ -104,12 +104,12 @@ describe('shortenUrl', () => {
 });
 
 describe('mediaId', () => {
-  it('ổn định cho cùng url', () => {
+  it('stable for the same url', () => {
     expect(mediaId('https://a.com/v.m3u8')).toBe(
       mediaId('https://a.com/v.m3u8'),
     );
   });
-  it('khác nhau cho url khác', () => {
+  it('different for different urls', () => {
     expect(mediaId('https://a.com/1.m3u8')).not.toBe(
       mediaId('https://a.com/2.m3u8'),
     );
@@ -117,7 +117,7 @@ describe('mediaId', () => {
 });
 
 describe('buildMediaItem', () => {
-  it('dựng item với id, type, detectSource mặc định network', () => {
+  it('builds an item with id, type, default detectSource network', () => {
     const item = buildMediaItem({
       url: 'https://a.com/v.m3u8',
       tabId: 5,
@@ -129,7 +129,7 @@ describe('buildMediaItem', () => {
     expect(item!.detectSource).toBe('network');
   });
 
-  it('trả null nếu không phải media', () => {
+  it('returns null if not media', () => {
     expect(
       buildMediaItem({ url: 'https://a.com/app.js', tabId: 1, detectedAt: 0 }),
     ).toBeNull();
@@ -146,7 +146,7 @@ describe('upsertMedia', () => {
     ...extra,
   });
 
-  it('thêm mới -> changed true, list khác', () => {
+  it('adds new -> changed true, list differs', () => {
     const base: MediaItem[] = [];
     const { list, changed } = upsertMedia(base, mk('https://a.com/1.m3u8'));
     expect(changed).toBe(true);
@@ -154,19 +154,19 @@ describe('upsertMedia', () => {
     expect(list).not.toBe(base);
   });
 
-  it('trùng url, không có field mới -> changed false, giữ list cũ', () => {
+  it('duplicate url, no new field -> changed false, keeps old list', () => {
     const base = [mk('https://a.com/1.m3u8', { size: 10 })];
     const { list, changed } = upsertMedia(
       base,
       mk('https://a.com/1.m3u8', { size: 20 }),
     );
-    expect(changed).toBe(false); // size đã biết -> không ghi đè
+    expect(changed).toBe(false); // size already known -> not overwritten
     expect(list).toBe(base);
     expect(list[0]!.size).toBe(10);
   });
 
-  it('trùng url, bổ sung field còn thiếu -> changed true, merge', () => {
-    const base = [mk('https://a.com/1.m3u8')]; // chưa có size/contentType
+  it('duplicate url, fills in a missing field -> changed true, merges', () => {
+    const base = [mk('https://a.com/1.m3u8')]; // no size/contentType yet
     const { list, changed } = upsertMedia(
       base,
       mk('https://a.com/1.m3u8', { size: 100, contentType: 'video/mp4' }),
@@ -178,10 +178,11 @@ describe('upsertMedia', () => {
   });
 });
 
-// --- W4.2: đánh dấu playlist con -> popup ẩn đi -------------------------
-// Bối cảnh ĐO THẬT (Edge + extension + fixture tách tiếng): một video = 3 dòng "HLS" trong popup
-// (master + video.m3u8 + audio.m3u8). §3.4 bắt W4.2 đi kèm W1.1, và nay nó là NỢ: từ sau W1.1
-// offscreen tự ghép tiếng, nên dòng tiếng chỉ còn là rác gây nhầm (bấm vào ra file chỉ-tiếng).
+// --- W4.2: flag child playlists -> hidden from the popup -------------------------
+// Context VERIFIED IN PRACTICE (Edge + extension + audio-separated fixture): one video = 3 "HLS"
+// rows in the popup (master + video.m3u8 + audio.m3u8). §3.4 required W4.2 to ship together with
+// W1.1, and it is now DEBT: since W1.1, offscreen muxes audio in on its own, so the audio row is
+// now just confusing clutter (clicking it downloads an audio-only file).
 describe('W4.2 markChildren', () => {
   const mkItem = (url: string, extra: Partial<MediaItem> = {}): MediaItem => ({
     id: mediaId(url),
@@ -196,7 +197,7 @@ describe('W4.2 markChildren', () => {
   const VIDEO = 'https://ex.com/hls/video.m3u8';
   const AUDIO = 'https://ex.com/hls/audio.m3u8';
 
-  it('gắn cờ con + parentUrl cho item khớp, chừa master lại', () => {
+  it('flags child + parentUrl for matching items, leaves master alone', () => {
     const base = [mkItem(MASTER), mkItem(VIDEO), mkItem(AUDIO)];
     const { list, changed } = markChildren(base, [VIDEO, AUDIO], MASTER);
     expect(changed).toBe(true);
@@ -205,16 +206,16 @@ describe('W4.2 markChildren', () => {
     expect(list.find((m) => m.url === AUDIO)!.parentUrl).toBe(MASTER);
   });
 
-  it('không có gì để đánh dấu -> changed false, giữ NGUYÊN list cũ', () => {
-    // Quan trọng cho storage: changed=false -> không ghi storage.session -> không bắn
-    // storage.onChanged -> popup không render lại vô ích (và không tạo vòng lặp ghi).
+  it('nothing to flag -> changed false, keeps the SAME old list', () => {
+    // Matters for storage: changed=false -> no write to storage.session -> no
+    // storage.onChanged fired -> popup doesn't needlessly re-render (and no write loop is created).
     const base = [mkItem(MASTER)];
     const { list, changed } = markChildren(base, [VIDEO], MASTER);
     expect(changed).toBe(false);
     expect(list).toBe(base);
   });
 
-  it('đánh dấu lại lần hai -> changed false (idempotent)', () => {
+  it('flagging a second time -> changed false (idempotent)', () => {
     const base = [mkItem(MASTER), mkItem(VIDEO)];
     const once = markChildren(base, [VIDEO], MASTER);
     const twice = markChildren(once.list, [VIDEO], MASTER);
@@ -222,18 +223,18 @@ describe('W4.2 markChildren', () => {
     expect(twice.list).toBe(once.list);
   });
 
-  it('không đột biến list/item gốc', () => {
+  it('does not mutate the original list/items', () => {
     const base = [mkItem(VIDEO)];
     markChildren(base, [VIDEO], MASTER);
     expect(base[0]!.child).toBeUndefined();
   });
 });
 
-// 🔴 BẪY THẬT: onBeforeRequest thêm item, master parse xong đánh dấu con, RỒI onHeadersReceived
-// mới upsert bản mới (có contentType, KHÔNG có cờ child) đè lên. Mất cờ ở đây = dòng rác hiện lại
-// sau ~1 giây, đúng lúc user đang nhìn.
-describe('W4.2 upsertMedia giữ cờ con khi merge', () => {
-  it('merge field mới KHÔNG được xoá cờ child/parentUrl', () => {
+// 🔴 REAL TRAP: onBeforeRequest adds the item, the master finishes parsing and flags children, THEN
+// onHeadersReceived upserts a new version (with contentType, WITHOUT the child flag) on top of it.
+// Losing the flag here = the clutter row reappears ~1 second later, right while the user is watching.
+describe('W4.2 upsertMedia keeps the child flag on merge', () => {
+  it('merging a new field must NOT clear the child/parentUrl flag', () => {
     const url = 'https://ex.com/hls/audio.m3u8';
     const base: MediaItem[] = [
       {
@@ -260,12 +261,13 @@ describe('W4.2 upsertMedia giữ cờ con khi merge', () => {
 });
 
 // ── W2.1 ─────────────────────────────────────────────────────────────────────────────────────
-describe('W2.1 upsertMedia mang được header THẬT đã bắt', () => {
-  // 🔴 BẪY IM LẶNG: `onBeforeRequest` tạo item TRƯỚC, `onSendHeaders` mới bắt được header SAU.
-  // Nghĩa là header LUÔN LUÔN tới ở nhánh MERGE, không bao giờ ở nhánh thêm-mới. Merge của
-  // upsertMedia lại theo DANH SÁCH TRẮNG: field ngoài danh sách bị `{...existing}` nuốt và
-  // `dirty` không bật -> changed=false -> addTabMedia KHÔNG GHI GÌ CẢ. Không một lỗi nào hiện ra;
-  // tính năng W2.1 sẽ chết 100% mà 4 cổng vẫn xanh. Đúng loại lỗi đã giết dự án này 3 lần.
+describe('W2.1 upsertMedia carries the REAL captured header', () => {
+  // 🔴 SILENT TRAP: `onBeforeRequest` creates the item FIRST, `onSendHeaders` only captures the
+  // header AFTER. That means the header ALWAYS arrives on the MERGE branch, never on the add-new
+  // branch. upsertMedia's merge follows a WHITELIST: a field outside that list gets swallowed by
+  // `{...existing}` and `dirty` never gets set -> changed=false -> addTabMedia WRITES NOTHING AT
+  // ALL. No error surfaces anywhere; W2.1 would be 100% dead while all 4 gates stay green. Exactly
+  // the class of bug that has killed this project 3 times.
   const mk = (url: string, extra: Partial<MediaItem> = {}): MediaItem => ({
     id: 'x',
     type: 'hls',
@@ -275,7 +277,7 @@ describe('W2.1 upsertMedia mang được header THẬT đã bắt', () => {
     ...extra,
   });
 
-  it('🔴 item ĐÃ TỒN TẠI + header tới sau -> PHẢI ghi được (changed=true)', () => {
+  it('🔴 item ALREADY EXISTS + header arrives later -> MUST be written (changed=true)', () => {
     const base = [mk('https://a.com/1.m3u8')];
     const { list, changed } = upsertMedia(
       base,
@@ -289,7 +291,7 @@ describe('W2.1 upsertMedia mang được header THẬT đã bắt', () => {
     });
   });
 
-  it('không ghi đè bản chụp đã có (bản đầu là bản player thật dùng)', () => {
+  it('does not overwrite an existing snapshot (the first one is what the real player used)', () => {
     const base = [
       mk('https://a.com/1.m3u8', {
         sentHeaders: { referer: 'https://first/' },
@@ -304,7 +306,7 @@ describe('W2.1 upsertMedia mang được header THẬT đã bắt', () => {
     expect(list[0]!.sentHeaders).toEqual({ referer: 'https://first/' });
   });
 
-  it('lần phát hiện sau KHÔNG mang header -> giữ nguyên bản đã bắt được', () => {
+  it('a later detection WITHOUT headers -> keeps the already-captured version', () => {
     const base = [
       mk('https://a.com/1.m3u8', { sentHeaders: { referer: 'https://keep/' } }),
     ];

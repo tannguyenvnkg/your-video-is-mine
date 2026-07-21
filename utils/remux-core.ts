@@ -1,13 +1,13 @@
-// Lõi remux libav.js: đọc packet từ device (đã gắn sẵn), chỉnh timestamp, ghi ra mp4.
+// libav.js remux core: read packets from a device (already attached), fix up timestamps, write mp4.
 //
-// KHÔNG đụng chrome.*, KHÔNG đụng OPFS, KHÔNG đụng Worker — mọi thứ đó do bên gọi lo. Nhờ vậy
-// file này chạy được nguyên vẹn dưới node để đối chiếu bitstream với ffmpeg thật.
+// Does NOT touch chrome.*, does NOT touch OPFS, does NOT touch Worker — the caller handles all of
+// that. This lets the file run unmodified under node to diff the bitstream against real ffmpeg.
 //
-// Chạy HAI LƯỢT trên cùng một input (device đọc được theo vị trí nên lượt 2 rẻ):
-//   Lượt 1 — demux, chỉ giữ timestamp (SeamScanner: bộ nhớ O(số seam)), chốt TimelinePlan.
-//   Lượt 2 — demux lại, áp plan cho từng packet rồi đẩy ngay sang muxer theo lô.
-// Đổi một lần demux thêm để lấy bộ nhớ CÓ CHẶN TRÊN. Bản giữ hết packet trong RAM để sắp xếp
-// đã ĐO: Node RSS 2,52 GB với input 163 MB — không dùng được.
+// Runs TWO PASSES over the same input (the device is position-seekable so pass 2 is cheap):
+//   Pass 1 — demux, keep only timestamps (SeamScanner: O(number of seams) memory), finalize the TimelinePlan.
+//   Pass 2 — demux again, apply the plan to each packet and push straight to the muxer in batches.
+// The tradeoff of an extra demux buys memory with an UPPER BOUND. The prototype that kept every
+// packet in RAM for sorting was MEASURED: Node RSS 2.52 GB for a 163 MB input — not usable.
 
 import {
   createRebaser,
@@ -23,9 +23,9 @@ import {
   type TimelinePlan,
 } from '@/utils/remux-time';
 
-/* ────────────────────────── Bề mặt libav.js mà file này dùng ────────────────────────── */
+/* ────────────────────────── libav.js surface used by this file ────────────────────────── */
 
-/** Packet thô do libav.js trả về (cặp 32-bit cho mỗi int64). */
+/** Raw packet returned by libav.js (32-bit pair for each int64). */
 export interface LibavPacket {
   data: Uint8Array;
   stream_index: number;
@@ -49,8 +49,8 @@ export interface LibavStream {
 }
 
 /**
- * Chỉ khai đúng phần API đang dùng. Cố ý KHÔNG dùng `any`: nếu libav.js đổi chữ ký thì
- * TypeScript phải nói ra ở đây chứ không phải đợi tới lúc chạy.
+ * Only declares the API surface actually used. Deliberately NOT using `any`: if libav.js changes
+ * a signature, TypeScript must flag it here rather than waiting until runtime.
  */
 export interface LibavLike {
   AVERROR_EOF: number;
@@ -103,27 +103,27 @@ export interface LibavLike {
   av_write_trailer(oc: number): Promise<number>;
   ff_free_muxer(oc: number, pb: number): Promise<void>;
 
-  // --- Device I/O. Bên gọi tự gắn device rồi mới gọi remux(); khai ở đây để cùng một
-  // kiểu `LibavLike` dùng được cho cả worker lẫn harness node. ---
-  /** Device đọc SEEK ĐƯỢC. PHẢI biết trước kích thước cuối cùng của file. */
+  // --- Device I/O. The caller attaches the device before calling remux(); declared here so
+  // the same `LibavLike` type works for both the worker and the node harness. ---
+  /** SEEKABLE read device. MUST know the final file size in advance. */
   mkblockreaderdev(name: string, size: number): Promise<void>;
   ff_block_reader_dev_send(
     name: string,
     pos: number,
     data: Uint8Array | null,
   ): void;
-  /** Device ghi seek được (mp4 muxer đòi output seek được; `mkstreamwriterdev` KHÔNG dùng được). */
+  /** Seekable write device (the mp4 muxer requires a seekable output; `mkstreamwriterdev` does NOT work). */
   mkwriterdev(name: string): Promise<void>;
   onblockread?: (name: string, pos: number, len: number) => void;
   onwrite?: (name: string, pos: number, buf: Uint8Array) => void;
 }
 
-/* ────────────────────────── Hằng số libav ────────────────────────── */
+/* ────────────────────────── libav constants ────────────────────────── */
 
 const AVMEDIA_TYPE_VIDEO = 0;
 const AVMEDIA_TYPE_AUDIO = 1;
 
-/** Huỷ giữa chừng — bên gọi phân biệt với lỗi thật để báo 'cancelled' thay vì 'error'. */
+/** Mid-flight cancellation — the caller distinguishes this from a real error to report 'cancelled' instead of 'error'. */
 export class RemuxCancelledError extends Error {
   constructor(message = 'Đã huỷ') {
     super(message);
@@ -131,57 +131,59 @@ export class RemuxCancelledError extends Error {
   }
 }
 
-/* ────────────────────────── Tham số ────────────────────────── */
+/* ────────────────────────── Parameters ────────────────────────── */
 
 export interface RemuxInputSpec {
-  /** Tên device đã gắn sẵn (mkblockreaderdev) — bên gọi tự gắn trước khi gọi remux(). */
+  /** Name of the already-attached device (mkblockreaderdev) — the caller attaches it before calling remux(). */
   name: string;
-  /** Lấy stream nào từ input này. 'any' = mọi stream (ca một playlist gộp cả hình lẫn tiếng). */
+  /** Which stream to take from this input. 'any' = every stream (case: a single playlist mixing video and audio). */
   kind: 'video' | 'audio' | 'any';
   /**
-   * Có chạy bitstream filter `aac_adtstoasc` cho stream tiếng không.
-   * ĐÚNG khi nguồn là MPEG-TS (AAC đóng khung ADTS, mp4 cần ASC); SAI với fMP4/CMAF —
-   * ở đó AAC đã là ASC sẵn, chạy filter vào là hỏng. Bên gọi biết qua `parsed.hasInit`.
+   * Whether to run the `aac_adtstoasc` bitstream filter on the audio stream.
+   * TRUE when the source is MPEG-TS (AAC framed as ADTS, mp4 needs ASC); FALSE for fMP4/CMAF —
+   * there AAC is already ASC, running the filter would corrupt it. The caller knows via `parsed.hasInit`.
    */
   adtsToAsc?: boolean;
 }
 
 export interface RemuxOptions {
   inputs: readonly RemuxInputSpec[];
-  /** Tên device ghi (mkwriterdev) đã gắn sẵn. */
+  /** Name of the already-attached write device (mkwriterdev). */
   out: string;
   /**
-   * Số byte đặt chỗ cho `moov` ở ĐẦU file (faststart).
-   *   'auto' (mặc định) — tính từ SỐ PACKET ĐẾM ĐƯỢC Ở LƯỢT 1, xem `moovReserveForPackets`.
-   *   0                 — không đặt chỗ, moov nằm CUỐI (luôn chạy được, chỉ mất faststart).
-   *   số                — đặt cứng (dùng cho test và cho lần thử lại).
+   * Number of bytes reserved for `moov` at the START of the file (faststart).
+   *   'auto' (default) — computed from the PACKET COUNT MEASURED IN PASS 1, see `moovReserveForPackets`.
+   *   0                 — no reservation, moov lands at the END (always works, just loses faststart).
+   *   number            — hard-coded (used for tests and for a retry).
    *
-   * 🔴 `-movflags +faststart` KHÔNG dùng được: lượt 2 của nó MỞ FILE RA ĐỌC LẠI, mà mọi
-   * writer device của libav.js ném EIO khi đọc. Triệu chứng cực độc — vẫn ra file 25,799,252
-   * byte nhưng `ffprobe` báo `moov atom not found`. Chỉ mã trả về của `av_write_trailer` mới lộ.
+   * 🔴 `-movflags +faststart` DOES NOT WORK here: its second pass RE-OPENS THE FILE FOR READING,
+   * and every libav.js writer device throws EIO on read. The symptom is extremely quiet — it still
+   * produces a 25,799,252-byte file but `ffprobe` reports `moov atom not found`. Only the return code
+   * of `av_write_trailer` reveals it.
    */
   moovSizeBytes?: number | 'auto';
-  /** Số packet mỗi lần gọi muxer (chặn trên bộ nhớ). */
+  /** Number of packets per muxer call (memory upper bound). */
   batch?: number;
-  /** Trần byte mỗi lần `ff_read_frame_multi`. */
+  /** Byte ceiling per `ff_read_frame_multi` call. */
   readLimit?: number;
   thresholdSec?: number;
-  /** 0..1, không giảm. */
+  /** 0..1, non-decreasing. */
   onProgress?: (fraction: number) => void;
-  /** Đọc số byte đã đọc từ device (để tính tiến trình lượt 1). */
+  /** Read the number of bytes read so far from the device (to compute pass-1 progress). */
   getReadBytes?: () => number;
-  /** Tổng byte input (để tính tiến trình lượt 1). */
+  /** Total input bytes (to compute pass-1 progress). */
   totalInputBytes?: number;
   isCancelled?: () => boolean;
   onLog?: (line: string) => void;
   /**
-   * Lỗi mà callback ĐỒNG BỘ của device (`onwrite`/`onblockread`) đã chốt lại.
+   * Error latched by the device's SYNCHRONOUS callback (`onwrite`/`onblockread`).
    *
-   * 🔴 VÌ SAO CẦN: hai callback đó chạy đồng bộ qua ranh giới wasm, và một `throw` ở đó CÓ THỂ
-   * BỊ NUỐT. Ca thật đã đo: OPFS hết quota -> `sah.write()` ném `QuotaExceededError`, file ghi
-   * dở vẫn flush sạch, close sạch, đọc lại được, và KÍCH THƯỚC không phân biệt được với file
-   * đủ. Nên bên gọi phải CHỐT lỗi vào một biến và ta hỏi lại ở đây — kể cả khi
-   * `av_write_trailer` trả 0.
+   * 🔴 WHY THIS IS NEEDED: those two callbacks run synchronously across the wasm boundary, and a
+   * `throw` there CAN BE SWALLOWED. Measured real case: OPFS ran out of quota -> `sah.write()`
+   * threw `QuotaExceededError`, yet the partially written file still flushed cleanly, closed
+   * cleanly, was readable again, and its SIZE was indistinguishable from a complete file. So the
+   * caller must LATCH the error into a variable and we poll it here — even when
+   * `av_write_trailer` returns 0.
    */
   deviceError?: () => Error | null;
 }
@@ -191,14 +193,14 @@ export interface RemuxResult {
   packetsScanned: number;
   seams: number;
   rebaseOffsetUs: number;
-  /** Mã trả về của `av_write_trailer`. < 0 nghĩa là moov đặt chỗ THIẾU (tràn đè mdat). */
+  /** Return code of `av_write_trailer`. < 0 means the moov reservation was TOO SMALL (overwrote mdat). */
   trailerCode: number;
-  /** Số byte đã đặt chỗ cho moov (0 = không đặt chỗ, moov nằm cuối). */
+  /** Number of bytes reserved for moov (0 = no reservation, moov at the end). */
   moovSize: number;
   plan: TimelinePlan;
 }
 
-/* ────────────────────────── Nội bộ ────────────────────────── */
+/* ────────────────────────── Internal ────────────────────────── */
 
 interface OpenInput {
   ctx: number;
@@ -217,7 +219,7 @@ function mediaTypeOf(st: LibavStream): 'video' | 'audio' | 'other' {
   return 'other';
 }
 
-/** Gói packet thô của libav.js thành TimedPacket (đã ghép 64-bit) để đưa cho remux-time. */
+/** Wraps a raw libav.js packet into a TimedPacket (64-bit reassembled) for remux-time. */
 function toTimed(
   p: LibavPacket,
   st: LibavStream,
@@ -229,7 +231,7 @@ function toTimed(
     inputIndex,
     pts: readPts(p),
     dts: readDts(p),
-    // duration cũng là int64 tách đôi; phần cao gần như luôn 0 nhưng đọc cho đủ.
+    // duration is also a split int64; the high part is almost always 0 but read it fully anyway.
     duration: (p.durationhi ?? 0) * 4294967296 + ((p.duration ?? 0) >>> 0),
     timeBase: tb,
     mediaType: mediaTypeOf(st),
@@ -244,7 +246,7 @@ async function openInputs(
   for (let i = 0; i < specs.length; i++) {
     const spec = specs[i]!;
     let dict = 0;
-    // Segment HLS đầu tiên có thể rất ngắn -> probe mặc định đoán sai codec. Nới rộng ra.
+    // The first HLS segment can be very short -> default probing may guess the wrong codec. Widen it.
     dict = await libav.av_dict_set_js(dict, 'analyzeduration', '10000000', 0);
     dict = await libav.av_dict_set_js(dict, 'probesize', '10000000', 0);
     const [ctx, streams] = await libav.ff_init_demuxer_file(spec.name, {
@@ -255,7 +257,7 @@ async function openInputs(
   return out;
 }
 
-/** Stream nào của input nào được ánh xạ ra output (tương đương `-map 0:v:0 -map 1:a:0`). */
+/** Which stream of which input is mapped to the output (equivalent to `-map 0:v:0 -map 1:a:0`). */
 function selectStreams(inputs: readonly OpenInput[]): {
   input: OpenInput;
   stream: LibavStream;
@@ -273,16 +275,16 @@ function selectStreams(inputs: readonly OpenInput[]): {
     for (const st of inp.streams) {
       if (want !== null && st.codec_type !== want) continue;
       sel.push({ input: inp, stream: st, outIndex: sel.length });
-      if (want !== null) break; // chỉ lấy stream ĐẦU TIÊN khớp loại
+      if (want !== null) break; // only take the FIRST stream that matches the type
     }
   }
   return sel;
 }
 
 /**
- * Đọc hết mọi packet của mọi input, gọi `onPacket` cho từng cái.
- * `ff_read_frame_multi` trả packet GOM THEO STREAM (không theo thứ tự demux) — cả
- * SeamScanner lẫn Rebaser đều được thiết kế để không phụ thuộc thứ tự giữa các stream.
+ * Reads every packet of every input, calling `onPacket` for each one.
+ * `ff_read_frame_multi` returns packets GROUPED BY STREAM (not demux order) — both
+ * SeamScanner and Rebaser are designed to not depend on ordering across streams.
  */
 async function pumpAll(
   libav: LibavLike,
@@ -305,7 +307,7 @@ async function pumpAll(
       for (const key of Object.keys(groups)) {
         for (const p of groups[key]!) {
           const st = inp.streams[p.stream_index];
-          if (!st) continue; // stream không khai báo -> bỏ, muxer cũng không nhận
+          if (!st) continue; // undeclared stream -> skip, the muxer wouldn't accept it either
           await onPacket(p, st, inp);
         }
       }
@@ -314,14 +316,14 @@ async function pumpAll(
         throw new Error(`Đọc dữ liệu video lỗi (mã ${res}).`);
       }
       if (res === -libav.EAGAIN) {
-        // Device tạm hết dữ liệu: nhường một nhịp cho callback nạp thêm.
+        // Device is temporarily out of data: yield a tick for the callback to feed more in.
         await new Promise((r) => setTimeout(r, 0));
       }
     }
   }
 }
 
-/* ────────────────────────── Hàm chính ────────────────────────── */
+/* ────────────────────────── Main function ────────────────────────── */
 
 export async function remux(
   libav: LibavLike,
@@ -336,7 +338,7 @@ export async function remux(
   const report = (f: number): void => {
     if (!opts.onProgress) return;
     const clamped = Math.max(0, Math.min(1, f));
-    // Không giảm, và chỉ báo khi đổi ≥1% (badge chỉ hiển thị số nguyên phần trăm).
+    // Non-decreasing, and only report when the change is ≥1% (the badge only shows whole percent).
     if (clamped <= lastFraction || clamped - lastFraction < 0.01) return;
     lastFraction = clamped;
     opts.onProgress(clamped);
@@ -344,7 +346,7 @@ export async function remux(
 
   const pkt = await libav.av_packet_alloc();
 
-  /* ---- LƯỢT 1: quét timestamp, chốt plan ---- */
+  /* ---- PASS 1: scan timestamps, finalize the plan ---- */
   const scanner = createSeamScanner(opts.thresholdSec);
   let packetsScanned = 0;
   {
@@ -369,7 +371,7 @@ export async function remux(
         try {
           await libav.avformat_close_input_js(inp.ctx);
         } catch {
-          // dọn dẹp: nuốt lỗi, đừng che mất lỗi gốc
+          // cleanup: swallow the error, don't mask the original one
         }
       }
     }
@@ -381,22 +383,23 @@ export async function remux(
   );
   report(0.5);
 
-  /* ---- LƯỢT 2: mở lại, áp plan, ghi ra ---- */
+  /* ---- PASS 2: reopen, apply the plan, write out ---- */
   const inputs = await openInputs(libav, opts.inputs);
   const selected = selectStreams(inputs);
   if (selected.length === 0) {
     throw new Error('Không tìm thấy luồng hình/tiếng nào để ghép.');
   }
 
-  // AAC trong MPEG-TS đóng khung ADTS; mp4 cần ASC -> bitstream filter. Chỉ dùng cho nguồn TS.
+  // AAC in MPEG-TS is framed as ADTS; mp4 needs ASC -> bitstream filter. Only used for TS sources.
   const muxPars: [number, number, number][] = [];
   for (const s of selected) {
     let par = s.stream.codecpar;
     if (s.stream.codec_type === AVMEDIA_TYPE_AUDIO && s.input.spec.adtsToAsc) {
       const bsf = await libav.av_bsf_list_parse_str_js('aac_adtstoasc');
-      // 🔴 KHÔNG được "thử, hỏng thì thôi". Bản mẫu để `s.bsf` trống khi init hỏng rồi chạy
-      // tiếp: AAC dạng ADTS thô bị nhét thẳng vào MP4 -> hình chạy, TIẾNG HỎNG, không một
-      // dòng lỗi ở đâu cả. Đó là con đường hỏng-im-lặng thứ tư mà phản biện đối kháng tìm ra.
+      // 🔴 MUST NOT "try it, and if it fails just move on". The prototype left `s.bsf` empty when
+      // init failed and kept going: raw ADTS-framed AAC got shoved straight into the MP4 -> video
+      // plays, AUDIO IS BROKEN, not a single error anywhere. This is the fourth silent-failure path
+      // that adversarial review found.
       if (!bsf) {
         throw new Error('Không khởi tạo được bộ lọc tiếng (aac_adtstoasc).');
       }
@@ -428,10 +431,11 @@ export async function remux(
   let packetsWritten = 0;
   let moovSize: number;
   try {
-    // Đặt chỗ moov theo SỐ PACKET ĐÃ ĐẾM Ở LƯỢT 1 — không phải theo thời lượng đoán mò.
-    // Đây là chỗ lượt 1 trả công: tới đây ta biết CHÍNH XÁC bao nhiêu packet sắp ghi, nên
-    // không cần thời lượng từ manifest, không cần hằng số dự phòng, và không cần mux lại
-    // lần hai để sửa. `moovSize` vẫn được trả về để bên gọi thử lại nếu trailer báo tràn.
+    // Reserve moov based on the PACKET COUNT MEASURED IN PASS 1 — not a guessed duration.
+    // This is where pass 1 pays off: by this point we know EXACTLY how many packets are about to
+    // be written, so no manifest duration is needed, no fallback constant is needed, and no
+    // second remux is needed to fix it up. `moovSize` is still returned so the caller can retry if
+    // the trailer reports an overflow.
     const wanted = opts.moovSizeBytes ?? 'auto';
     moovSize =
       wanted === 'auto'
@@ -452,8 +456,9 @@ export async function remux(
     let pending: LibavPacket[] = [];
     const flush = async (): Promise<void> => {
       if (pending.length === 0) return;
-      // ff_write_multi dùng av_interleaved_write_frame -> muxer TỰ xen kẽ theo DTS.
-      // Kiểu "đọc hết rồi tự sort" của bản thử là thừa, và chính nó gây 2,52GB RAM.
+      // ff_write_multi uses av_interleaved_write_frame -> the muxer interleaves by DTS ITSELF.
+      // The "read everything then sort" approach of the prototype was unnecessary, and it's exactly
+      // what caused the 2.52GB RAM usage.
       await libav.ff_write_multi(oc, pkt, pending);
       const devErr = opts.deviceError?.();
       if (devErr) throw devErr;
@@ -471,7 +476,7 @@ export async function remux(
       readLimit,
       async (p, st, inp) => {
         const sel = byKey.get(`${inp.index}:${p.stream_index}`);
-        if (!sel) return; // stream không được map ra output
+        if (!sel) return; // stream is not mapped to the output
         const timed = rebasePacket(rebaser, toTimed(p, st, inp.index));
         const d = timed.dts === null ? null : numberToI64(timed.dts);
         const t = timed.pts === null ? null : numberToI64(timed.pts);
@@ -486,9 +491,10 @@ export async function remux(
           time_base_num: st.time_base_num,
           time_base_den: st.time_base_den,
         };
-        // 🔴 timebase 0 = muxer BỎ QUA phép quy đổi và diễn giải lại timestamp theo timebase
-        // của output. Không ném ở đây thì nó thành sai giờ IM LẶNG. `ff_bsf_multi` không có
-        // đường bù timebase như `ff_read_frame_multi`, nên phải tự canh.
+        // 🔴 timebase 0 = the muxer SKIPS the conversion and reinterprets the timestamp against
+        // the output's timebase. Not throwing here would make it a SILENT timing corruption.
+        // `ff_bsf_multi` has no timebase-compensation path like `ff_read_frame_multi`, so we must
+        // guard it ourselves.
         if (!out.time_base_num || !out.time_base_den) {
           throw new Error(
             `Packet thiếu timebase (stream ${p.stream_index}) — không ghép để tránh sai giờ.`,
@@ -507,7 +513,7 @@ export async function remux(
       },
       isCancelled,
     );
-    // Xả nốt bộ lọc (packet cuối có thể còn nằm trong bsf).
+    // Flush the filter's remainder (the last packet may still be sitting inside the bsf).
     for (const s of selected) {
       if (!s.bsf) continue;
       const tail = await libav.ff_bsf_multi(s.bsf, pkt, [], true);
@@ -518,24 +524,25 @@ export async function remux(
     }
     await flush();
 
-    // 🔴 KHÔNG BAO GIỜ được bỏ qua mã này. Đặt chỗ moov THIẾU thì moov tràn đè lên mdat,
-    // av_write_trailer trả -28, mà file vẫn nằm đó với kích thước trông rất hợp lý.
-    // Bên gọi phải xử lý: đây là con đường ra file hỏng-im-lặng duy nhất còn lại.
+    // 🔴 This return code must NEVER be ignored. An UNDERSIZED moov reservation makes moov
+    // overwrite mdat, av_write_trailer returns -28, yet the file still sits there with a size
+    // that looks perfectly reasonable. The caller must handle it: this is the last remaining
+    // silent-corruption path.
     trailerCode = await libav.av_write_trailer(oc);
-    // Hỏi lại lỗi đã chốt từ callback đồng bộ TRƯỚC khi ai đó kịp tin vào `trailerCode`.
+    // Poll the error latched by the synchronous callback BEFORE anyone gets a chance to trust `trailerCode`.
     const devErr = opts.deviceError?.();
     if (devErr) throw devErr;
   } finally {
     try {
       await libav.ff_free_muxer(oc, pb);
     } catch {
-      // dọn dẹp
+      // cleanup
     }
     for (const inp of inputs) {
       try {
         await libav.avformat_close_input_js(inp.ctx);
       } catch {
-        // dọn dẹp
+        // cleanup
       }
     }
   }
@@ -552,41 +559,41 @@ export async function remux(
   };
 }
 
-/* ────────────────────────── Đặt chỗ moov ────────────────────────── */
+/* ────────────────────────── moov reservation ────────────────────────── */
 
-/** Phần cố định của moov (ftyp/mvhd/trak header/extradata) — đo được < 1 KiB, để 32 KiB cho rộng. */
+/** Fixed part of moov (ftyp/mvhd/trak header/extradata) — measured < 1 KiB, use 32 KiB for headroom. */
 const MOOV_FIXED_BYTES = 32 * 1024;
-/** Byte mỗi packet. ĐO ĐƯỢC 5,4–15,5 (xem bảng dưới); 32 là dư ~2 lần kể cả khi lên co64. */
+/** Bytes per packet. MEASURED 5.4–15.5 (see table below); 32 gives ~2x margin even when it upgrades to co64. */
 const MOOV_BYTES_PER_PACKET = 32;
 
 /**
- * Số byte đặt chỗ cho moov, tính theo SỐ PACKET THẬT.
+ * Number of bytes to reserve for moov, computed from the ACTUAL PACKET COUNT.
  *
- * ĐO ĐƯỢC 2026-07-19 (mux bằng ffmpeg 8.1 rồi đọc thẳng độ dài hộp `moov`):
+ * MEASURED 2026-07-19 (muxed with ffmpeg 8.1, then reading the `moov` box length directly):
  *   | fixture   | packet | moov (B) | B/packet |
  *   | bf.ts     |    864 |   10.349 |    11,98 |
  *   | multi.ts  |  1.445 |   16.898 |    11,69 |
- *   | part0.ts  |    289 |    4.466 |    15,45 |  <- cao nhất
+ *   | part0.ts  |    289 |    4.466 |    15,45 |  <- highest
  *   | cv.ts     |    300 |    4.215 |    14,05 |
  *   | ca.ts     |    564 |    3.028 |     5,37 |
- *   | slow.ts   |     12 |      851 |    70,92 |  <- phần CỐ ĐỊNH áp đảo, không phải xu hướng
- * Phần cố định thật < 1 KiB; để 32 KiB là thừa sức cho cả extradata HEVC.
- * Cộng thêm dự phòng cho ca file > 4 GB: `stco` (4 B/chunk) đổi thành `co64` (8 B/chunk).
+ *   | slow.ts   |     12 |      851 |    70,92 |  <- the FIXED part dominates, not a trend
+ * The real fixed part is < 1 KiB; 32 KiB is plenty even for HEVC extradata.
+ * Add margin for the > 4 GB file case: `stco` (4 B/chunk) upgrades to `co64` (8 B/chunk).
  *
- * 🔴 CỐ Ý KHÔNG tính theo THỜI LƯỢNG. Công thức `256KiB + giây × 4096` chỉ mua được
- * ~300–330 packet/giây; nội dung fps cao hoặc nhiều luồng tiếng vượt ngưỡng đó là đặt chỗ
- * thiếu -> file hỏng. Tệ hơn, bản mẫu còn có `(durSec || 3600)`: không biết thời lượng +
- * stream dài hơn 1 giờ = chắc chắn thiếu. Mà thời lượng ở extension này lấy từ manifest HLS
- * — nguồn có thể vắng, có thể sai, có thể là playlist đang phát trực tiếp.
- * Số packet thì LƯỢT 1 ĐẾM ĐƯỢC CHÍNH XÁC trước khi ghi byte nào, nên không phải đoán,
- * và cũng không cần mux lại lần hai để sửa.
+ * 🔴 DELIBERATELY NOT computed from DURATION. The formula `256KiB + seconds × 4096` only buys
+ * ~300–330 packets/second; high-fps content or many audio streams exceed that threshold, giving
+ * an undersized reservation -> corrupted file. Worse, the prototype also had `(durSec || 3600)`:
+ * unknown duration + a stream longer than 1 hour = guaranteed undersized. And in this extension
+ * the duration comes from the HLS manifest — a source that can be missing, wrong, or a live
+ * playlist. The packet count, on the other hand, is EXACTLY COUNTED BY PASS 1 before a single byte
+ * is written, so it's not a guess, and no second mux is needed to fix it up.
  *
- * 🔴 VÌ SAO KHÔNG ĐƯỢC PHÉP SAI: đặt chỗ thiếu cho ra file HỎNG MÀ TRÔNG NHƯ THẬT. ĐO ĐƯỢC
- * với 4096 B: `av_write_trailer` trả **-28**, file 632.021 B, hộp sau moov parse thành rác
- * (`½3rQ`, độ dài 3.467.318.835), decoder ném "Invalid NAL unit size" — NHƯNG
- * `ffprobe -show_entries format=duration` vẫn trả "12.032000" và **thoát mã 0**.
- * Nghĩa là KHÔNG có cách nào phát hiện bằng cách probe file. Chỉ mã trả về của
- * `av_write_trailer` mới lộ. Đừng bao giờ bỏ qua nó.
+ * 🔴 WHY GETTING THIS WRONG IS UNACCEPTABLE: an undersized reservation produces a CORRUPTED FILE
+ * THAT LOOKS FINE. MEASURED with 4096 B: `av_write_trailer` returns **-28**, file is 632,021 B,
+ * the box after moov parses as garbage (`½3rQ`, length 3,467,318,835), the decoder throws
+ * "Invalid NAL unit size" — YET `ffprobe -show_entries format=duration` still returns "12.032000"
+ * and **exits with code 0**. Meaning there is NO way to detect this by probing the file. Only the
+ * return code of `av_write_trailer` reveals it. Never ignore it.
  */
 export function moovReserveForPackets(packets: number): number {
   return (

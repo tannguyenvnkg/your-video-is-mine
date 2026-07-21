@@ -1,19 +1,20 @@
-// Harness W0.3 — lưới an toàn tích hợp: extension THẬT + server fixture cục bộ CÓ CỔNG 403.
+// Harness W0.3 — integrated safety net: REAL extension + local fixture server WITH a 403 gate.
 //
-// VÌ SAO CẦN (đọc kỹ trước khi sửa):
-//   Toàn bộ 193 test vitest chỉ chạm HÀM THUẦN. `dnr.test.ts` chứng minh buildRefererSpoofRule()
-//   trả object đúng — nhưng KHÔNG THỂ thấy `handleVariants` chẳng bao giờ gọi nó. Đó là lớp lỗi
-//   mà cổng tĩnh mù hoàn toàn. Harness này đo bằng cách CHẠY THẬT.
-//   e2e/smoke.mjs tải từ site công khai và KHÔNG có cổng 403 -> nó chứng minh "đường HLS chạy",
-//   không chứng minh được gì về chống hotlink. Đây là chỗ file này bù vào.
+// WHY THIS IS NEEDED (read carefully before editing):
+//   All 193 vitest tests only touch PURE FUNCTIONS. `dnr.test.ts` proves buildRefererSpoofRule()
+//   returns the correct object — but CANNOT see that `handleVariants` never calls it. That's the
+//   class of bug static gates are completely blind to. This harness measures by RUNNING FOR REAL.
+//   e2e/smoke.mjs downloads from a public site and has NO 403 gate -> it proves "the HLS path
+//   runs", it proves nothing about anti-hotlink defenses. This file fills that gap.
 //
-// KHÁC BIỆT SO VỚI smoke.mjs: offline (fixture cục bộ), tất định, và có cổng 403 quan sát được.
+// DIFFERENCE FROM smoke.mjs: offline (local fixture), deterministic, with an observable 403 gate.
 //
-// 🔬 RATCHET TỰ BẬT (mượn đúng cơ chế `it.fails` của W0.4):
-//   Ca `expect: 'known-fail'` ghim một BUG ĐÃ BIẾT còn sống. Nếu ca đó bỗng ĐẠT (ai đó sửa xong
-//   W2.2/W2.3) thì harness **ĐỎ** kèm hướng dẫn đổi nhãn thành 'pass'. Không thể quên như TODO chết.
+// 🔬 SELF-ARMING RATCHET (borrows exactly the `it.fails` mechanism from W0.4):
+//   A case with `expect: 'known-fail'` pins a KNOWN bug that's still alive. If that case suddenly
+//   PASSES (someone finished fixing W2.2/W2.3), the harness turns **RED** with instructions to
+//   relabel it to 'pass'. Impossible to forget, unlike a dead TODO.
 //
-// Chạy: pnpm e2e:fixture   (cần `pnpm build` trước; cần ffprobe cho phần kiểm thời lượng)
+// Run: pnpm e2e:fixture   (needs `pnpm build` first; needs ffprobe for the duration-check part)
 
 import { PLAYER_TOKEN, startFixtureServer, startDemuxedServer } from './fixture-server.mjs';
 import {
@@ -26,8 +27,8 @@ import {
 import { existsSync, statSync } from 'node:fs';
 
 const JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_MS ?? 120_000);
-// fixture = 10 segment x 1s x 10fps (sinh bang ffmpeg, xem e2e/fixtures/hls).
-// Dem KHUNG chu khong do thoi luong - ly do da do bang thuc nghiem, xem probeFile() trong lib.mjs.
+// fixture = 10 segments x 1s x 10fps (generated with ffmpeg, see e2e/fixtures/hls).
+// Count FRAMES, not duration — reason measured empirically, see probeFile() in lib.mjs.
 const FIXTURE_FRAMES = 100;
 const DOWNLOAD_FOLDER = `yvim-e2e-${process.pid}`;
 
@@ -35,10 +36,11 @@ requireBuild();
 
 const withBrowser = (fn) => withBrowserRaw(DOWNLOAD_FOLDER, fn);
 
-// --- Các ca ------------------------------------------------------------------------------------
-// Mỗi ca trả { ok: boolean, detail: string }. `expect` nói ca đó ĐANG phải đạt hay đang ghim bug.
+// --- Cases ---------------------------------------------------------------------------------
+// Each case returns { ok: boolean, detail: string }. `expect` says whether the case is SUPPOSED
+// to pass, or is pinning a known bug.
 
-/** Tải trọn stream qua hls/download rồi kiểm file trên đĩa. */
+/** Download the whole stream via hls/download then check the file on disk. */
 async function runDownload({ gate, segmentHost }) {
   const srv = await startFixtureServer({ gate, segmentHost });
   try {
@@ -56,37 +58,37 @@ async function runDownload({ gate, segmentHost }) {
       if (!start?.ok) {
         return {
           ok: false,
-          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+          detail: `hls/download rejected: ${JSON.stringify(start)}`,
         };
       }
       const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
       if (!job) {
         return {
           ok: false,
-          detail: `job TREO sau ${JOB_TIMEOUT_MS / 1000}s (không done/error)`,
+          detail: `job STUCK after ${JOB_TIMEOUT_MS / 1000}s (neither done nor error)`,
         };
       }
       if (job.phase !== 'done') {
         const b = srv.blocked().length;
         return {
           ok: false,
-          detail: `job ${job.phase}: ${job.error ?? '?'}${b ? ` — server đã chặn ${b} request vì thiếu Referer` : ''}`,
+          detail: `job ${job.phase}: ${job.error ?? '?'}${b ? ` — server blocked ${b} request(s) for missing Referer` : ''}`,
         };
       }
-      // Tên file DỰ ĐỊNH (đường đặt tên + thư mục con) — assert ở đây vì đường dẫn thật trên đĩa
-      // đã bị Playwright đổi hướng, xem chú thích ở waitDownloadedFile().
+      // INTENDED filename (naming scheme + subfolder) — asserted here because the real on-disk
+      // path has been redirected by Playwright, see the note on waitDownloadedFile().
       const wantName = `${DOWNLOAD_FOLDER}/media.mp4`;
       if (job.filename !== wantName) {
         return {
           ok: false,
-          detail: `tên file dự định sai: "${job.filename}", mong đợi "${wantName}"`,
+          detail: `wrong intended filename: "${job.filename}", expected "${wantName}"`,
         };
       }
       const file = await waitDownloadedFile(page, 30_000);
       if (!file)
         return {
           ok: false,
-          detail: 'job done nhưng KHÔNG có file nào rơi xuống đĩa',
+          detail: 'job done but NO file landed on disk',
         };
       if (file.state !== 'complete') {
         return {
@@ -97,7 +99,7 @@ async function runDownload({ gate, segmentHost }) {
       if (!existsSync(file.filename)) {
         return {
           ok: false,
-          detail: `downloads báo complete nhưng file không tồn tại: ${file.filename}`,
+          detail: `downloads reports complete but file does not exist: ${file.filename}`,
         };
       }
       const size = statSync(file.filename).size;
@@ -105,22 +107,23 @@ async function runDownload({ gate, segmentHost }) {
       if (probe.error)
         return {
           ok: false,
-          detail: `ffprobe không đọc được file ra: ${probe.error}`,
+          detail: `ffprobe could not read the output file: ${probe.error}`,
         };
       if (!probe.codecs.includes('video')) {
         return {
           ok: false,
-          detail: `file ra KHÔNG có track hình (streams: ${probe.codecs.join(',') || 'rỗng'})`,
+          detail: `output file has NO video track (streams: ${probe.codecs.join(',') || 'empty'})`,
         };
       }
-      // §2.6: nhảy cóc segment -> THIẾU KHUNG HÌNH (thời lượng thì không đổi — xem probeFile).
-      // Dung sai ±2 khung: remux -c copy có thể lệch 1 khung ở mép, nhưng rơi 1 segment = -10 khung.
+      // §2.6: skipping a segment -> MISSING FRAMES (duration stays unchanged — see probeFile).
+      // Tolerance ±2 frames: remux -c copy can drift by 1 frame at an edge, but dropping 1 segment
+      // means -10 frames.
       if (Math.abs(probe.videoFrames - FIXTURE_FRAMES) > 2) {
         return {
           ok: false,
           detail:
-            `thiếu khung hình: đọc được ${probe.videoFrames}, mong đợi ${FIXTURE_FRAMES} ` +
-            `(mất segment? thời lượng ${probe.duration.toFixed(2)}s KHÔNG phản ánh lỗi này)`,
+            `missing frames: read ${probe.videoFrames}, expected ${FIXTURE_FRAMES} ` +
+            `(dropped segment? duration ${probe.duration.toFixed(2)}s does NOT reflect this bug)`,
         };
       }
       const errLog = logs.filter((l) => l.includes('error:')).slice(-3);
@@ -128,8 +131,8 @@ async function runDownload({ gate, segmentHost }) {
         ok: true,
         detail:
           `file ${(size / 1024).toFixed(0)}KB, ${probe.duration.toFixed(2)}s, ` +
-          `${probe.videoFrames} khung, track: ${probe.codecs.join('+')}` +
-          `${errLog.length ? ` (log lỗi: ${errLog.join(' | ')})` : ''}`,
+          `${probe.videoFrames} frames, track: ${probe.codecs.join('+')}` +
+          `${errLog.length ? ` (error log: ${errLog.join(' | ')})` : ''}`,
       };
     });
   } finally {
@@ -138,25 +141,28 @@ async function runDownload({ gate, segmentHost }) {
 }
 
 /**
- * W3.1 — tải trọn một stream HLS **MÃ HOÁ AES-128** rồi kiểm file ra.
+ * W3.1 — download a whole **AES-128 encrypted** HLS stream then check the output file.
  *
- * VÌ SAO CA NÀY ĐÁNG TIỀN: AES-128 là nhánh giải mã duy nhất §7 cho phép, nhưng suốt BA phiên
- * chưa lần nào có máy đo chạm vào — cả 502 unit test lẫn 17 ca e2e đều chạy stream KHÔNG mã hoá.
- * `utils/crypto.test.ts` chứng minh `decryptAes128Cbc()` giải đúng, nhưng KHÔNG thể thấy
- * `downloadTrack()` có gọi nó với đúng khoá và đúng IV hay không — đúng lớp lỗi mà cổng tĩnh mù.
+ * WHY THIS CASE IS WORTH IT: AES-128 is the only decryption branch §7 allows, yet across THREE
+ * sessions no measurement ever touched it — both the 502 unit tests and the 17 e2e cases only ran
+ * unencrypted streams. `utils/crypto.test.ts` proves `decryptAes128Cbc()` decrypts correctly, but
+ * CANNOT see whether `downloadTrack()` actually calls it with the right key and the right IV —
+ * exactly the class of bug static gates are blind to.
  *
- * VÌ SAO 100 KHUNG LÀ CHỨNG CỨ ĐỦ MẠNH (cho KHOÁ): segment ở đây là ĐÚNG 10 segment plaintext
- * của ca `happy` đem mã hoá, nên đường đi đúng phải cho ra file trùng khít ca đó. Sai KHOÁ thì ra
- * byte ngẫu nhiên — MPEG-TS mất đồng bộ, không có đường nào ra đúng 100 khung.
+ * WHY 100 FRAMES IS STRONG ENOUGH EVIDENCE (for the KEY): the segments here are the EXACT same 10
+ * plaintext segments from the `happy` case, encrypted. So the correct path must produce a file
+ * that matches that case bit-for-bit. A wrong KEY produces random bytes — MPEG-TS loses sync, and
+ * no path can come out to exactly 100 frames.
  *
- * 🔴 NHƯNG KHÔNG PHẢI CHO IV — ĐÃ ĐO, đừng tin ngược lại: đột biến thay `seg.seq` bằng chỉ số mảng,
- * và đột biến bỏ qua `#EXT-X-KEY:IV=`, đều để mấy ca này VẪN XANH. CBC chỉ cho IV chi phối 16 byte
- * đầu mỗi segment: lệch đúng 10/143.444 byte, cùng 100 khung, cùng md5 luồng hình, file .mp4 ra
- * GIỐNG HỆT TỪNG BYTE. Lưới cho IV nằm ở `utils/crypto.test.ts`, KHÔNG nằm ở đây.
+ * 🔴 BUT NOT FOR THE IV — MEASURED, don't assume the opposite: mutating `seg.seq` to the array
+ * index, and mutating to skip `#EXT-X-KEY:IV=`, both leave these cases GREEN. CBC only lets the IV
+ * govern the first 16 bytes of each segment: exactly 10/143,444 bytes off, same 100 frames, same
+ * video-stream md5, the output .mp4 comes out BYTE-IDENTICAL. The net for IV lives in
+ * `utils/crypto.test.ts`, NOT here.
  *
- * ⚠️ Cố tình KHÔNG dùng chung thân với runDownload(): 17 ca đang xanh chạy qua hàm đó, và món nợ
- * đang trả là "thiếu lưới", không phải "thiếu gọn". Gộp lại thì lần sửa nào ở đây cũng thành rủi
- * ro cho cả 17 ca kia.
+ * ⚠️ Deliberately NOT sharing a body with runDownload(): 17 green cases run through that function,
+ * and the debt being paid off here is "missing a net", not "not DRY enough". Merging them would
+ * turn every future edit here into a risk for all 17 of those cases.
  */
 async function runAesDownload({
   variant,
@@ -180,23 +186,23 @@ async function runAesDownload({
       if (!start?.ok) {
         return {
           ok: false,
-          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+          detail: `hls/download rejected: ${JSON.stringify(start)}`,
         };
       }
       const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
-      if (!job) return { ok: false, detail: 'job TREO (không done/error)' };
+      if (!job) return { ok: false, detail: 'job STUCK (neither done nor error)' };
       if (job.phase !== 'done') {
         const b = srv.blocked().length;
         return {
           ok: false,
           detail:
             `job ${job.phase}: ${job.error ?? '?'}` +
-            `${b ? ` — server đã chặn ${b} request vì thiếu Referer` : ''}`,
+            `${b ? ` — server blocked ${b} request(s) for missing Referer` : ''}`,
         };
       }
       const file = await waitDownloadedFile(page, 30_000);
       if (!file)
-        return { ok: false, detail: 'job done nhưng KHÔNG có file trên đĩa' };
+        return { ok: false, detail: 'job done but NO file on disk' };
       if (file.state !== 'complete')
         return {
           ok: false,
@@ -205,24 +211,27 @@ async function runAesDownload({
       if (!existsSync(file.filename))
         return {
           ok: false,
-          detail: `downloads báo complete nhưng file không tồn tại: ${file.filename}`,
+          detail: `downloads reports complete but file does not exist: ${file.filename}`,
         };
 
-      // Cổng SỐ MỘT: khoá có được kéo về ĐÚNG số lần không.
-      //   THIẾU  -> playlist không được nhận là mã hoá, hoặc cụm khoá thứ hai bị bôi bằng khoá đầu.
-      //   THỪA   -> cache khoá thủng, mỗi segment lại đi xin khoá một lần (CDN hay giới hạn nhịp
-      //             đúng endpoint này, nên request thừa là rủi ro thật, không phải chuyện thẩm mỹ).
-      // Ghim BẰNG ĐÚNG chứ không phải >=: con số này TẤT ĐỊNH sau bản vá cache-promise (đã đo —
-      // trước bản vá nó chạy 3-5 và đổi theo từng lượt chạy, đúng dấu hiệu của cache thủng).
+      // GATE NUMBER ONE: was the key fetched EXACTLY the right number of times.
+      //   TOO FEW  -> the playlist wasn't recognized as encrypted, or the second key cluster got
+      //               painted with the first key.
+      //   TOO MANY -> the key cache leaks, each segment goes and asks for the key again (CDNs or
+      //               rate limits on exactly this endpoint make the extra request a real risk, not
+      //               just a cosmetic issue).
+      // Pinned to EXACTLY, not >=: this number is DETERMINISTIC after the cache-promise fix
+      // (measured — before the fix it ran 3-5 and changed on every run, the exact signature of a
+      // leaky cache).
       const keyHits = srv.aesKeyHits();
       if (keyHits !== wantKeyFetches) {
         return {
           ok: false,
           detail:
-            `${keyHits} lượt fetch khoá AES, mong đợi ĐÚNG ${wantKeyFetches} ` +
+            `${keyHits} AES key fetch(es), expected EXACTLY ${wantKeyFetches} ` +
             (keyHits < wantKeyFetches
-              ? '-> thiếu khoá: nhánh giải mã không chạy, hoặc khoá đầu bị bôi ra cả stream'
-              : '-> cache khoá thủng: mỗi segment lại đi xin khoá một lần'),
+              ? '-> missing key: decryption branch did not run, or the first key got painted over the whole stream'
+              : '-> leaky key cache: each segment goes and asks for the key again'),
         };
       }
 
@@ -232,32 +241,32 @@ async function runAesDownload({
         return {
           ok: false,
           detail:
-            `ffprobe không đọc được file ra: ${probe.error} ` +
-            '-> nhiều khả năng giải mã SAI (byte rác vẫn ghi ra file được)',
+            `ffprobe could not read the output file: ${probe.error} ` +
+            '-> most likely WRONG decryption (garbage bytes still get written to the file)',
         };
       }
       if (!probe.codecs.includes('video')) {
         return {
           ok: false,
           detail:
-            `file ra KHÔNG có track hình (streams: ${probe.codecs.join(',') || 'rỗng'}) ` +
-            '-> giải mã sai làm mất đồng bộ MPEG-TS',
+            `output file has NO video track (streams: ${probe.codecs.join(',') || 'empty'}) ` +
+            '-> wrong decryption broke MPEG-TS sync',
         };
       }
       if (Math.abs(probe.videoFrames - FIXTURE_FRAMES) > 2) {
         return {
           ok: false,
           detail:
-            `thiếu khung hình: đọc được ${probe.videoFrames}, mong đợi ${FIXTURE_FRAMES} ` +
-            '-> giải mã sai ở MỘT SỐ segment (sai IV/sai khoá cụm sau), phần còn lại vẫn đúng ' +
-            'nên file vẫn mở được — đây chính là dạng hỏng ÂM THẦM',
+            `missing frames: read ${probe.videoFrames}, expected ${FIXTURE_FRAMES} ` +
+            '-> SOME segments decrypted wrong (wrong IV/wrong key for the second cluster), the rest ' +
+            'still came out right so the file still opens — this is exactly the SILENT-corruption kind',
         };
       }
       return {
         ok: true,
         detail:
           `file ${(size / 1024).toFixed(0)}KB, ${probe.duration.toFixed(2)}s, ` +
-          `${probe.videoFrames} khung, ${keyHits} lượt fetch khoá, track: ${probe.codecs.join('+')}`,
+          `${probe.videoFrames} frames, ${keyHits} key fetch(es), track: ${probe.codecs.join('+')}`,
       };
     });
   } finally {
@@ -266,21 +275,24 @@ async function runAesDownload({
 }
 
 /**
- * W3.1 — KHOÁ AES HỎNG thì lỗi phải NÓI ĐƯỢC THÀNH LỜI.
+ * W3.1 — a BROKEN AES key must produce an error that CAN BE PUT INTO WORDS.
  *
- * 🔴 ĐÃ ĐO (2026-07-19) trên chính bản đang chạy: cho khoá sai -> job kết thúc `phase: 'error'`
- * với **`error: ""`** — chuỗi RỖNG. Popup hiện một dòng đỏ TRỐNG KHÔNG. Nguyên nhân: WebCrypto
- * ném `DOMException(OperationError)` mà `message` của nó rỗng trong Chromium, và đường lỗi chỉ
- * chuyển tiếp `e.message`.
+ * 🔴 MEASURED (2026-07-19) on the exact version currently running: give it a wrong key -> the job
+ * ends with `phase: 'error'` and **`error: ""`** — an EMPTY string. The popup shows a blank red
+ * line. Root cause: WebCrypto throws `DOMException(OperationError)` whose `message` is empty in
+ * Chromium, and the error path just forwards `e.message`.
  *
- * Đây đúng dạng lỗi dự án cấm: hỏng mà KHÔNG NÓI GÌ. Người dùng không thể phân biệt "sai khoá"
- * với "mất mạng" với "hết đĩa". Ca này đòi thông báo phải NHẮC TỚI khoá/giải mã.
+ * This is exactly the kind of failure the project forbids: broken but SAYING NOTHING. The user
+ * cannot tell "wrong key" from "lost connection" from "disk full". This case requires the message
+ * to MENTION the key/decryption.
  *
- * Hai biến thể vì hai đường ném KHÁC NHAU, đừng gộp:
- *   `bad`    khoá đúng 16 byte nhưng SAI giá trị -> ném ở bước bỏ padding (decrypt).
- *   `badlen` server trả trang HTML thay khoá     -> ném ở GUARD ĐỘ DÀI trong `decryptSegment`,
- *            TRƯỚC khi `importKey` được gọi. Guard đó không thừa: thiếu nó thì user nhận câu
- *            tiếng Anh "AES key data must be 128 or 256 bits" thay vì lời đọc được.
+ * Two variants because they throw from two DIFFERENT paths, don't merge them:
+ *   `bad`    key is exactly 16 bytes but the VALUE is wrong -> throws at the padding-removal step
+ *            (decrypt).
+ *   `badlen` server returns an HTML page instead of the key -> throws at the LENGTH GUARD inside
+ *            `decryptSegment`, BEFORE `importKey` is even called. That guard isn't redundant:
+ *            without it the user gets the English string "AES key data must be 128 or 256 bits"
+ *            instead of a readable message.
  */
 async function runAesBadKey({ variant, wantMessage }) {
   const srv = await startFixtureServer({ gate: 'none' });
@@ -299,19 +311,20 @@ async function runAesBadKey({ variant, wantMessage }) {
       if (!start?.ok) {
         return {
           ok: false,
-          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+          detail: `hls/download rejected: ${JSON.stringify(start)}`,
         };
       }
       const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
-      if (!job) return { ok: false, detail: 'job TREO (không done/error)' };
+      if (!job) return { ok: false, detail: 'job STUCK (neither done nor error)' };
 
-      // Giao file ra khi khoá sai còn TỆ HƠN báo lỗi: user nhận .mp4 rác kèm dấu tích xanh.
+      // Delivering the file with a wrong key is WORSE than reporting an error: the user gets a
+      // garbage .mp4 with a green checkmark.
       if (job.phase !== 'error') {
         return {
           ok: false,
           detail:
-            `khoá SAI mà job kết thúc '${job.phase}' — lẽ ra phải 'error'. ` +
-            'Giao file rác kèm dấu tích xanh là hỏng nặng hơn báo lỗi.',
+            `wrong key but the job ended '${job.phase}' — it should have been 'error'. ` +
+            'Handing over a garbage file with a green checkmark is worse than reporting an error.',
         };
       }
       const msg = String(job.error ?? '');
@@ -319,35 +332,40 @@ async function runAesBadKey({ variant, wantMessage }) {
         return {
           ok: false,
           detail:
-            'job error nhưng THÔNG BÁO RỖNG — popup hiện dòng đỏ trống không, user không thể ' +
-            'phân biệt sai khoá / mất mạng / hết đĩa (WebCrypto OperationError có message rỗng)',
+            'job errored but the MESSAGE IS EMPTY — the popup shows a blank red line, the user ' +
+            'cannot tell wrong key / lost connection / disk full apart (WebCrypto OperationError has ' +
+            'an empty message)',
         };
       }
+      // Keep this regex verbatim: it checks the ACTUAL runtime error message produced by the
+      // extension (still Vietnamese), not test-file narration.
       if (!/khoá|giải mã/i.test(msg)) {
         return {
           ok: false,
-          detail: `thông báo không nhắc tới khoá/giải mã nên vô nghĩa với user: "${msg}"`,
+          detail: `message doesn't mention key/decryption, so it's meaningless to the user: "${msg}"`,
         };
       }
-      // Assertion RIÊNG mỗi biến thể. Nếu cả hai chỉ đòi /khoá|giải mã/ thì câu bọc lỗi chung đã
-      // thoả sẵn, và guard "khoá phải đúng 16 byte" xoá đi lúc nào cũng không ai biết (đã đo:
-      // gỡ guard -> ca vẫn xanh vì lỗi importKey rơi vào đúng câu bọc đó).
+      // A SEPARATE assertion per variant. If both only required /khoá|giải mã/ then the shared
+      // wrapper sentence would already satisfy it, and the "key must be exactly 16 bytes" guard
+      // could be deleted with nobody noticing (measured: removing the guard -> case stays green
+      // because the importKey error falls into that same wrapper sentence).
       if (wantMessage && !wantMessage.test(msg)) {
         return {
           ok: false,
           detail:
-            `thông báo không nói đúng NGUYÊN NHÂN của ca này (${wantMessage}): "${msg}"`,
+            `message doesn't state the correct CAUSE for this case (${wantMessage}): "${msg}"`,
         };
       }
-      // Chống giao file rác: báo lỗi rồi mà vẫn thả file xuống đĩa thì user vẫn nhận .mp4 hỏng.
+      // Guard against handing over a garbage file: reporting an error but still dropping a file to
+      // disk still leaves the user with a broken .mp4.
       const file = await waitDownloadedFile(page, 3_000);
       if (file) {
         return {
           ok: false,
-          detail: `báo lỗi ĐÚNG nhưng vẫn giao file xuống đĩa: ${file.filename}`,
+          detail: `reported the error CORRECTLY but still delivered a file to disk: ${file.filename}`,
         };
       }
-      return { ok: true, detail: `báo lỗi rõ ràng: "${msg}"` };
+      return { ok: true, detail: `clear error message: "${msg}"` };
     });
   } finally {
     await srv.close();
@@ -355,22 +373,24 @@ async function runAesBadKey({ variant, wantMessage }) {
 }
 
 /**
- * GÓI A — HLS **fMP4/CMAF** (`#EXT-X-MAP`), có/không mã hoá AES-128.
+ * PACKAGE A — HLS **fMP4/CMAF** (`#EXT-X-MAP`), with/without AES-128 encryption.
  *
- * VÌ SAO CA NÀY TỒN TẠI: phiên 2026-07-20 vá chỗ "init segment không được giải mã" theo RFC 8216
- * §4.3.2.5, nhưng **chưa có máy đo nào chạy bản vá đó** — mọi ca AES đang có đều là MPEG-TS, mà TS
- * không có `#EXT-X-MAP` nên nhánh init không bao giờ được đụng tới. Nợ này là món rõ nhất còn lại
- * của W3.1.
+ * WHY THIS CASE EXISTS: the 2026-07-20 session patched "the init segment doesn't get decrypted"
+ * per RFC 8216 §4.3.2.5, but **no measurement ever exercised that patch** — every existing AES
+ * case is MPEG-TS, and TS has no `#EXT-X-MAP`, so the init branch never gets touched. This is the
+ * clearest remaining debt of W3.1.
  *
- * 🔬 VÌ SAO fMP4 CÓ RĂNG TRONG KHI TS THÌ KHÔNG — đây là điểm cốt lõi, đã đo bằng node:
- * 16 byte đầu của init (sau giải mã) là `0000001c 66747970 69736f35 00000200`, tức box `ftyp`.
- * AES-CBC cho IV chi phối ĐÚNG khối 16 byte đầu — trên TS thì 16 byte đó chỉ là một gói TS và
- * ffmpeg tự đồng bộ lại (đo được: lệch 10/143.444 byte, file .mp4 ra GIỐNG HỆT TỪNG BYTE). Trên
- * fMP4 thì 16 byte đó là magic + kích thước box, hỏng là libav không nhận ra định dạng.
- * => ĐÂY là chỗ duy nhất trong bộ e2e mà lỗi tầng init/IV trở nên QUAN SÁT ĐƯỢC.
+ * 🔬 WHY fMP4 HAS TEETH WHILE TS DOESN'T — this is the core point, measured with node: the first
+ * 16 bytes of the init (after decryption) are `0000001c 66747970 69736f35 00000200`, i.e. the
+ * `ftyp` box. AES-CBC lets the IV govern EXACTLY the first 16-byte block — on TS those 16 bytes
+ * are just one TS packet and ffmpeg resyncs on its own (measured: drift of 10/143,444 bytes, the
+ * output .mp4 comes out BYTE-IDENTICAL). On fMP4, those 16 bytes are the magic + box size, and
+ * corrupting them means libav simply doesn't recognize the format.
+ * => THIS is the only spot in the whole e2e suite where an init/IV layer bug becomes OBSERVABLE.
  *
- * `wantKeyHits` là cổng độc lập với nội dung file: 0 cho biến thể không mã hoá (chống "giải mã
- * oan"), đúng 1 mỗi track cho biến thể mã hoá (chống cache khoá thủng).
+ * `wantKeyHits` is a gate INDEPENDENT of file content: 0 for the unencrypted variant (guards
+ * against "decrypting when it shouldn't"), exactly 1 per track for the encrypted variant (guards
+ * against a leaky key cache).
  */
 async function runFmp4Download({
   variant,
@@ -381,8 +401,9 @@ async function runFmp4Download({
   const srv = await startFixtureServer({ gate: 'none' });
   try {
     return await withBrowser(async ({ page }) => {
-      // Biến thể tách tiếng đi TRỌN đường popup (master -> variant -> audioUrl), vì chính khâu
-      // parse master là nơi luồng tiếng hay bốc hơi (bài học W1.1).
+      // The demuxed-audio variant walks the ENTIRE popup path (master -> variant -> audioUrl),
+      // because parsing the master is exactly where the audio stream tends to vanish (lesson from
+      // W1.1).
       let variantUrl = srv.fmp4Url(variant, 'v');
       let audioUrl;
       const mediaUrl = demuxed
@@ -401,19 +422,19 @@ async function runFmp4Download({
         if (!vres?.ok) {
           return {
             ok: false,
-            detail: `manifest/variants hỏng: ${JSON.stringify(vres)}`,
+            detail: `manifest/variants broken: ${JSON.stringify(vres)}`,
           };
         }
         const v = vres.variants?.[0];
-        if (!v) return { ok: false, detail: 'master fMP4 không ra variant nào' };
+        if (!v) return { ok: false, detail: 'fMP4 master produced no variant' };
         variantUrl = v.uri;
         audioUrl = v.audioRenditions?.find((r) => r.selected)?.uri;
         if (!audioUrl) {
           return {
             ok: false,
             detail:
-              'master khai #EXT-X-MEDIA:TYPE=AUDIO nhưng variant không mang rendition tiếng nào ' +
-              '-> job sẽ chạy một-input và file ra CÂM',
+              'master declares #EXT-X-MEDIA:TYPE=AUDIO but the variant carries no audio rendition ' +
+              '-> the job will run single-input and the output file will be MUTE',
           };
         }
       }
@@ -432,64 +453,68 @@ async function runFmp4Download({
       if (!start?.ok) {
         return {
           ok: false,
-          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+          detail: `hls/download rejected: ${JSON.stringify(start)}`,
         };
       }
       const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
-      if (!job) return { ok: false, detail: 'job TREO (không done/error)' };
+      if (!job) return { ok: false, detail: 'job STUCK (neither done nor error)' };
       if (job.phase !== 'done') {
-        // Lời chẩn đoán phải ĐÚNG với biến thể đang chạy. Câu "init không được giải mã" mà dán
-        // lên cả biến thể KHÔNG mã hoá thì chính nó là một khẳng định sai — đúng thứ luật dự án
-        // gọi là lỗi (đã đo: đột biến bỏ #EXT-X-MAP làm ca `plain` đỏ kèm câu chẩn đoán sai này).
+        // The diagnosis must match the variant actually running. The sentence "init did not get
+        // decrypted" pasted onto the UNENCRYPTED variant would itself be a false claim — exactly
+        // what the project's rules call a bug (measured: mutating away #EXT-X-MAP makes the
+        // `plain` case fail with this wrong diagnosis attached).
         const hint = wantKeyHits
-          ? 'init (#EXT-X-MAP) nhiều khả năng KHÔNG được giải mã: ciphertext nằm đúng chỗ ' +
-            'ftyp/moov nên libav không nhận ra định dạng'
-          : 'stream KHÔNG mã hoá mà vẫn hỏng -> nhiều khả năng init (#EXT-X-MAP) bị bỏ qua ' +
-            'hoặc ghi sai vị trí (init phải nằm TRƯỚC segment đầu)';
+          ? 'the init (#EXT-X-MAP) most likely did NOT get decrypted: ciphertext sits right where ' +
+            'ftyp/moov should be so libav does not recognize the format'
+          : 'stream is NOT encrypted yet still broke -> the init (#EXT-X-MAP) is most likely being ' +
+            'skipped or written to the wrong position (init must come BEFORE the first segment)';
         return {
           ok: false,
           detail: `job ${job.phase}: ${job.error ?? '?'} -> ${hint}`,
         };
       }
 
-      // Cổng 1: init có thật sự được kéo về không. Bản nào bỏ qua #EXT-X-MAP sẽ ra file thiếu
-      // header — và với fMP4 thì thiếu header là mất TOÀN BỘ mô tả track, không phải lỗi mép.
+      // Gate 1: was the init actually fetched. A build that skips #EXT-X-MAP produces a file
+      // missing its header — and for fMP4, a missing header means the ENTIRE track description is
+      // gone, not just an edge-case glitch.
       const initHits = srv.fmp4InitHits();
       if (initHits < (demuxed ? 2 : 1)) {
         return {
           ok: false,
-          detail: `chỉ ${initHits} lượt fetch init (#EXT-X-MAP) — nhánh init không chạy`,
+          detail: `only ${initHits} init (#EXT-X-MAP) fetch(es) — init branch did not run`,
         };
       }
-      // Cổng 2: số lượt lấy khoá. 0 = không giải mã oan trên stream sạch; đúng N = cache khoá lành.
+      // Gate 2: number of key fetches. 0 = no unnecessary decryption on a clean stream; exactly N
+      // = healthy key cache.
       const keyHits = srv.fmp4KeyHits();
       if (keyHits !== wantKeyHits) {
         return {
           ok: false,
           detail:
-            `${keyHits} lượt fetch khoá AES, mong đợi ĐÚNG ${wantKeyHits}` +
+            `${keyHits} AES key fetch(es), expected EXACTLY ${wantKeyHits}` +
             (wantKeyHits === 0
-              ? ' -> stream KHÔNG mã hoá mà vẫn đi xin khoá: giải mã oan'
+              ? ' -> stream is NOT encrypted but keys were still requested: unnecessary decryption'
               : keyHits < wantKeyHits
-                ? ' -> thiếu khoá: track nào đó không được giải mã (hoặc bị bôi khoá của track kia)'
-                : ' -> cache khoá thủng'),
+                ? ' -> missing key: some track did not get decrypted (or got painted with the other track\'s key)'
+                : ' -> leaky key cache'),
         };
       }
       if (demuxed) {
-        // Ghim nhánh "mỗi track một #EXT-X-KEY RIÊNG": hai khoá KHÁC NHAU, mỗi bên đúng 1 lượt.
+        // Pin the "each track has its OWN separate #EXT-X-KEY" branch: two DIFFERENT keys, exactly
+        // 1 fetch each.
         const kv = srv.fmp4KeyHits('v');
         const ka = srv.fmp4KeyHits('a');
         if (kv !== 1 || ka !== 1) {
           return {
             ok: false,
-            detail: `khoá hình ${kv} lượt / khoá tiếng ${ka} lượt — mỗi bên phải ĐÚNG 1`,
+            detail: `video key ${kv} fetch(es) / audio key ${ka} fetch(es) — each side must be EXACTLY 1`,
           };
         }
       }
 
       const file = await waitDownloadedFile(page, 30_000);
       if (!file)
-        return { ok: false, detail: 'job done nhưng KHÔNG có file trên đĩa' };
+        return { ok: false, detail: 'job done but NO file on disk' };
       if (file.state !== 'complete')
         return {
           ok: false,
@@ -498,7 +523,7 @@ async function runFmp4Download({
       if (!existsSync(file.filename))
         return {
           ok: false,
-          detail: `downloads báo complete nhưng file không tồn tại: ${file.filename}`,
+          detail: `downloads reports complete but file does not exist: ${file.filename}`,
         };
       const size = statSync(file.filename).size;
       const probe = probeFile(file.filename);
@@ -506,37 +531,37 @@ async function runFmp4Download({
         return {
           ok: false,
           detail:
-            `ffprobe không đọc được file ra: ${probe.error} ` +
-            '-> init hỏng thì mọi mô tả track biến mất, file chỉ còn là đống byte',
+            `ffprobe could not read the output file: ${probe.error} ` +
+            '-> a broken init wipes out every track description, the file is just a pile of bytes',
         };
       }
       if (!probe.codecs.includes('video')) {
         return {
           ok: false,
-          detail: `file ra KHÔNG có track hình (streams: ${probe.codecs.join(',') || 'rỗng'})`,
+          detail: `output file has NO video track (streams: ${probe.codecs.join(',') || 'empty'})`,
         };
       }
       if (wantAudio && !probe.codecs.includes('audio')) {
         return {
           ok: false,
           detail:
-            `file ra KHÔNG có track tiếng (streams: ${probe.codecs.join(',')}) ` +
-            '-> luồng tiếng có khoá RIÊNG bị rơi',
+            `output file has NO audio track (streams: ${probe.codecs.join(',')}) ` +
+            '-> the audio stream with its OWN separate key got dropped',
         };
       }
       if (Math.abs(probe.videoFrames - FIXTURE_FRAMES) > 2) {
         return {
           ok: false,
           detail:
-            `thiếu khung hình: đọc được ${probe.videoFrames}, mong đợi ${FIXTURE_FRAMES} ` +
-            '-> mất segment .m4s, hoặc một phần giải mã sai',
+            `missing frames: read ${probe.videoFrames}, expected ${FIXTURE_FRAMES} ` +
+            '-> dropped a .m4s segment, or part of it decrypted wrong',
         };
       }
       return {
         ok: true,
         detail:
           `file ${(size / 1024).toFixed(0)}KB, ${probe.duration.toFixed(2)}s, ` +
-          `${probe.videoFrames} khung, ${initHits} lượt init, ${keyHits} lượt khoá, ` +
+          `${probe.videoFrames} frames, ${initHits} init fetch(es), ${keyHits} key fetch(es), ` +
           `track: ${probe.codecs.join('+')}`,
       };
     });
@@ -546,17 +571,19 @@ async function runFmp4Download({
 }
 
 /**
- * §7 — PLAYLIST KHAI DRM PHẢI BỊ TỪ CHỐI, VÀ KHÔNG ĐƯỢC TẢI LẤY MỘT SEGMENT.
+ * §7 — A DRM-DECLARING PLAYLIST MUST BE REFUSED, AND NOT EVEN A SINGLE SEGMENT MAY BE FETCHED.
  *
- * 🔴 LỖ HỔNG THẬT ĐÃ ĐO 2026-07-19 (trước bản vá): FairPlay/PlayReady/Widevine đều cho
- * `isProtected=false` vì m3u8-parser nuốt `segment.key` khi KEYFORMAT không phải identity. Ranh
- * giới cứng §7 — thứ CLAUDE.md gọi là "KHÔNG VƯỢT" — khi đó thủng với đúng ba hệ phổ biến nhất.
+ * 🔴 REAL VULNERABILITY MEASURED 2026-07-19 (before the fix): FairPlay/PlayReady/Widevine all
+ * produced `isProtected=false` because m3u8-parser swallows `segment.key` whenever KEYFORMAT isn't
+ * identity. The §7 hard boundary — what CLAUDE.md calls "DO NOT CROSS" — was breached, and by
+ * exactly the three most common DRM systems.
  *
- * Ca này ghim HAI thứ, và thứ hai mới là thứ khó:
- *   1. job phải kết thúc `error` với thông báo NÊU TÊN HÃNG (user cần biết vì sao, không phải một
- *      câu "không hỗ trợ" trống không).
- *   2. server phải KHÔNG phục vụ một segment nào. Nếu chỉ kiểm thông báo thì bản nào tải xong rồi
- *      mới từ chối vẫn xanh — mà tải nội dung được bảo vệ về máy CHÍNH LÀ điều §7 cấm.
+ * This case pins TWO things, and the second one is the hard part:
+ *   1. the job must end in `error` with a message that NAMES THE VENDOR (the user needs to know
+ *      why, not just an empty "unsupported" sentence).
+ *   2. the server must serve ZERO segments. Checking only the message would let a build that
+ *      "downloads first, refuses afterward" pass — but downloading protected content to disk is
+ *      EXACTLY what §7 forbids.
  */
 async function runDrmPlaylistRefused({ system, wantName }) {
   const srv = await startFixtureServer({ gate: 'none' });
@@ -572,51 +599,52 @@ async function runDrmPlaylistRefused({ system, wantName }) {
           }),
         [srv.drmUrl(system), srv.masterUrl],
       );
-      // Từ chối ngay ở cửa cũng hợp lệ — miễn là có lý do rõ.
+      // Refusing right at the door is also valid — as long as there's a clear reason.
       if (!start?.ok) {
         const msg = String(start?.error ?? '');
         if (!/bảo vệ|DRM/i.test(msg)) {
           return {
             ok: false,
-            detail: `bị từ chối nhưng không nói lý do DRM: ${JSON.stringify(start)}`,
+            detail: `rejected but without a DRM reason: ${JSON.stringify(start)}`,
           };
         }
-        return { ok: true, detail: `từ chối ngay ở cửa: "${msg}"` };
+        return { ok: true, detail: `rejected right at the door: "${msg}"` };
       }
       const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
-      if (!job) return { ok: false, detail: 'job TREO (không done/error)' };
+      if (!job) return { ok: false, detail: 'job STUCK (neither done nor error)' };
       if (job.phase !== 'error') {
         return {
           ok: false,
           detail:
-            `RANH GIỚI §7 THỦNG: job kết thúc '${job.phase}' trên playlist ${system}. ` +
-            'Extension vừa tải nội dung được bảo vệ và giao file kèm dấu tích xanh.',
+            `§7 BOUNDARY BREACHED: job ended '${job.phase}' on a ${system} playlist. ` +
+            'The extension just downloaded protected content and handed over a file with a green checkmark.',
         };
       }
       const msg = String(job.error ?? '');
+      // Keep this regex verbatim: it checks the ACTUAL runtime error message (still Vietnamese).
       if (!/bảo vệ|DRM/i.test(msg)) {
         return {
           ok: false,
-          detail: `job lỗi nhưng không nói là nội dung được bảo vệ: "${msg}"`,
+          detail: `job errored but doesn't say the content is protected: "${msg}"`,
         };
       }
       if (wantName && !msg.includes(wantName)) {
         return {
           ok: false,
-          detail: `thông báo không nêu tên hãng "${wantName}": "${msg}"`,
+          detail: `message doesn't name the vendor "${wantName}": "${msg}"`,
         };
       }
-      // Cổng THẬT SỰ khó: có byte nội dung nào bị kéo về không.
+      // The REALLY hard gate: was any content byte fetched at all.
       const hits = srv.plainSegmentHits();
       if (hits > 0) {
         return {
           ok: false,
           detail:
-            `báo lỗi ĐÚNG nhưng đã kịp tải ${hits} segment nội dung được bảo vệ ` +
-            '-> vẫn là vượt ranh giới §7, chỉ là vượt xong mới xin lỗi',
+            `error reported CORRECTLY but ${hits} protected content segment(s) were already fetched ` +
+            '-> still crosses the §7 boundary, just apologizes after the fact',
         };
       }
-      return { ok: true, detail: `từ chối đúng, 0 segment bị tải: "${msg}"` };
+      return { ok: true, detail: `correctly refused, 0 segments fetched: "${msg}"` };
     });
   } finally {
     await srv.close();
@@ -624,11 +652,13 @@ async function runDrmPlaylistRefused({ system, wantName }) {
 }
 
 /**
- * W2.6 — server NHẬN request segment rồi câm tuyệt đối (mô phỏng mất mạng giữa chừng).
+ * W2.6 — server ACCEPTS a segment request then goes completely silent (simulates the network
+ * dying mid-transfer).
  *
- * Tiêu chí: job phải kết thúc bằng `error` TRONG THỜI GIAN CÓ HẠN. Trước W2.6, `fetch` không có
- * signal nào -> promise không bao giờ settle -> job kẹt 'fetching' vĩnh viễn (§2.9 hậu quả 1) và
- * ca này TREO hết JOB_TIMEOUT_MS. Số học sau W2.6: 4 lượt x 15s + backoff 3.5s = ~63s.
+ * Criterion: the job must end in `error` WITHIN A BOUNDED TIME. Before W2.6, `fetch` had no signal
+ * at all -> the promise never settled -> the job got stuck in 'fetching' forever (§2.9, failure
+ * mode 1) and this case would hang for the entire JOB_TIMEOUT_MS. Post-W2.6 arithmetic: 4 attempts
+ * x 15s + 3.5s backoff = ~63s.
  */
 async function runSegmentStall() {
   const srv = await startFixtureServer({ gate: 'none', stallSegments: true });
@@ -648,7 +678,7 @@ async function runSegmentStall() {
       if (!start?.ok) {
         return {
           ok: false,
-          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+          detail: `hls/download rejected: ${JSON.stringify(start)}`,
         };
       }
       const t0 = Date.now();
@@ -657,18 +687,18 @@ async function runSegmentStall() {
       if (!job) {
         return {
           ok: false,
-          detail: `job TREO >${budgetMs / 1000}s trên server câm — đúng bệnh §2.9 (không timeout)`,
+          detail: `job STUCK >${budgetMs / 1000}s on a silent server — exactly the §2.9 disease (no timeout)`,
         };
       }
       if (job.phase !== 'error') {
         return {
           ok: false,
-          detail: `mong đợi phase 'error', nhận '${job.phase}' sau ${secs}s`,
+          detail: `expected phase 'error', got '${job.phase}' after ${secs}s`,
         };
       }
       return {
         ok: true,
-        detail: `job báo lỗi sau ${secs}s (không treo): "${job.error ?? '?'}"`,
+        detail: `job reported an error after ${secs}s (did not hang): "${job.error ?? '?'}"`,
       };
     });
   } finally {
@@ -677,17 +707,21 @@ async function runSegmentStall() {
 }
 
 /**
- * W2.7 — GIẾT offscreen giữa lúc tải: job phải BÁO LỖI có hạn, không quay spinner vĩnh viễn.
+ * W2.7 — KILL offscreen mid-download: the job must report an error within a bounded time, not
+ * spin forever.
  *
- * Vì sao ca này bắt được thứ cổng tĩnh mù: offscreen chết IM LẶNG — Chrome không bắn sự kiện nào về
- * background. Không có tick W2.7 thì job nằm lại 'fetching' tới lúc đóng trình duyệt, và KHÔNG một
- * test thuần nào thấy được, vì lỗi nằm ở chỗ "không ai báo" chứ không ở một hàm nào cả.
+ * Why this case catches something static gates are blind to: offscreen dies SILENTLY — Chrome
+ * fires no event to background at all. Without the W2.7 tick, the job stays in 'fetching' until
+ * the browser closes, and NO pure test can see it, because the bug lives in "nobody reports it",
+ * not in any single function.
  *
- * Dùng `stallSegments` để job đứng yên ở 'fetching' (tất định), rồi `closeDocument()` giết offscreen
- * — đúng thứ Task Manager của Chrome làm. Lưu ý: giết offscreen cũng giết luôn đồng hồ retry W2.6
- * nằm trong đó, nên tick của background là thứ DUY NHẤT còn có thể cứu job.
+ * Uses `stallSegments` to hold the job still in 'fetching' (deterministic), then calls
+ * `closeDocument()` to kill offscreen — exactly what Chrome's Task Manager does. Note: killing
+ * offscreen also kills the W2.6 retry timer living inside it, so the background tick is the ONLY
+ * thing left that can save the job.
  *
- * Ngân sách: ngưỡng im 60s + chu kỳ alarm tối đa 30s (Chrome không cho dày hơn) => tệ nhất ~90s.
+ * Budget: 60s silence threshold + up to 30s alarm cycle (Chrome won't allow tighter) => worst case
+ * ~90s.
  */
 async function runOffscreenDeath() {
   const srv = await startFixtureServer({ gate: 'none', stallSegments: true });
@@ -707,10 +741,11 @@ async function runOffscreenDeath() {
       if (!start?.ok) {
         return {
           ok: false,
-          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+          detail: `hls/download rejected: ${JSON.stringify(start)}`,
         };
       }
-      // Chờ job thực sự vào 'fetching' rồi mới giết — giết sớm quá thì ta đo nhầm ca "chưa nhận việc".
+      // Wait until the job is truly in 'fetching' before killing it — killing too early would
+      // measure the wrong thing ("hasn't picked up the job yet").
       let reached = false;
       for (let i = 0; i < 40; i++) {
         const phase = await page.evaluate(async (id) => {
@@ -726,7 +761,7 @@ async function runOffscreenDeath() {
       if (!reached)
         return {
           ok: false,
-          detail: 'job không vào được phase fetching để giết offscreen',
+          detail: 'job never reached the fetching phase so offscreen could be killed',
         };
 
       const killed = await page.evaluate(async () => {
@@ -738,8 +773,8 @@ async function runOffscreenDeath() {
         }
       });
       if (killed !== true)
-        return { ok: false, detail: `không giết được offscreen: ${killed}` };
-      console.log('      [kill] offscreen đã bị đóng — nhịp tim dừng từ đây');
+        return { ok: false, detail: `could not kill offscreen: ${killed}` };
+      console.log('      [kill] offscreen was closed — the heartbeat stops from here');
 
       const t0 = Date.now();
       const job = await waitJob(page, start.jobId, budgetMs);
@@ -747,25 +782,26 @@ async function runOffscreenDeath() {
       if (!job) {
         return {
           ok: false,
-          detail: `job TREO >${budgetMs / 1000}s sau khi offscreen chết — spinner quay vĩnh viễn (§2.14)`,
+          detail: `job STUCK >${budgetMs / 1000}s after offscreen died — spinner spins forever (§2.14)`,
         };
       }
       if (job.phase !== 'error') {
         return {
           ok: false,
-          detail: `mong đợi phase 'error', nhận '${job.phase}' sau ${secs}s`,
+          detail: `expected phase 'error', got '${job.phase}' after ${secs}s`,
         };
       }
-      // Thông báo phải nói ĐÚNG chuyện gì xảy ra: "bộ xử lý đã dừng", không phải lỗi mạng chung chung.
+      // The message must state EXACTLY what happened: "the processor stopped unexpectedly", not a
+      // generic network error.
       if (!/dừng đột ngột/.test(job.error ?? '')) {
         return {
           ok: false,
-          detail: `báo lỗi sau ${secs}s nhưng SAI lý do: "${job.error ?? '?'}"`,
+          detail: `reported an error after ${secs}s but with the WRONG reason: "${job.error ?? '?'}"`,
         };
       }
       return {
         ok: true,
-        detail: `job báo lỗi sau ${secs}s, đúng lý do: "${job.error}"`,
+        detail: `job reported an error after ${secs}s, correct reason: "${job.error}"`,
       };
     });
   } finally {
@@ -774,29 +810,32 @@ async function runOffscreenDeath() {
 }
 
 /**
- * W7.1 — RANH GIỚI CỨNG §7: trang xin DRM/EME thì extension phải TỪ CHỐI TẢI, và nói rõ vì sao.
+ * W7.1 — §7 HARD BOUNDARY: a page requesting DRM/EME must have the download REFUSED, with a clear
+ * reason.
  *
- * Vì sao ca này bắt được thứ cổng tĩnh mù: trước W7.1 `CLAUDE.md` TUYÊN BỐ ranh giới này mà grep
- * `requestMediaKeySystemAccess` ra 0 hit — tức là lời tuyên bố không có gì thi hành nó. Không một
- * test thuần nào phát hiện được "một tính năng đã hứa mà không tồn tại"; chỉ chạy thật mới thấy.
+ * Why this case catches something static gates are blind to: before W7.1, `CLAUDE.md` DECLARED
+ * this boundary while grepping for `requestMediaKeySystemAccess` returned 0 hits — the declaration
+ * had nothing enforcing it. No pure test can detect "a promised feature that doesn't exist"; only
+ * running for real can.
  *
- * 🔴 Ca này KHÔNG tải nội dung DRM nào. Nó chỉ mở một trang GỌI API EME rồi kiểm tra extension có
- * từ chối hay không — đo cái KHÓA, không phải đo cách mở khoá.
+ * 🔴 This case downloads NO DRM content. It only opens a page that CALLS the EME API and checks
+ * whether the extension refuses — it measures the LOCK, not how to pick it.
  */
 async function runDrmRefused() {
   const srv = await startFixtureServer({ gate: 'none' });
   try {
     return await withBrowser(async ({ page }) => {
-      // Mở trang DRM trong một tab THẬT (cần tabId thật thì cờ DRM mới gắn đúng chỗ).
+      // Open the DRM page in a REAL tab (needs a real tabId for the DRM flag to attach in the
+      // right place).
       const tabId = await page.evaluate(async (url) => {
         const t = await chrome.tabs.create({ url, active: false });
         return t.id;
       }, srv.drmPageUrl);
       if (typeof tabId !== 'number') {
-        return { ok: false, detail: 'không mở được tab trang DRM' };
+        return { ok: false, detail: 'could not open the DRM page tab' };
       }
 
-      // Chờ content script bắt được lời gọi EME rồi báo về background.
+      // Wait for the content script to catch the EME call and report it back to background.
       let systems = [];
       for (let i = 0; i < 40; i++) {
         systems = await page.evaluate(async (id) => {
@@ -810,17 +849,17 @@ async function runDrmRefused() {
         return {
           ok: false,
           detail:
-            'KHÔNG phát hiện được DRM — ranh giới §7 vẫn chỉ là lời tuyên bố suông',
+            'DRM was NOT detected — the §7 boundary is still just words on paper',
         };
       }
       if (!systems.includes('Widevine')) {
         return {
           ok: false,
-          detail: `phát hiện DRM nhưng sai tên: ${JSON.stringify(systems)}`,
+          detail: `DRM detected but with the wrong name: ${JSON.stringify(systems)}`,
         };
       }
 
-      // Cửa 1: HLS. Phải bị từ chối, kèm lý do đọc được.
+      // Door 1: HLS. Must be refused, with a readable reason.
       const hls = await page.evaluate(
         ([v, m, id]) =>
           chrome.runtime.sendMessage({
@@ -834,17 +873,17 @@ async function runDrmRefused() {
       if (hls?.ok !== false) {
         return {
           ok: false,
-          detail: `hls/download KHÔNG bị chặn trên tab DRM: ${JSON.stringify(hls)}`,
+          detail: `hls/download was NOT blocked on the DRM tab: ${JSON.stringify(hls)}`,
         };
       }
       if (!/DRM/i.test(hls.error ?? '')) {
         return {
           ok: false,
-          detail: `bị chặn nhưng lý do không nói tới DRM: "${hls.error}"`,
+          detail: `blocked, but the reason doesn't mention DRM: "${hls.error}"`,
         };
       }
 
-      // Cửa 2: progressive. Cùng ranh giới, phải bịt luôn — không để hở đường vòng.
+      // Door 2: progressive. Same boundary, must be sealed too — no leaving a bypass open.
       const prog = await page.evaluate(
         ([url, id]) =>
           chrome.runtime.sendMessage({
@@ -857,11 +896,12 @@ async function runDrmRefused() {
       if (prog?.ok !== false) {
         return {
           ok: false,
-          detail: `download/progressive KHÔNG bị chặn — ranh giới hở đường vòng: ${JSON.stringify(prog)}`,
+          detail: `download/progressive was NOT blocked — boundary has a bypass: ${JSON.stringify(prog)}`,
         };
       }
 
-      // Cửa 3: tab SẠCH vẫn phải tải được — chặn oan còn tệ hơn bỏ sót.
+      // Door 3: a CLEAN tab must still be able to download — blocking it wrongly is worse than
+      // missing a real case.
       const clean = await page.evaluate(
         ([v, m]) =>
           chrome.runtime.sendMessage({
@@ -875,13 +915,13 @@ async function runDrmRefused() {
       if (clean?.ok !== true) {
         return {
           ok: false,
-          detail: `tab SẠCH bị chặn OAN: ${JSON.stringify(clean)}`,
+          detail: `a CLEAN tab was blocked WRONGLY: ${JSON.stringify(clean)}`,
         };
       }
 
       return {
         ok: true,
-        detail: `phát hiện ${systems.join(', ')}; chặn cả HLS lẫn progressive, tab sạch vẫn tải được — "${hls.error}"`,
+        detail: `detected ${systems.join(', ')}; blocked both HLS and progressive, clean tab still downloads — "${hls.error}"`,
       };
     });
   } finally {
@@ -890,13 +930,13 @@ async function runDrmRefused() {
 }
 
 /**
- * W2.7 — tải PROGRESSIVE (.mp4) cũng phải có lưới liveness, không chỉ HLS.
+ * W2.7 — downloading PROGRESSIVE (.mp4) also needs a liveness net, not just HLS.
  *
- * W2.5 định tuyến .mp4 qua offscreen để mang được Referer spoof. Hệ quả ít ai để ý: từ đó lượt tải
- * progressive PHỤ THUỘC vào offscreen y như HLS. Offscreen chết giữa lúc fetch ⇒ `finally` của nó
- * không bao giờ chạy ⇒ không có `download/progress` state 'interrupted' nào được gửi ⇒ entry nằm
- * lại `in_progress` VĨNH VIỄN, popup quay spinner. Tệ hơn: `sweepStaleSpoofRules` coi 'in_progress'
- * là còn sống nên rule spoof của nó bị ghim nguyên phiên.
+ * W2.5 routed .mp4 through offscreen so it can carry the Referer spoof. A side effect few noticed:
+ * from then on, a progressive download DEPENDS on offscreen just like HLS. If offscreen dies
+ * mid-fetch ⇒ its `finally` block never runs ⇒ no `download/progress` 'interrupted' state is ever
+ * sent ⇒ the entry stays `in_progress` FOREVER, popup spins forever. Worse: `sweepStaleSpoofRules`
+ * treats 'in_progress' as still alive, so its spoof rule gets pinned for the whole session.
  */
 async function runProgressiveOffscreenDeath() {
   const srv = await startFixtureServer({ gate: 'none', stallSegments: true });
@@ -915,10 +955,10 @@ async function runProgressiveOffscreenDeath() {
       if (!start?.ok) {
         return {
           ok: false,
-          detail: `download/progressive bị từ chối: ${JSON.stringify(start)}`,
+          detail: `download/progressive rejected: ${JSON.stringify(start)}`,
         };
       }
-      // Chờ entry thực sự vào 'in_progress' rồi mới giết offscreen.
+      // Wait until the entry is truly 'in_progress' before killing offscreen.
       let ready = false;
       for (let i = 0; i < 40; i++) {
         const st = await page.evaluate(async (key) => {
@@ -934,7 +974,7 @@ async function runProgressiveOffscreenDeath() {
       if (!ready)
         return {
           ok: false,
-          detail: 'entry không vào được in_progress để giết offscreen',
+          detail: 'entry never reached in_progress so offscreen could be killed',
         };
 
       const killed = await page.evaluate(async () => {
@@ -946,8 +986,8 @@ async function runProgressiveOffscreenDeath() {
         }
       });
       if (killed !== true)
-        return { ok: false, detail: `không giết được offscreen: ${killed}` };
-      console.log('      [kill] offscreen đã bị đóng giữa lúc fetch .mp4');
+        return { ok: false, detail: `could not kill offscreen: ${killed}` };
+      console.log('      [kill] offscreen was closed mid .mp4 fetch');
 
       const t0 = Date.now();
       while (Date.now() - t0 < budgetMs) {
@@ -960,25 +1000,25 @@ async function runProgressiveOffscreenDeath() {
           if (entry.state !== 'interrupted') {
             return {
               ok: false,
-              detail: `mong đợi 'interrupted', nhận '${entry.state}' sau ${secs}s`,
+              detail: `expected 'interrupted', got '${entry.state}' after ${secs}s`,
             };
           }
           if (!/dừng đột ngột/.test(entry.error ?? '')) {
             return {
               ok: false,
-              detail: `chốt sau ${secs}s nhưng SAI lý do: "${entry.error ?? '?'}"`,
+              detail: `settled after ${secs}s but with the WRONG reason: "${entry.error ?? '?'}"`,
             };
           }
           return {
             ok: true,
-            detail: `entry chốt 'interrupted' sau ${secs}s, đúng lý do: "${entry.error}"`,
+            detail: `entry settled 'interrupted' after ${secs}s, correct reason: "${entry.error}"`,
           };
         }
         await new Promise((r) => setTimeout(r, 1000));
       }
       return {
         ok: false,
-        detail: `entry KẸT 'in_progress' >${budgetMs / 1000}s sau khi offscreen chết — spinner vĩnh viễn`,
+        detail: `entry STUCK 'in_progress' >${budgetMs / 1000}s after offscreen died — spinner spins forever`,
       };
     });
   } finally {
@@ -987,14 +1027,16 @@ async function runProgressiveOffscreenDeath() {
 }
 
 /**
- * W2.7 — job XẾP HÀNG không được bị chốt "chết" OAN.
+ * W2.7 — a QUEUED job must NOT be wrongly reaped as "dead".
  *
- * Vì sao ca này tồn tại: job HLS chạy TUẦN TỰ (một instance ffmpeg). Job #2 nằm im trong hàng đợi
- * suốt thời gian job #1 tải — mà job #1 chạy vài phút là chuyện thường. Nếu nhịp tim chỉ đập lúc
- * job ĐANG CHẠY thì job #2 im >60s và bị tick W2.7 giết oan, dù offscreen hoàn toàn khoẻ.
+ * Why this case exists: HLS jobs run SEQUENTIALLY (one ffmpeg instance). Job #2 sits idle in the
+ * queue for the entire time job #1 is downloading — and job #1 taking a few minutes is normal. If
+ * the heartbeat only beats while a job is ACTUALLY RUNNING, job #2 stays silent >60s and gets
+ * wrongly killed by the W2.7 tick, even though offscreen is perfectly healthy.
  *
- * 👉 Giết oan một lượt tải khoẻ còn TỆ HƠN cái treo mà W2.7 sinh ra để chữa. Đây là ca canh đúng
- * ranh giới đó: job #1 stall 63s (đủ lâu để vượt ngưỡng 60s), job #2 phải sống qua được.
+ * 👉 Wrongly killing a healthy download is WORSE than the hang that W2.7 was created to fix. This
+ * case guards exactly that boundary: job #1 stalls for 63s (long enough to cross the 60s
+ * threshold), job #2 must survive.
  */
 async function runQueuedJobNotReaped() {
   const srv = await startFixtureServer({ gate: 'none', stallSegments: true });
@@ -1016,10 +1058,11 @@ async function runQueuedJobNotReaped() {
       if (!a?.ok || !b?.ok) {
         return {
           ok: false,
-          detail: `không xếp được 2 job: ${JSON.stringify({ a, b })}`,
+          detail: `could not queue 2 jobs: ${JSON.stringify({ a, b })}`,
         };
       }
-      // Job #2 xếp sau job #1 (đang stall 63s). Theo dõi nó qua mốc 60s — mốc mà tick sẽ soi tới.
+      // Job #2 is queued behind job #1 (which is stalling for 63s). Watch it cross the 60s
+      // threshold — the mark the tick will be checking against.
       const deadline = Date.now() + 75_000;
       while (Date.now() < deadline) {
         const job = await page.evaluate(async (id) => {
@@ -1030,14 +1073,14 @@ async function runQueuedJobNotReaped() {
           const secs = ((75_000 - (deadline - Date.now())) / 1000).toFixed(1);
           return {
             ok: false,
-            detail: `job XẾP HÀNG bị giết OAN sau ${secs}s dù offscreen còn sống: "${job.error}"`,
+            detail: `QUEUED job was WRONGLY killed after ${secs}s even though offscreen is still alive: "${job.error}"`,
           };
         }
         await new Promise((r) => setTimeout(r, 1000));
       }
       return {
         ok: true,
-        detail: 'job xếp hàng sống qua mốc 60s — không bị tick giết oan',
+        detail: 'queued job survived the 60s mark — not wrongly killed by the tick',
       };
     });
   } finally {
@@ -1046,12 +1089,13 @@ async function runQueuedJobNotReaped() {
 }
 
 /**
- * W2.5 — tải progressive .mp4 qua `download/progressive` rồi kiểm file trên đĩa.
+ * W2.5 — download progressive .mp4 via `download/progressive` then check the file on disk.
  *
- * Tín hiệu ĐỘC LẬP VỚI ĐƯỜNG (cũ trực tiếp vs mới qua offscreen): SERVER có 403 lần nào không +
- * có phục vụ byte mp4 không. Đường cũ (chrome.downloads.download thẳng) KHÔNG nhận Referer spoof
- * -> server 403 -> hits=0 (đã ĐO 2026-07-18). Đường mới (offscreen fetch) mang Referer spoof vì
- * fetch của extension là xmlhttprequest tab-less -> khớp rule DNR -> server phục vụ 200/206.
+ * A signal INDEPENDENT OF THE PATH (old direct vs new via-offscreen): did the SERVER ever 403, and
+ * did it serve mp4 bytes. The old path (chrome.downloads.download directly) does NOT get the
+ * Referer spoof -> server 403s -> hits=0 (MEASURED 2026-07-18). The new path (offscreen fetch)
+ * carries the Referer spoof because the extension's own fetch is a tab-less xmlhttprequest ->
+ * matches the DNR rule -> server serves 200/206.
  */
 async function runProgressive({ gate }) {
   const srv = await startFixtureServer({ gate });
@@ -1069,12 +1113,13 @@ async function runProgressive({ gate }) {
       if (!start?.ok) {
         return {
           ok: false,
-          detail: `download/progressive bị từ chối: ${JSON.stringify(start)}`,
+          detail: `download/progressive rejected: ${JSON.stringify(start)}`,
         };
       }
       const file = await waitDownloadedFile(page, 30_000);
-      // DownloadEntry của extension (thứ popup HIỂN THỊ) PHẢI tới 'complete' — bắt cả race "blob nhỏ
-      // complete trước khi onChanged khớp entry" mà chrome.downloads state không lộ ra.
+      // The extension's DownloadEntry (what the popup DISPLAYS) MUST reach 'complete' — this also
+      // catches the "tiny blob completes before onChanged matches the entry" race, which
+      // chrome.downloads state alone doesn't expose.
       let entryState = null;
       for (let i = 0; i < 20; i++) {
         entryState = await page.evaluate(async (key) => {
@@ -1087,20 +1132,21 @@ async function runProgressive({ gate }) {
       if (entryState !== 'complete') {
         return {
           ok: false,
-          detail: `DownloadEntry kẹt ở "${entryState}" (popup sẽ hiện sai trạng thái)`,
+          detail: `DownloadEntry stuck at "${entryState}" (popup will show the wrong state)`,
         };
       }
       const blocked = srv.blocked().length;
       const hits = srv.progressiveHits();
-      // Cổng bật mà server chưa từng 403 và có phục vụ byte = spoof đã áp cho cú fetch tải.
+      // The gate passes only if the server never 403'd and did serve bytes = the spoof applied to
+      // the actual download fetch.
       if (blocked > 0 || hits === 0) {
         return {
           ok: false,
-          detail: `server chặn ${blocked} request 403 (thiếu Referer), phục vụ ${hits} lần mp4 — spoof KHÔNG áp cho đường tải`,
+          detail: `server blocked ${blocked} request(s) with 403 (missing Referer), served mp4 ${hits} time(s) — spoof did NOT apply to the download path`,
         };
       }
       if (!file)
-        return { ok: false, detail: 'không có file nào rơi xuống đĩa' };
+        return { ok: false, detail: 'no file landed on disk' };
       if (file.state !== 'complete') {
         return {
           ok: false,
@@ -1110,7 +1156,7 @@ async function runProgressive({ gate }) {
       if (!existsSync(file.filename)) {
         return {
           ok: false,
-          detail: `downloads báo complete nhưng file không tồn tại: ${file.filename}`,
+          detail: `downloads reports complete but file does not exist: ${file.filename}`,
         };
       }
       const size = statSync(file.filename).size;
@@ -1118,21 +1164,21 @@ async function runProgressive({ gate }) {
       if (probe.error)
         return {
           ok: false,
-          detail: `ffprobe không đọc được file: ${probe.error}`,
+          detail: `ffprobe could not read the file: ${probe.error}`,
         };
       if (!probe.codecs.includes('video')) {
         return {
           ok: false,
-          detail: `file ra KHÔNG có track hình (streams: ${probe.codecs.join(',') || 'rỗng'})`,
+          detail: `output file has NO video track (streams: ${probe.codecs.join(',') || 'empty'})`,
         };
       }
       const errLog = logs.filter((l) => l.includes('error:')).slice(-3);
       return {
         ok: true,
         detail:
-          `file ${size}B, ${probe.videoFrames} khung, track: ${probe.codecs.join('+')}, ` +
-          `server phục vụ ${hits} lần, 0 lần 403` +
-          `${errLog.length ? ` (log lỗi: ${errLog.join(' | ')})` : ''}`,
+          `file ${size}B, ${probe.videoFrames} frames, track: ${probe.codecs.join('+')}, ` +
+          `server served it ${hits} time(s), 0 403s` +
+          `${errLog.length ? ` (error log: ${errLog.join(' | ')})` : ''}`,
       };
     });
   } finally {
@@ -1140,7 +1186,7 @@ async function runProgressive({ gate }) {
   }
 }
 
-/** Chỉ bấm "Chất lượng" (manifest/variants) — đúng cú fetch ĐẦU TIÊN của flow. */
+/** Just click "Quality" (manifest/variants) — the exact FIRST fetch of the flow. */
 async function runVariants({ gate }) {
   const srv = await startFixtureServer({ gate });
   try {
@@ -1155,12 +1201,12 @@ async function runVariants({ gate }) {
         srv.masterUrl,
       );
       if (res?.ok) {
-        return { ok: true, detail: `ra ${res.variants.length} chất lượng` };
+        return { ok: true, detail: `produced ${res.variants.length} quality option(s)` };
       }
       const b = srv.blocked().length;
       return {
         ok: false,
-        detail: `${res?.error ?? JSON.stringify(res)}${b ? ` — server chặn ${b} request vì thiếu Referer` : ''}`,
+        detail: `${res?.error ?? JSON.stringify(res)}${b ? ` — server blocked ${b} request(s) for missing Referer` : ''}`,
       };
     });
   } finally {
@@ -1169,34 +1215,38 @@ async function runVariants({ gate }) {
 }
 
 /**
- * W2.1 — BẮT & PHÁT LẠI header THẬT của player, thay vì BỊA Referer/Origin (§2.11).
+ * W2.1 — CAPTURE & REPLAY the player's REAL headers, instead of FABRICATING Referer/Origin (§2.11).
  *
- * VÌ SAO CA NÀY LÀ THỨ DUY NHẤT CHỨNG MINH ĐƯỢC W2.1: cổng `Referer` mà các ca trước dùng thì bản
- * BỊA cũng qua được — Referer suy ra từ `pageUrl` là xong. Ở đây server đòi
- * `X-Playback-Session-Id: <token ngẫu nhiên do trang sinh>`. Token đó KHÔNG suy được từ URL, host,
- * hay pageUrl; con đường DUY NHẤT để extension có nó là nghe `onSendHeaders` lúc player của trang
- * fetch manifest, rồi phát lại qua DNR. Bản BỊA trượt cổng này 100%.
+ * WHY THIS IS THE ONLY CASE THAT PROVES W2.1: the plain `Referer` gate used by earlier cases can
+ * also be passed by a FABRICATED value — Referer can just be derived from `pageUrl`. Here the
+ * server demands `X-Playback-Session-Id: <a random token generated by the page>`. That token
+ * CANNOT be derived from the URL, the host, or pageUrl; the ONLY way for the extension to get it is
+ * to listen on `onSendHeaders` while the page's player fetches the manifest, then replay it via
+ * DNR. A FABRICATED value fails this gate 100% of the time.
  *
- * Trình tự: mở trang player (player tự fetch manifest kèm token) -> extension bắt được header ->
- * user bấm tải -> mọi request của extension phải mang token thì mới qua nổi 403.
+ * Sequence: open the player page (the player itself fetches the manifest carrying the token) ->
+ * extension captures the header -> user clicks download -> every extension request must carry the
+ * token to get past the 403.
  */
 async function runRealHeaderReplay() {
   const srv = await startFixtureServer({ tokenGate: true });
   try {
     return await withBrowser(async ({ page }) => {
-      // Bước 1: trang player chạy thật trong TAB RIÊNG (không đụng `page` — đó là trang extension,
-      // nơi duy nhất đọc được chrome.storage), phát request có token -> extension quan sát được.
+      // Step 1: the real player page runs in its OWN TAB (don't touch `page` — that's the
+      // extension page, the only place that can read chrome.storage), fires a request with a
+      // token -> the extension observes it.
       const playerTab = await page.context().newPage();
       await playerTab.goto(srv.playerPageUrl);
       const played = await playerTab.evaluate(() => window.__played);
       if (!played) {
         return {
           ok: false,
-          detail: 'harness hỏng: player của trang không fetch được manifest',
+          detail: 'harness broken: the page player could not fetch the manifest',
         };
       }
-      // Bước 2: chờ background ghi xong bản chụp header vào storage.session. Khoá `media:<tabId>`
-      // cho luôn tabId của tab player -> khỏi phải đoán bằng chrome.tabs.query.
+      // Step 2: wait for background to finish writing the captured headers snapshot to
+      // storage.session. The `media:<tabId>` key already carries the player's tabId -> no need to
+      // guess with chrome.tabs.query.
       const found = await page.evaluate(async (masterUrl) => {
         for (let i = 0; i < 40; i++) {
           const all = await chrome.storage.session.get(null);
@@ -1216,18 +1266,18 @@ async function runRealHeaderReplay() {
         return {
           ok: false,
           detail:
-            'KHÔNG bắt được header nào của player (onSendHeaders không chạy, ' +
-            'hoặc bản chụp bị nuốt ở merge upsertMedia)',
+            'captured NO player headers at all (onSendHeaders didn\'t fire, ' +
+            'or the snapshot was swallowed during the upsertMedia merge)',
         };
       }
       if (captured['x-playback-session-id'] !== PLAYER_TOKEN) {
         return {
           ok: false,
-          detail: `bắt được header nhưng thiếu/sai token: ${JSON.stringify(captured)}`,
+          detail: `captured a header but it's missing/wrong the token: ${JSON.stringify(captured)}`,
         };
       }
 
-      // Bước 3: tải thật — mọi request phải mang token mới qua được cổng 403.
+      // Step 3: the real download — every request must carry the token to get past the 403 gate.
       const tabId = found.tabId;
       const start = await page.evaluate(
         ([variantUrl, mediaUrl, tid]) =>
@@ -1242,30 +1292,30 @@ async function runRealHeaderReplay() {
       if (!start?.ok) {
         return {
           ok: false,
-          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+          detail: `hls/download rejected: ${JSON.stringify(start)}`,
         };
       }
       const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
       if (!job) {
-        return { ok: false, detail: `job TREO sau ${JOB_TIMEOUT_MS / 1000}s` };
+        return { ok: false, detail: `job STUCK after ${JOB_TIMEOUT_MS / 1000}s` };
       }
       if (job.phase !== 'done') {
         const bad = srv.requests.filter((r) => r.status === 403).length;
         return {
           ok: false,
           detail:
-            `job ${job.phase}: ${job.error ?? '?'} — server đã 403 ${bad} request ` +
-            'vì thiếu token (header thật KHÔNG được phát lại)',
+            `job ${job.phase}: ${job.error ?? '?'} — server 403'd ${bad} request(s) ` +
+            'for missing token (the real header was NOT replayed)',
         };
       }
-      // Bằng chứng dương: có request của extension mang đúng token tới server.
+      // Positive evidence: some extension request actually carried the correct token to the server.
       const withToken = srv.requests.filter(
         (r) => r.token === PLAYER_TOKEN && r.status === 200,
       ).length;
       const blocked = srv.requests.filter((r) => r.status === 403).length;
       return {
         ok: true,
-        detail: `${withToken} request mang token thật qua cổng, ${blocked} bị chặn`,
+        detail: `${withToken} request(s) carried the real token through the gate, ${blocked} blocked`,
       };
     });
   } finally {
@@ -1291,7 +1341,7 @@ async function runDualHostToken(mode) {
   const srv = await startFixtureServer({ dualToken: mode });
   try {
     return await withBrowser(async ({ page }) => {
-      // Bước 1: hai tab player, mỗi tab fetch manifest của slot mình KÈM token của slot đó.
+      // Step 1: two player tabs, each fetching its own slot's manifest WITH its own token.
       const tabA = await page.context().newPage();
       await tabA.goto(srv.dualPlayerAUrl);
       const tabB = await page.context().newPage();
@@ -1301,11 +1351,12 @@ async function runDualHostToken(mode) {
       if (!okA || !okB) {
         return {
           ok: false,
-          detail: `harness hỏng: player không fetch được manifest (a=${okA}, b=${okB})`,
+          detail: `harness broken: player could not fetch the manifest (a=${okA}, b=${okB})`,
         };
       }
 
-      // Bước 2: chờ extension ghi bản chụp header (kèm token) cho CẢ HAI media URL + học tabId.
+      // Step 2: wait for the extension to write a header snapshot (with token) for BOTH media URLs
+      // + learn their tabIds.
       const found = await page.evaluate(
         async ([urlA, urlB]) => {
           const findFor = (all, url) => {
@@ -1332,12 +1383,12 @@ async function runDualHostToken(mode) {
       if (!found) {
         return {
           ok: false,
-          detail: 'KHÔNG bắt được header token của cả hai player',
+          detail: 'did NOT capture the token header of both players',
         };
       }
 
-      // Bước 3: tải A trước, chờ start ack (rule DNR của A đã sống), RỒI tải B để applySpoof của B
-      // quan sát được rule của A và ra quyết định suppress.
+      // Step 3: start A first, wait for its start ack (its DNR rule is now alive), THEN start B so
+      // B's applySpoof observes A's rule and makes the suppression decision.
       const startDl = (mediaUrl, tabId) =>
         page.evaluate(
           ([m, t]) =>
@@ -1351,11 +1402,11 @@ async function runDualHostToken(mode) {
         );
       const startA = await startDl(srv.dualMediaAUrl, found.a.tabId);
       if (!startA?.ok) {
-        return { ok: false, detail: `job A bị từ chối: ${JSON.stringify(startA)}` };
+        return { ok: false, detail: `job A rejected: ${JSON.stringify(startA)}` };
       }
       const startB = await startDl(srv.dualMediaBUrl, found.b.tabId);
       if (!startB?.ok) {
-        return { ok: false, detail: `job B bị từ chối: ${JSON.stringify(startB)}` };
+        return { ok: false, detail: `job B rejected: ${JSON.stringify(startB)}` };
       }
 
       const jobA = await waitJob(page, startA.jobId, JOB_TIMEOUT_MS);
@@ -1363,56 +1414,56 @@ async function runDualHostToken(mode) {
       if (!jobA || !jobB) {
         return {
           ok: false,
-          detail: `job TREO (a=${jobA?.phase}, b=${jobB?.phase})`,
+          detail: `job STUCK (a=${jobA?.phase}, b=${jobB?.phase})`,
         };
       }
 
-      // Bằng chứng từ server: slot nào được phục vụ 200, slot nào bị 403.
+      // Evidence from the server: which slot got served 200, which got 403'd.
       const seg = (slot, status) =>
         srv.requests.filter(
           (r) => r.url.startsWith(`/hls-dual/${slot}/seg`) && r.status === status,
         ).length;
 
       if (mode === 'same') {
-        // Cả hai PHẢI 'done'; bộ suppress theo-tồn-tại sẽ 403 B ở đây.
+        // Both MUST be 'done'; an existence-based suppressor would 403 B here.
         if (jobA.phase !== 'done' || jobB.phase !== 'done') {
           return {
             ok: false,
             detail:
-              `same-token: cả hai phải 'done' nhưng a=${jobA.phase}/${jobA.error ?? ''} ` +
+              `same-token: both should be 'done' but a=${jobA.phase}/${jobA.error ?? ''} ` +
               `b=${jobB.phase}/${jobB.error ?? ''} (seg200 a=${seg('a', 200)} b=${seg('b', 200)}, seg403 b=${seg('b', 403)})`,
           };
         }
         return {
           ok: true,
-          detail: `same-token: cả hai tải xong (seg200 a=${seg('a', 200)}, b=${seg('b', 200)})`,
+          detail: `same-token: both finished (seg200 a=${seg('a', 200)}, b=${seg('b', 200)})`,
         };
       }
 
-      // mode === 'different': job đầu giữ token & xong; job sau thất bại RÕ.
+      // mode === 'different': the first job keeps its token & finishes; the second fails CLEARLY.
       if (jobA.phase !== 'done') {
         return {
           ok: false,
           detail:
-            `different-token: job ĐẦU (A) phải giữ token và 'done' nhưng a=${jobA.phase}/${jobA.error ?? ''} ` +
-            `— token bị job sau giật (seg403 a=${seg('a', 403)})`,
+            `different-token: the FIRST job (A) should keep its token and be 'done' but a=${jobA.phase}/${jobA.error ?? ''} ` +
+            `— its token was stolen by the later job (seg403 a=${seg('a', 403)})`,
         };
       }
       if (jobB.phase === 'done') {
         return {
           ok: false,
-          detail: `different-token: job SAU (B) phải THẤT BẠI RÕ, không được lặng lẽ 'done' (seg200 b=${seg('b', 200)})`,
+          detail: `different-token: the LATER job (B) should FAIL CLEARLY, not silently end 'done' (seg200 b=${seg('b', 200)})`,
         };
       }
       if (seg('b', 200) > 0) {
         return {
           ok: false,
-          detail: `different-token: B KHÔNG được nhận segment 200 nào (đã nhận ${seg('b', 200)} — nội dung sai lọt xuống)`,
+          detail: `different-token: B should NOT receive any 200 segments (received ${seg('b', 200)} — wrong content leaked through)`,
         };
       }
       return {
         ok: true,
-        detail: `different-token: A giữ token & 'done' (seg200 a=${seg('a', 200)}), B thất bại rõ (${jobB.phase}, seg403 b=${seg('b', 403)})`,
+        detail: `different-token: A kept its token & finished (seg200 a=${seg('a', 200)}), B failed clearly (${jobB.phase}, seg403 b=${seg('b', 403)})`,
       };
     });
   } finally {
@@ -1420,20 +1471,22 @@ async function runDualHostToken(mode) {
   }
 }
 
-// --- Danh sách ca ------------------------------------------------------------------------------
+// --- Scenario list -------------------------------------------------------------------------
 
 /**
- * W1.5 — DASH tải được THẬT, và file ra phải có ĐỦ hình + tiếng.
+ * W1.5 — DASH must download for REAL, and the output file must have BOTH video AND audio.
  *
- * Vì sao ca này nặng ký: DASH LUÔN tách tiếng, và `resolvedUri` của MỌI representation (kể cả
- * tiếng) đều là chính file .mpd. Nghĩa là mọi tầng định danh track bằng URL sẽ IM LẶNG tải nhầm
- * — bệnh CÂM §2.1. Kiểm "có track audio" ở đây là thứ DUY NHẤT bắt được nó.
+ * Why this case carries weight: DASH ALWAYS demuxes audio, and the `resolvedUri` of EVERY
+ * representation (including audio) is the .mpd file itself. That means any layer that identifies
+ * a track by URL will SILENTLY grab the wrong one — the SILENT-corruption disease from §2.1.
+ * Checking "there's an audio track" here is the ONLY thing that catches it.
  */
 async function runDashDownload() {
   const srv = await startDemuxedServer();
   try {
     return await withBrowser(async ({ page }) => {
-      // Bước 1: liệt kê chất lượng như popup làm -> lấy id representation hình + tiếng.
+      // Step 1: list qualities the way the popup does -> grab the video and audio representation
+      // ids.
       const vars = await page.evaluate(
         (url) =>
           chrome.runtime.sendMessage({
@@ -1446,24 +1499,25 @@ async function runDashDownload() {
       if (!vars?.ok)
         return {
           ok: false,
-          detail: `manifest/variants lỗi: ${JSON.stringify(vars)}`,
+          detail: `manifest/variants failed: ${JSON.stringify(vars)}`,
         };
       const variant = vars.variants?.[0];
       const audioId = variant?.audioRenditions?.find((r) => r.selected)?.id;
       if (!variant?.id)
         return {
           ok: false,
-          detail: `variant DASH không có id: ${JSON.stringify(vars)}`,
+          detail: `DASH variant has no id: ${JSON.stringify(vars)}`,
         };
-      // Thiếu audioId = popup sẽ tải đường một-input -> file CÂM. Bắt ngay tại đây.
+      // Missing audioId = the popup will download the single-input path -> a MUTE file. Catch it
+      // right here.
       if (!audioId) {
         return {
           ok: false,
-          detail: `DASH không lộ ra rendition tiếng nào -> chắc chắn ra file CÂM (variant: ${JSON.stringify(variant)})`,
+          detail: `DASH exposes no audio rendition -> the output is guaranteed to be MUTE (variant: ${JSON.stringify(variant)})`,
         };
       }
 
-      // Bước 2: tải đúng như popup gửi.
+      // Step 2: download exactly the way the popup sends it.
       const start = await page.evaluate(
         ([variantUrl, mediaUrl, variantId, aId]) =>
           chrome.runtime.sendMessage({
@@ -1480,18 +1534,18 @@ async function runDashDownload() {
       if (!start?.ok)
         return {
           ok: false,
-          detail: `hls/download lỗi: ${JSON.stringify(start)}`,
+          detail: `hls/download failed: ${JSON.stringify(start)}`,
         };
 
       const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
       if (job.phase !== 'done') {
         return {
           ok: false,
-          detail: `job không xong: phase=${job.phase} error=${job.error ?? '-'}`,
+          detail: `job did not finish: phase=${job.phase} error=${job.error ?? '-'}`,
         };
       }
       const file = await waitDownloadedFile(page, 30_000);
-      if (!file) return { ok: false, detail: 'không thấy file trên đĩa' };
+      if (!file) return { ok: false, detail: 'no file seen on disk' };
       if (file.state !== 'complete') {
         return {
           ok: false,
@@ -1501,31 +1555,31 @@ async function runDashDownload() {
       if (!existsSync(file.filename)) {
         return {
           ok: false,
-          detail: `downloads báo complete nhưng file không tồn tại: ${file.filename}`,
+          detail: `downloads reports complete but file does not exist: ${file.filename}`,
         };
       }
 
       const probe = probeFile(file.filename);
       if (probe.error)
-        return { ok: false, detail: `ffprobe không đọc được: ${probe.error}` };
+        return { ok: false, detail: `ffprobe could not read it: ${probe.error}` };
       if (!probe.codecs.includes('video')) {
         return {
           ok: false,
-          detail: `file ra KHÔNG có hình (streams: ${probe.codecs.join(',') || 'rỗng'})`,
+          detail: `output file has NO video (streams: ${probe.codecs.join(',') || 'empty'})`,
         };
       }
-      // 🔴 Lưới CHỐNG CÂM — lý do ca này tồn tại.
+      // 🔴 The ANTI-MUTE net — the whole reason this case exists.
       if (!probe.codecs.includes('audio')) {
         return {
           ok: false,
-          detail: `file ra CÂM: không có track tiếng (streams: ${probe.codecs.join(',')}) — DASH tách tiếng bị bỏ rơi`,
+          detail: `output file is MUTE: no audio track (streams: ${probe.codecs.join(',')}) — DASH demuxed audio got dropped`,
         };
       }
       if (srv.dashAudioHits() === 0) {
         return {
           ok: false,
           detail:
-            'không fetch segment tiếng DASH nào -> tiếng không thật sự được tải',
+            'no DASH audio segment was fetched at all -> the audio was never actually downloaded',
         };
       }
       const size = statSync(file.filename).size;
@@ -1533,8 +1587,8 @@ async function runDashDownload() {
         ok: true,
         detail:
           `file ${(size / 1024).toFixed(0)}KB, ${probe.duration.toFixed(2)}s, ` +
-          `track: ${probe.codecs.join('+')}, đã fetch ${srv.dashSegmentHits()} segment DASH ` +
-          `(tiếng: ${srv.dashAudioHits()})`,
+          `track: ${probe.codecs.join('+')}, fetched ${srv.dashSegmentHits()} DASH segment(s) ` +
+          `(audio: ${srv.dashAudioHits()})`,
       };
     });
   } finally {
@@ -1543,15 +1597,18 @@ async function runDashDownload() {
 }
 
 /**
- * W1.4 — chỗ nối (EXT-X-DISCONTINUITY) phải ĐẾM ĐƯỢC qua đúng đường popup dùng (`hls/estimate`),
- * và phải đếm ĐÚNG HAI CHIỀU.
+ * W1.4 — a splice point (EXT-X-DISCONTINUITY) must be COUNTABLE through the exact path the popup
+ * uses (`hls/estimate`), and must count correctly in BOTH DIRECTIONS.
  *
- * Vì sao cần cả chiều "sạch -> 0": cảnh báo oan làm user bỏ một lượt tải hoàn toàn khoẻ mạnh, mà
- * ca đó KHÔNG có triệu chứng nào để ai đi tìm. ĐO THẬT (m3u8-parser@7.2.0) cho thấy cách đếm hiển
- * nhiên `discontinuityStarts.length` sai cả hai chiều — nên chiều âm ở đây không phải thủ tục.
+ * Why the "clean -> 0" direction matters too: a false-positive warning makes the user abandon a
+ * download that's perfectly healthy, and that case has NO symptom anyone would go looking for.
+ * MEASURED FOR REAL (m3u8-parser@7.2.0) shows the "obvious" count
+ * `discontinuityStarts.length` is wrong in BOTH directions — so the negative direction here isn't
+ * mere formality.
  *
- * Popup dựng câu cảnh báo từ ĐÚNG con số này; bản thân hộp thoại confirm thì e2e không với tới
- * (dự án chưa có test component React) — khoảng hở đó ghi rõ ở PROMPT-SESSION-MOI.md.
+ * The popup builds its warning sentence from EXACTLY this number; the confirm dialog itself is out
+ * of e2e's reach (the project has no React component tests yet) — that gap is documented in
+ * PROMPT-SESSION-MOI.md.
  */
 async function runDiscontinuityCounted() {
   const srv = await startFixtureServer({ gate: 'none' });
@@ -1573,14 +1630,14 @@ async function runDiscontinuityCounted() {
       if (!dirty?.ok)
         return {
           ok: false,
-          detail: `hls/estimate lỗi trên playlist có chỗ nối: ${JSON.stringify(dirty)}`,
+          detail: `hls/estimate failed on a playlist with a splice point: ${JSON.stringify(dirty)}`,
         };
       if (dirty.discontinuityCount !== 2) {
         return {
           ok: false,
           detail:
-            `playlist có 2 chỗ nối nhưng estimate trả ${JSON.stringify(dirty.discontinuityCount)} ` +
-            '-> popup KHÔNG cảnh báo được, user nhận file lệch tiếng kèm dấu tích xanh',
+            `playlist has 2 splice points but estimate returned ${JSON.stringify(dirty.discontinuityCount)} ` +
+            '-> the popup CANNOT warn the user, they get an out-of-sync file with a green checkmark',
         };
       }
 
@@ -1588,19 +1645,19 @@ async function runDiscontinuityCounted() {
       if (!clean?.ok)
         return {
           ok: false,
-          detail: `hls/estimate lỗi trên playlist sạch: ${JSON.stringify(clean)}`,
+          detail: `hls/estimate failed on a clean playlist: ${JSON.stringify(clean)}`,
         };
       if (clean.discontinuityCount !== 0) {
         return {
           ok: false,
           detail:
-            `playlist SẠCH mà estimate trả ${JSON.stringify(clean.discontinuityCount)} chỗ nối ` +
-            '-> cảnh báo OAN, user bỏ một lượt tải hoàn toàn khoẻ',
+            `playlist is CLEAN but estimate returned ${JSON.stringify(clean.discontinuityCount)} splice point(s) ` +
+            '-> a false-positive warning makes the user abandon a perfectly healthy download',
         };
       }
       return {
         ok: true,
-        detail: `có chỗ nối -> ${dirty.discontinuityCount}; playlist sạch -> ${clean.discontinuityCount}`,
+        detail: `with splice points -> ${dirty.discontinuityCount}; clean playlist -> ${clean.discontinuityCount}`,
       };
     });
   } finally {
@@ -1609,12 +1666,14 @@ async function runDiscontinuityCounted() {
 }
 
 /**
- * W4.3 — tên file phải theo TÊN VIDEO của trang, không phải theo path URL.
+ * W4.3 — the filename must follow the page's VIDEO TITLE, not the URL path.
  *
- * Ghim ba thứ mà unit test KHÔNG với tới, vì chúng nằm ở phần đấu dây trong background:
- *  1. background thật sự CÓ gọi resolveTitle (thay vì `media?.title` cũ, gần như luôn trống);
- *  2. `frameIds: [0]` — trang có iframe player mang tiêu đề sai, đọc nhầm khung là lộ ngay;
- *  3. tiêu đề unicode đi trọn đường tới tên file mà không bị cắt/hỏng.
+ * Pins three things unit tests cannot reach, because they live in the wiring inside background:
+ *  1. background actually DOES call resolveTitle (instead of the old `media?.title`, which was
+ *     almost always empty);
+ *  2. `frameIds: [0]` — the page has a player iframe carrying the wrong title, reading the wrong
+ *     frame shows up immediately;
+ *  3. a unicode title makes it all the way to the filename without being truncated/corrupted.
  */
 async function runTitleFromPage({ page: pagePath, want, template, spaNavigate }) {
   const srv = await startFixtureServer({ gate: 'none' });
@@ -1626,23 +1685,26 @@ async function runTitleFromPage({ page: pagePath, want, template, spaNavigate })
           : pagePath === 'twitter'
             ? srv.twitterPageUrl
             : srv.docPageUrl;
-      // Ghim đường đấu dây của cài đặt: mẫu chỉ có tác dụng nếu CẢ HAI chỗ gọi
-      // buildDownloadFilename cùng đọc getFilenameTemplate. Quên một chỗ là cài đặt câm.
+      // Pins the settings wiring: a template only works if BOTH call sites of
+      // buildDownloadFilename read getFilenameTemplate. Missing one makes the setting silently
+      // do nothing.
       if (template) {
         await page.evaluate(
           (tpl) => chrome.storage.local.set({ 'settings:filenameTemplate': tpl }),
           template,
         );
       }
-      // Tab THẬT: resolveTitle đọc DOM qua scripting.executeScript nên tabId phải là tab thật.
+      // A REAL tab: resolveTitle reads the DOM via scripting.executeScript so tabId must be a real
+      // tab.
       const tabId = await page.evaluate(async (url) => {
         const t = await chrome.tabs.create({ url, active: false });
         return t.id;
       }, pageUrl);
       if (typeof tabId !== 'number') {
-        return { ok: false, detail: 'không mở được tab fixture' };
+        return { ok: false, detail: 'could not open the fixture tab' };
       }
-      // Chờ trang dựng xong DOM — đọc tiêu đề trước khi parse xong là đọc hụt.
+      // Wait for the page's DOM to finish building — reading the title before parsing finishes
+      // reads a stale value.
       for (let i = 0; i < 40; i++) {
         const ready = await page.evaluate(async (id) => {
           const [r] = await chrome.scripting.executeScript({
@@ -1655,9 +1717,10 @@ async function runTitleFromPage({ page: pagePath, want, template, spaNavigate })
         await new Promise((r) => setTimeout(r, 250));
       }
 
-      // Chờ extension PHÁT HIỆN master qua webRequest -> sinh MediaItem thật, có đóng dấu
-      // detectPageUrl. Không có bước này thì `media` là undefined và cổng chống đặt nhầm tên
-      // không hề được kiểm — đúng lỗ hổng review đối kháng chỉ ra.
+      // Wait for the extension to DETECT the master via webRequest -> generates a real MediaItem,
+      // stamped with detectPageUrl. Without this step `media` would be undefined and the
+      // wrong-name-guard would never actually be exercised — exactly the hole an adversarial
+      // review pointed out.
       let stamped;
       for (let i = 0; i < 40; i++) {
         stamped = await page.evaluate(
@@ -1672,17 +1735,18 @@ async function runTitleFromPage({ page: pagePath, want, template, spaNavigate })
         await new Promise((r) => setTimeout(r, 250));
       }
       if (!stamped) {
-        return { ok: false, detail: 'extension KHÔNG phát hiện được master trên tab fixture' };
+        return { ok: false, detail: 'extension did NOT detect the master on the fixture tab' };
       }
       if (!stamped.detectPageUrl) {
         return {
           ok: false,
-          detail: 'media KHÔNG được đóng dấu trang lúc phát hiện (detectPageUrl trống)',
+          detail: 'media was NOT stamped with a page at detection time (detectPageUrl is empty)',
         };
       }
 
-      // Ca SPA: đổi route KHÔNG tải lại trang. Dòng media cũ nay thuộc trang cũ -> cổng phải ĐÓNG
-      // và tên file lùi về tên từ URL, TUYỆT ĐỐI không được mượn tiêu đề trang mới.
+      // SPA case: navigating routes WITHOUT reloading the page. The old media entry still belongs
+      // to the old page -> the gate must CLOSE and the filename must fall back to a URL-based one,
+      // it must NEVER borrow the new page's title.
       if (spaNavigate) {
         await page.evaluate(async (id) => {
           await chrome.scripting.executeScript({
@@ -1713,19 +1777,19 @@ async function runTitleFromPage({ page: pagePath, want, template, spaNavigate })
       if (!start?.ok) {
         return {
           ok: false,
-          detail: `hls/download bị từ chối: ${JSON.stringify(start)}`,
+          detail: `hls/download rejected: ${JSON.stringify(start)}`,
         };
       }
       const job = await waitJob(page, start.jobId, JOB_TIMEOUT_MS);
-      if (!job) return { ok: false, detail: 'job TREO' };
+      if (!job) return { ok: false, detail: 'job STUCK' };
       const wantName = `${DOWNLOAD_FOLDER}/${want}.mp4`;
       if (job.filename !== wantName) {
         return {
           ok: false,
-          detail: `tên file sai: "${job.filename}", mong đợi "${wantName}"`,
+          detail: `wrong filename: "${job.filename}", expected "${wantName}"`,
         };
       }
-      return { ok: true, detail: `tên file đúng: "${job.filename}"` };
+      return { ok: true, detail: `correct filename: "${job.filename}"` };
     });
   } finally {
     await srv.close();
@@ -1735,149 +1799,157 @@ async function runTitleFromPage({ page: pagePath, want, template, spaNavigate })
 const SCENARIOS = [
   {
     id: 'happy',
-    title: 'Không cổng: tải trọn 10 segment -> .mp4 trên đĩa, đủ thời lượng',
+    title: 'No gate: download all 10 segments -> .mp4 on disk, full duration',
     expect: 'pass',
     run: () => runDownload({ gate: 'none', segmentHost: null }),
   },
   {
     id: 'download-spoof',
-    title: 'Cổng 403 mọi path: hls/download CÓ gọi applySpoof -> phải qua được',
+    title: '403 gate on every path: hls/download DOES call applySpoof -> must get through',
     expect: 'pass',
     run: () => runDownload({ gate: 'all', segmentHost: null }),
   },
   {
     id: 'variants-403',
     title:
-      'Cổng 403 manifest: bấm "Chất lượng" -> spoof bật TRƯỚC fetch (W2.2) -> phải qua',
-    // W2.2 XONG (2026-07-17): handleVariants nay applySpoof ÔM SÁT cú fetch -> qua cổng hotlink.
-    // Ratchet đã bật đúng lúc sửa xong (known-fail -> pass), giờ là lưới chống hồi quy.
+      '403 gate on the manifest: clicking "Quality" -> spoof arms BEFORE the fetch (W2.2) -> must get through',
+    // W2.2 DONE (2026-07-17): handleVariants now calls applySpoof RIGHT BEFORE the fetch -> gets
+    // past the hotlink gate. The ratchet armed at exactly the moment it was fixed (known-fail ->
+    // pass), now it's a regression net.
     expect: 'pass',
     run: () => runVariants({ gate: 'manifest' }),
   },
   {
     id: 'segments-other-host',
     title:
-      'Segment ở host KHÁC manifest + cổng 403 -> spoof MỌI host đã parse (W2.3) -> tải trọn',
-    // W2.3 XONG (2026-07-17): handleHlsDownload parse playlist TRƯỚC rồi spoof mọi host của
-    // segment/key/init. Ratchet đã bật đúng lúc sửa xong (known-fail -> pass), nay là lưới hồi quy.
+      'Segments on a DIFFERENT host than the manifest + 403 gate -> spoof EVERY parsed host (W2.3) -> full download',
+    // W2.3 DONE (2026-07-17): handleHlsDownload now parses the playlist FIRST then spoofs every
+    // segment/key/init host. The ratchet armed at exactly the moment it was fixed (known-fail ->
+    // pass), now a regression net.
     expect: 'pass',
     run: () => runDownload({ gate: 'segments', segmentHost: 'localhost' }),
   },
   {
     id: 'progressive-403',
     title:
-      'Cổng 403 mp4: tải progressive phải qua (W2.5 định tuyến qua offscreen -> fetch mang Referer)',
-    // W2.5 XONG (2026-07-18): handleDownload định tuyến fetch qua offscreen (xmlhttprequest tab-less
-    // -> khớp rule DNR). Ratchet đã bật đúng lúc sửa xong (known-fail -> pass), nay là lưới hồi quy.
-    // ĐO 2026-07-18: đường cũ chrome.downloads.download thẳng -> server nhận ref=NONE -> 403.
+      '403 gate on mp4: progressive download must get through (W2.5 routes via offscreen -> fetch carries the Referer)',
+    // W2.5 DONE (2026-07-18): handleDownload routes the fetch through offscreen (tab-less
+    // xmlhttprequest -> matches the DNR rule). The ratchet armed at exactly the moment it was
+    // fixed (known-fail -> pass), now a regression net.
+    // MEASURED 2026-07-18: the old direct chrome.downloads.download path -> server sees ref=NONE
+    // -> 403.
     expect: 'pass',
-    pins: '§2.5/W2.5 (progressive qua offscreen)',
+    pins: '§2.5/W2.5 (progressive via offscreen)',
     run: () => runProgressive({ gate: 'progressive' }),
   },
   {
     id: 'segment-stall',
     title:
-      'Server câm giữa chừng: job phải BÁO LỖI có hạn (W2.6), không kẹt fetching vĩnh viễn',
-    // W2.6 (2026-07-18): fetchWithRetry nay có đồng hồ chờ-header + đồng hồ im-lặng, ghép với
-    // signal huỷ của job. Trước W2.6 ca này treo hết budget vì fetch không có signal nào.
+      'Server goes silent mid-transfer: job must report an error within a bounded time (W2.6), not hang in fetching forever',
+    // W2.6 (2026-07-18): fetchWithRetry now has a header-wait timer + a silence timer, chained to
+    // the job's cancel signal. Before W2.6 this case would hang the whole budget because fetch had
+    // no signal at all.
     expect: 'pass',
-    pins: '§2.9/W2.6 (retry không timeout/không huỷ được)',
+    pins: '§2.9/W2.6 (retry had no timeout/no cancel)',
     run: () => runSegmentStall(),
   },
   {
     id: 'offscreen-death',
     title:
-      'Giết offscreen giữa lúc tải: job phải báo lỗi có hạn (W2.7), không quay spinner vĩnh viễn',
+      'Kill offscreen mid-download: job must report an error within a bounded time (W2.7), not spin forever',
     expect: 'pass',
-    pins: '§2.14/W2.7 (offscreen chết im lặng -> job kẹt fetching mãi)',
+    pins: '§2.14/W2.7 (offscreen dies silently -> job stuck fetching forever)',
     run: () => runOffscreenDeath(),
   },
   {
     id: 'queued-not-reaped',
     title:
-      'Job xếp hàng sau một job chạy dài KHÔNG được tick W2.7 giết oan (giết oan tệ hơn treo)',
+      'A job queued behind a long-running job must NOT be wrongly killed by the W2.7 tick (wrongly killing is worse than hanging)',
     expect: 'pass',
-    pins: 'W2.7 (nhịp tim phải phủ cả lúc XẾP HÀNG, không chỉ lúc đang chạy)',
+    pins: 'W2.7 (heartbeat must cover the QUEUED state too, not just while running)',
     run: () => runQueuedJobNotReaped(),
   },
   {
     id: 'progressive-offscreen-death',
     title:
-      'Giết offscreen giữa lúc tải .mp4: entry phải chốt interrupted, không kẹt in_progress vĩnh viễn',
+      'Kill offscreen mid .mp4 download: entry must settle interrupted, not get stuck in_progress forever',
     expect: 'pass',
-    pins: 'W2.7 (W2.5 khiến progressive phụ thuộc offscreen — lưới liveness phải phủ cả đường này)',
+    pins: 'W2.7 (W2.5 made progressive depend on offscreen — the liveness net must cover this path too)',
     run: () => runProgressiveOffscreenDeath(),
   },
   {
     id: 'dash-download',
-    title: 'DASH tải được THẬT và file ra có ĐỦ hình + tiếng (W1.5 nửa sau)',
-    // Trước W1.5 nửa sau: nút tải DASH còn không tồn tại; nạp .mpd vào parser HLS ra 0 segment
-    // mà KHÔNG ném lỗi -> mọi cổng tĩnh vẫn xanh. Ca này là thứ duy nhất chứng minh đường DASH sống.
+    title: 'DASH downloads for REAL and the output has BOTH video AND audio (W1.5 second half)',
+    // Before W1.5's second half: there wasn't even a DASH download button; feeding a .mpd into the
+    // HLS parser produced 0 segments WITHOUT throwing -> every static gate stayed green. This case
+    // is the only thing that proves the DASH path is alive.
     expect: 'pass',
-    pins: '§2.8/W1.5 (DASH ngõ cụt + định danh track bằng URL -> file câm)',
+    pins: '§2.8/W1.5 (DASH dead end + identifying tracks by URL -> mute file)',
     run: () => runDashDownload(),
   },
   {
     id: 'discontinuity-counted',
     title:
-      'Playlist chèn quảng cáo -> đếm đúng 2 chỗ nối để popup cảnh báo; playlist sạch -> 0 (không doạ oan)',
-    // Trước W1.4: HlsSegmentsResult không có trường nào về discontinuity -> ffmpeg nhận DTS không
-    // đơn điệu, file lệch tiếng/sai thời lượng, mà job vẫn báo "Đã tải xong ✓".
+      'Playlist with inserted ads -> counts exactly 2 splice points so the popup can warn; clean playlist -> 0 (no false alarm)',
+    // Before W1.4: HlsSegmentsResult had no field at all about discontinuities -> ffmpeg received
+    // non-monotonic DTS, the output file ended up out of sync/wrong duration, yet the job still
+    // reported "Download complete ✓".
     expect: 'pass',
-    pins: '§2.?/W1.4 (discontinuity ghép mù -> file hỏng im lặng)',
+    pins: '§2.?/W1.4 (ghosting through discontinuities -> silently broken file)',
     run: () => runDiscontinuityCounted(),
   },
   {
     id: 'real-header-replay',
     title:
-      'Server đòi token riêng của player -> extension phải BẮT & PHÁT LẠI header thật (bịa là trượt)',
+      'Server demands the player\'s own token -> extension must CAPTURE & REPLAY the real header (fabricating fails)',
     expect: 'pass',
-    pins: '§2.11/W2.1 (ta bịa Referer/Origin, chưa từng quan sát một request header nào)',
+    pins: '§2.11/W2.1 (we fabricated Referer/Origin, never once observed a real request header)',
     run: () => runRealHeaderReplay(),
   },
   {
     id: 'dual-host-same-token',
     title:
-      'Hai tải cùng host, CÙNG token phiên -> KHÔNG suppress oan, cả hai tải xong',
-    // 🔴 Ca phổ biến nhất và là ca mà bộ suppress theo-tồn-tại làm hỏng: một site một token, mọi
-    // asset dùng chung. Suppress theo tồn tại sẽ hạ token job sau -> segment 403. Conflict-based
-    // phải cho cả hai qua.
+      'Two downloads on the same host with the SAME session token -> NO wrongful suppression, both finish',
+    // 🔴 The most common case, and the one an existence-based suppressor breaks: one site, one
+    // token, every asset shares it. Existence-based suppression would demote the later job's token
+    // -> its segments 403. Conflict-based suppression must let both through.
     expect: 'pass',
-    pins: 'W2.1 nợ (a) — same-token bị suppress oan (bug của existence-check)',
+    pins: 'W2.1 debt (a) — same-token wrongly suppressed (bug of an existence check)',
     run: () => runDualHostToken('same'),
   },
   {
     id: 'dual-host-different-token',
     title:
-      'Hai tải cùng host, token KHÁC nhau -> job đầu giữ token & xong, job sau thất bại RÕ (không nội dung sai)',
-    // Job đầu (đang chạy) phải giữ nguyên token của nó; job sau bị hạ cấp và 403 LỘ RÕ thay vì âm
-    // thầm nhận token sai rồi giao file nhầm. Đây là ranh giới an toàn của nợ (a).
+      'Two downloads on the same host with DIFFERENT tokens -> the first job keeps its token & finishes, the second fails CLEARLY (no wrong content)',
+    // The first (already-running) job must keep its own token; the later job gets demoted and
+    // 403s CLEARLY instead of silently accepting the wrong token and shipping a mislabeled file.
+    // This is the safety boundary of debt (a).
     expect: 'pass',
-    pins: 'W2.1 nợ (a) — job sau giật token job đầu (bug khi KHÔNG suppress)',
+    pins: 'W2.1 debt (a) — a later job steals the first job\'s token (bug when NOT suppressing)',
     run: () => runDualHostToken('different'),
   },
   {
     id: 'title-og',
     title:
-      'Trang có og:title -> tên file theo TÊN VIDEO (og thắng <title> bẩn; unicode giữ nguyên)',
+      'Page has og:title -> filename follows the VIDEO TITLE (og wins over a dirty <title>; unicode preserved)',
     expect: 'pass',
-    pins: 'W4.3 (media phát hiện qua mạng không mang title -> đa số file ra master/media.mp4)',
+    pins: 'W4.3 (media detected over the network carries no title -> most files came out master/media.mp4)',
     run: () => runTitleFromPage({ page: 'og', want: 'Tên Video Thật' }),
   },
   {
     id: 'title-doc',
     title:
-      'Trang chỉ có <title> bẩn -> phải cắt bộ đếm "(3)" và đuôi tên site, ra đúng tên video',
+      'Page only has a dirty <title> -> must strip the "(3)" counter and the site-name suffix, produce the correct video title',
     expect: 'pass',
-    pins: 'W4.3 (chuỗi làm sạch tiêu đề phải chạy trong đường đấu dây thật, không chỉ trong vitest)',
+    pins: 'W4.3 (the title-cleaning chain must run in the real wiring path, not just in vitest)',
     run: () => runTitleFromPage({ page: 'doc', want: 'Tên Video Thật' }),
   },
   {
     id: 'title-template',
     title:
-      'Mẫu tên do user đặt ({site}_{title}) phải tới được tên file thật, không chỉ nằm trong storage',
+      'A user-defined filename template ({site}_{title}) must reach the real filename, not just live in storage',
     expect: 'pass',
-    pins: 'W4.3 (cài đặt mẫu tên chỉ có unit test; đường từ storage tới tên file chưa ai canh)',
+    pins: 'W4.3 (the filename-template setting only had unit tests; the path from storage to filename was never guarded)',
     run: () =>
       runTitleFromPage({
         page: 'og',
@@ -1888,78 +1960,80 @@ const SCENARIOS = [
   {
     id: 'title-twitter',
     title:
-      'Trang CHỈ có twitter:title (og vắng) -> tên file theo twitter (nhánh đọc twitter chưa từng chạy e2e)',
-    // 🔴 W4.3 nợ — og:title LUÔN thắng nên câu `read('meta[name="twitter:title"]')` trong
-    // scripting.executeScript chưa bao giờ chạy trong máy đo. Trang này là chỗ duy nhất ép nó chạy;
-    // <title> bẩn để chứng minh twitter thắng doc chứ không phải doc lọt.
+      'Page has ONLY twitter:title (og missing) -> filename follows twitter (the twitter-reading branch had never run in e2e)',
+    // 🔴 W4.3 debt — og:title ALWAYS wins so the `read('meta[name="twitter:title"]')` line inside
+    // scripting.executeScript had never once run under measurement. This page is the only place
+    // that forces it to run; the dirty <title> proves twitter wins over doc, not that doc leaks
+    // through.
     expect: 'pass',
-    pins: 'W4.3 (nhánh đọc twitter:title từ DOM chưa có máy nào chạm)',
+    pins: 'W4.3 (the branch reading twitter:title from the DOM had never been touched by any measurement)',
     run: () => runTitleFromPage({ page: 'twitter', want: 'Tên Video Thật' }),
   },
   {
     id: 'title-spa-stale',
     title:
-      'Chuyển video kiểu SPA rồi tải dòng CŨ -> phải lùi về tên từ URL, KHÔNG mượn tên trang mới',
+      'SPA-style video switch, then download the OLD entry -> must fall back to a URL-based name, must NOT borrow the new page\'s title',
     expect: 'pass',
-    pins: 'W4.3 (cổng chống đặt nhầm tên: thà thiếu tên còn hơn SAI tên)',
+    pins: 'W4.3 (the wrong-name guard: better to have no title than a WRONG one)',
     run: () =>
       runTitleFromPage({ page: 'og', want: 'media', spaNavigate: true }),
   },
-  // --- §7 — playlist DRM phải bị TỪ CHỐI (ba hệ phổ biến nhất từng đi lọt, đã đo) ---
+  // --- §7 — a DRM playlist must be REFUSED (the three most common systems that had slipped through, measured) ---
   {
     id: 'drm-fairplay-refused',
     title:
-      'Playlist FairPlay (KEYFORMAT com.apple.streamingkeydelivery) -> TỪ CHỐI, 0 segment bị tải',
+      'FairPlay playlist (KEYFORMAT com.apple.streamingkeydelivery) -> REFUSED, 0 segments downloaded',
     expect: 'pass',
     run: () => runDrmPlaylistRefused({ system: 'fairplay', wantName: 'FairPlay' }),
   },
   {
     id: 'drm-playready-refused',
-    title: 'Playlist PlayReady -> TỪ CHỐI, 0 segment bị tải',
+    title: 'PlayReady playlist -> REFUSED, 0 segments downloaded',
     expect: 'pass',
     run: () => runDrmPlaylistRefused({ system: 'playready', wantName: 'PlayReady' }),
   },
   {
     id: 'drm-widevine-refused',
-    title: 'Playlist Widevine (KEYFORMAT urn:uuid) -> TỪ CHỐI, 0 segment bị tải',
+    title: 'Widevine playlist (KEYFORMAT urn:uuid) -> REFUSED, 0 segments downloaded',
     expect: 'pass',
     run: () => runDrmPlaylistRefused({ system: 'widevine', wantName: 'Widevine' }),
   },
 
-  // --- W3.1 — HLS mã hoá AES-128 (nhánh giải mã chưa từng được máy đo chạm tới) ---
+  // --- W3.1 — AES-128-encrypted HLS (the decryption branch no measurement had ever touched) ---
   {
     id: 'aes128-download',
     title:
-      'HLS mã hoá AES-128, IV dẫn từ media sequence (MEDIA-SEQUENCE=7) -> file ra đủ 100 khung',
+      'AES-128-encrypted HLS, IV derived from the media sequence (MEDIA-SEQUENCE=7) -> output has all 100 frames',
     expect: 'pass',
     run: () => runAesDownload({ variant: 'seq' }),
   },
   {
     id: 'aes128-explicit-iv',
-    title: 'HLS mã hoá AES-128 với IV khai TƯỜNG MINH trong #EXT-X-KEY -> đủ 100 khung',
+    title: 'AES-128-encrypted HLS with an EXPLICIT IV in #EXT-X-KEY -> all 100 frames',
     expect: 'pass',
     run: () => runAesDownload({ variant: 'iv' }),
   },
   {
     id: 'aes128-key-rotation',
     title:
-      'HLS mã hoá AES-128 XOAY KHOÁ giữa playlist (đổi ở segment 5) -> đủ 100 khung, 2 khoá',
+      'AES-128-encrypted HLS that ROTATES KEYS mid-playlist (change at segment 5) -> all 100 frames, 2 keys',
     expect: 'pass',
-    // >= 2 lượt fetch khoá: cache theo URI phải lấy CẢ HAI khoá. Bản nào cache "một khoá cho cả
-    // stream" sẽ chỉ fetch 1 lần và nửa sau ra rác -> đỏ ở đây chứ không trôi im lặng.
+    // >= 2 key fetches: the URI-keyed cache must fetch BOTH keys. A build that caches "one key for
+    // the whole stream" would fetch only once and produce garbage for the second half -> fails
+    // here instead of silently drifting.
     run: () => runAesDownload({ variant: 'rot', wantKeyFetches: 2 }),
   },
   {
     id: 'aes128-bad-key',
     title:
-      'Khoá AES SAI GIÁ TRỊ -> job phải lỗi kèm thông báo NÓI RÕ là chuyện khoá/giải mã',
+      'AES key with the WRONG VALUE -> job must error with a message that CLEARLY STATES it\'s about the key/decryption',
     expect: 'pass',
     run: () => runAesBadKey({ variant: 'bad', wantMessage: /không khớp/ }),
   },
   {
     id: 'aes128-key-not-key',
     title:
-      'Server trả TRANG HTML thay cho khoá AES (redirect đăng nhập) -> lỗi phải nói được thành lời',
+      'Server returns an HTML PAGE instead of the AES key (login redirect) -> the error must be expressible in words',
     expect: 'pass',
     run: () =>
       runAesBadKey({ variant: 'badlen', wantMessage: /16 byte|thay vì 16|đăng nhập/ }),
@@ -1967,63 +2041,69 @@ const SCENARIOS = [
   {
     id: 'aes128-key-403',
     title:
-      'Khoá AES ở HOST KHÁC + cổng 403 riêng đường khoá -> spoof phải phủ CẢ host khoá',
-    // 🔴 keyHost là thứ làm ca này có răng. ĐÃ ĐO: để khoá cùng host với segment thì rule DNR sinh
-    // từ URL segment đã phủ luôn khoá -> xoá `add(s.keyUri)` khỏi spoofTargetsFromSegments mà ca
-    // vẫn XANH, tức nó chẳng ghim gì. Ngoài đời khoá gần như LUÔN ở host khác.
+      'AES key on a DIFFERENT HOST + a 403 gate specific to the key path -> spoof must cover the key\'s host too',
+    // 🔴 keyHost is what gives this case its teeth. MEASURED: putting the key on the same host as
+    // the segments means the DNR rule generated from the segment URL already covers the key too ->
+    // removing `add(s.keyUri)` from spoofTargetsFromSegments and the case would still stay GREEN,
+    // meaning it pins nothing. In the real world the key is almost ALWAYS on a different host.
     expect: 'pass',
     run: () =>
       runAesDownload({ variant: 'seq', gate: 'key', keyHost: 'localhost' }),
   },
 
-  // --- GÓI A — HLS fMP4/CMAF: nhánh #EXT-X-MAP + giải mã init (chưa máy nào chạy) ---
+  // --- PACKAGE A — HLS fMP4/CMAF: the #EXT-X-MAP + init-decryption branch (never run before) ---
   {
     id: 'fmp4-plain',
     title:
-      'fMP4/CMAF KHÔNG mã hoá (#EXT-X-MAP) -> tải bình thường, KHÔNG đi xin khoá (chống chặn oan)',
-    // Ca CHIỀU NGƯỢC LẠI của gói A. Bản vá nào "cứ thấy #EXT-X-MAP là giải mã" sẽ đỏ ở đây.
+      'fMP4/CMAF NOT encrypted (#EXT-X-MAP) -> downloads normally, does NOT request a key (guards against wrongful blocking)',
+    // The REVERSE-direction case for package A. Any patch that "decrypts whenever it sees
+    // #EXT-X-MAP" will fail here.
     expect: 'pass',
-    pins: 'GÓI A (fMP4 sạch phải đi lọt: chặn/giải mã oan tệ hơn bỏ sót)',
+    pins: 'PACKAGE A (a clean fMP4 must get through: wrongful blocking/decryption is worse than a miss)',
     run: () => runFmp4Download({ variant: 'plain', wantKeyHits: 0 }),
   },
   {
     id: 'fmp4-aes-init',
     title:
-      'fMP4/CMAF MÃ HOÁ AES-128 phủ CẢ init (#EXT-X-MAP) + IV tường minh -> đủ 100 khung',
-    // 🔴 Ca CHÍNH của gói A. Trước bản vá RFC 8216 §4.3.2.5, init được ghi thẳng KHÔNG giải mã ->
-    // ciphertext nằm đúng chỗ ftyp/moov -> libav chết với lỗi đổ tội khâu GHÉP. Đây là ca đầu tiên
-    // trong dự án chạm được nhánh đó.
+      'fMP4/CMAF AES-128 ENCRYPTED covering the init too (#EXT-X-MAP) + explicit IV -> all 100 frames',
+    // 🔴 The MAIN case of package A. Before the RFC 8216 §4.3.2.5 patch, the init was written
+    // straight through WITHOUT decryption -> ciphertext sat right where ftyp/moov should be ->
+    // libav died with an error blamed on the MUX step. This is the first case in the project to
+    // reach that branch.
     expect: 'pass',
-    pins: 'GÓI A (bản vá giải mã init chưa có máy đo nào chạy)',
+    pins: 'PACKAGE A (the init-decryption patch had no measurement running it)',
     run: () => runFmp4Download({ variant: 'enc', wantKeyHits: 1 }),
   },
   {
     id: 'fmp4-clear-init',
     title:
-      '#EXT-X-MAP TRƯỚC #EXT-X-KEY (init TRONG SÁNG, segment mã hoá) -> phải tải được, KHÔNG giải mã oan init',
-    // 🔴 LỖI THẬT DO REVIEW ĐỐI KHÁNG BẮT ĐƯỢC, và là HỒI QUY do chính bản vá giải mã init gây ra.
-    // RFC 8216 §4.3.2.5 phân phạm vi khoá theo VỊ TRÍ TAG; MAP đứng trước KEY = init để trần —
-    // hình dạng hợp lệ và phổ biến (init trong sáng cho player đọc codec trước khi xin khoá).
-    // Bản cũ suy khoá init từ `segment.key` nên đem giải mã một init vốn đã trong sáng -> WebCrypto
-    // ném lỗi padding -> job chết kèm câu ĐỔ TỘI MÁY CHỦ. Giết oan một lượt tải khoẻ là hạng lỗi
-    // dự án xếp nặng hơn treo. ĐÃ ĐO: m3u8-parser mô hình đúng phạm vi qua `segment.map.key`.
+      '#EXT-X-MAP BEFORE #EXT-X-KEY (init IN THE CLEAR, segments encrypted) -> must download fine, must NOT unnecessarily decrypt the init',
+    // 🔴 A REAL BUG found by adversarial review, and a REGRESSION caused by the init-decryption
+    // patch itself. RFC 8216 §4.3.2.5 scopes keys by TAG POSITION; MAP before KEY = a clear init —
+    // a valid and common shape (a clear init lets the player read the codec before requesting a
+    // key). The old build inferred the init's key from `segment.key`, so it tried to decrypt an
+    // init that was already clear -> WebCrypto threw a padding error -> the job died with an error
+    // BLAMING THE SERVER. Wrongly killing a healthy download is a class of bug the project ranks
+    // above hanging. MEASURED: m3u8-parser models the correct scope via `segment.map.key`.
     expect: 'pass',
-    pins: 'GÓI A (phạm vi khoá của #EXT-X-MAP — bản vá init từng giết oan hình dạng này)',
+    pins: 'PACKAGE A (the #EXT-X-MAP key scope — the init patch once wrongly killed this exact shape)',
     run: () => runFmp4Download({ variant: 'clear-init', wantKeyHits: 1 }),
   },
   {
     id: 'fmp4-aes-demuxed',
     title:
-      'fMP4 tách tiếng, mỗi track có #EXT-X-KEY + #EXT-X-MAP RIÊNG -> file ra đủ hình + tiếng',
-    // ĐO ĐƯỢC nó ghim gì (đừng ghi quá lời — phản biện đã bác bản mô tả đầu):
-    //   CÓ ghim: init THỨ HAI (của track tiếng) được fetch VÀ giải mã bằng khoá RIÊNG của nó;
-    //            track tiếng thật sự có mặt trong file ra.
-    //   KHÔNG ghim: phạm vi per-track của `keyCache`. Hai track dùng hai keyUri KHÁC NHAU, mà cache
-    //            đánh chỉ mục theo URI, nên cache dùng chung (vẫn theo URI) vẫn cho kết quả ĐÚNG.
-    //            Đột biến M-A3 làm ca này đỏ là nhờ nửa "đánh chỉ mục bằng hằng số", và nửa đó thì
-    //            `aes128-key-rotation` đã ghim sẵn từ trước.
+      'Demuxed-audio fMP4, each track with its OWN #EXT-X-KEY + #EXT-X-MAP -> output has BOTH video AND audio',
+    // What was MEASURED to actually be pinned (don't overclaim — adversarial review rejected an
+    // earlier over-description):
+    //   DOES pin: the SECOND init (the audio track's) gets fetched AND decrypted with its OWN key;
+    //             the audio track is actually present in the output.
+    //   DOES NOT pin: per-track scoping of `keyCache`. The two tracks use two DIFFERENT keyUris,
+    //             and the cache is indexed by URI, so a shared cache (still indexed by URI) still
+    //             gives the CORRECT result. Mutation M-A3 fails this case thanks to the
+    //             "indexed by a constant" half, and that half is already pinned by
+    //             `aes128-key-rotation`.
     expect: 'pass',
-    pins: 'GÓI A (init thứ hai + khoá riêng của track tiếng — chưa từng được đo)',
+    pins: 'PACKAGE A (the second init + the audio track\'s own key — never measured before)',
     run: () =>
       runFmp4Download({
         variant: 'aud',
@@ -2035,20 +2115,20 @@ const SCENARIOS = [
   {
     id: 'drm-refused',
     title:
-      'Trang xin DRM/EME -> TỪ CHỐI tải và nói rõ lý do; tab sạch vẫn tải được (ranh giới cứng §7)',
+      'Page requests DRM/EME -> download REFUSED with a clear reason; a clean tab still downloads fine (the §7 hard boundary)',
     expect: 'pass',
-    pins: 'W7.1 (§7 tuyên bố ranh giới DRM mà grep requestMediaKeySystemAccess ra 0 hit)',
+    pins: 'W7.1 (§7 declared a DRM boundary while grepping requestMediaKeySystemAccess returned 0 hits)',
     run: () => runDrmRefused(),
   },
 ];
 
-// --- Chạy --------------------------------------------------------------------------------------
+// --- Run -------------------------------------------------------------------------------------
 
 let failed = false;
 const only = process.argv[2];
 
 console.log(
-  'W0.3 — lưới an toàn tích hợp (extension thật + fixture 403 cục bộ)\n',
+  'W0.3 — integrated safety net (real extension + local 403 fixture)\n',
 );
 
 for (const s of SCENARIOS) {
@@ -2058,31 +2138,31 @@ for (const s of SCENARIOS) {
   try {
     r = await s.run();
   } catch (e) {
-    r = { ok: false, detail: `harness lỗi: ${e?.message ?? e}` };
+    r = { ok: false, detail: `harness error: ${e?.message ?? e}` };
   }
 
   if (s.expect === 'pass') {
-    if (r.ok) console.log(`  ✓ ĐẠT — ${r.detail}\n`);
+    if (r.ok) console.log(`  ✓ PASSED — ${r.detail}\n`);
     else {
       failed = true;
-      console.log(`  ✗ HỎNG — ${r.detail}\n`);
+      console.log(`  ✗ FAILED — ${r.detail}\n`);
     }
   } else {
     if (!r.ok) {
-      console.log(`  ⊘ ĐỎ NHƯ DỰ KIẾN (bug còn sống, đã ghim) — ${r.detail}`);
-      console.log(`     ghim: ${s.pins}\n`);
+      console.log(`  ⊘ RED AS EXPECTED (known bug still alive, pinned) — ${r.detail}`);
+      console.log(`     pins: ${s.pins}\n`);
     } else {
-      // Ratchet bật: bug đã được sửa -> ép đổi nhãn, không cho lặng lẽ trôi.
+      // Ratchet armed: the bug got fixed -> force a relabel, don't let it silently drift.
       failed = true;
       console.log(
-        `  ✗ RATCHET BẬT — ca này LẼ RA phải đỏ nhưng đã ĐẠT: ${r.detail}`,
+        `  ✗ RATCHET ARMED — this case was SUPPOSED to be red but PASSED: ${r.detail}`,
       );
       console.log(
-        `     => ${s.pins} đã được sửa. Đổi expect: 'known-fail' -> 'pass' trong e2e/hls-403.mjs.\n`,
+        `     => ${s.pins} has been fixed. Change expect: 'known-fail' -> 'pass' in e2e/hls-403.mjs.\n`,
       );
     }
   }
 }
 
-console.log(failed ? '✗ W0.3 THẤT BẠI' : '✓ W0.3 XANH');
+console.log(failed ? '✗ W0.3 FAILED' : '✓ W0.3 PASSED');
 process.exit(failed ? 1 : 0);

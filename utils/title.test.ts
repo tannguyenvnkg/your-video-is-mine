@@ -9,36 +9,36 @@ import {
 } from './title';
 
 describe('normalizeInvisible', () => {
-  it('bỏ ký tự vô hình, NBSP -> khoảng trắng, gộp khoảng trắng', () => {
+  it('removes invisible characters, NBSP -> space, collapses whitespace', () => {
     expect(normalizeInvisible('A​B C﻿')).toBe('AB C');
   });
 });
 
 describe('siteTokens', () => {
-  it('lấy nguyên hostname + nhãn tên site, bỏ www và đuôi TLD, bỏ gạch nối', () => {
+  it('takes the full hostname + site-name label, strips www and the TLD suffix, strips hyphens', () => {
     expect(siteTokens('https://www.abc-xyz.co.uk/a')).toEqual([
       'abcxyzcouk',
       'abcxyz',
     ]);
   });
 
-  // 🔴 REVIEW ĐỐI KHÁNG bắt: nhãn phụ KHÔNG phải tên site.
-  it('KHÔNG coi nhãn phụ (live/video/watch) là tên site', () => {
+  // 🔴 Caught by adversarial review: a subdomain label is NOT the site name.
+  it('does NOT treat a subdomain label (live/video/watch) as the site name', () => {
     expect(siteTokens('https://live.vtv.vn/x')).toEqual(['livevtvvn', 'vtv']);
   });
-  it('không có pageUrl -> mảng rỗng (KHÔNG đoán)', () => {
+  it('no pageUrl -> empty array (does NOT guess)', () => {
     expect(siteTokens(undefined)).toEqual([]);
   });
 });
 
 describe('cleanTitle', () => {
-  it('KHÔNG cắt số 4 chữ số — đó là năm, không phải bộ đếm thông báo', () => {
+  it('does NOT strip a 4-digit number — that is a year, not a notification counter', () => {
     expect(cleanTitle('(2019) Movie', 'https://x.com/')).toBe('(2019) Movie');
   });
 });
 
-describe('pickTitle — thứ hạng og > twitter > doc > tab > stored', () => {
-  it('og thắng document.title bẩn', () => {
+describe('pickTitle — ranking og > twitter > doc > tab > stored', () => {
+  it('og beats a dirty document.title', () => {
     expect(
       pickTitle(
         { og: 'Tên Video Thật', doc: 'Tên Video Thật - SiteName' },
@@ -47,13 +47,13 @@ describe('pickTitle — thứ hạng og > twitter > doc > tab > stored', () => {
     ).toBe('Tên Video Thật');
   });
 
-  it('twitter thắng doc', () => {
+  it('twitter beats doc', () => {
     expect(
       pickTitle({ twitter: 'T Title', doc: 'D Title' }, 'https://a.com/'),
     ).toBe('T Title');
   });
 
-  it('cắt bộ đếm (3) và đuôi tên site khớp hostname', () => {
+  it('strips the counter (3) and the site-name suffix matching the hostname', () => {
     expect(
       pickTitle(
         { doc: '(3) Real Name | YouTube' },
@@ -62,74 +62,75 @@ describe('pickTitle — thứ hạng og > twitter > doc > tab > stored', () => {
     ).toBe('Real Name');
   });
 
-  // 🔴 GHIM CHỐNG DƯƠNG TÍNH GIẢ — cắt bừa sau dấu gạch sẽ giết số tập phim.
-  it('KHÔNG cắt đuôi khi đuôi không khớp tên site', () => {
+  // 🔴 PINS AGAINST FALSE POSITIVES — blindly stripping after a dash would kill episode numbers.
+  it('does NOT strip a suffix when it does not match the site name', () => {
     expect(
       pickTitle({ doc: 'Real Name - Part 2' }, 'https://example.com/'),
     ).toBe('Real Name - Part 2');
   });
 
-  it('chỉ cắt ĐÚNG MỘT đoạn đuôi cuối cùng', () => {
+  it('strips ONLY EXACTLY ONE trailing suffix segment', () => {
     expect(pickTitle({ doc: 'A – B — C' }, 'https://c.com/')).toBe('A – B');
   });
 
-  it('tiêu đề chỉ là tên site -> rác -> rơi xuống hạng dưới', () => {
+  it('a title that is just the site name -> junk -> falls to a lower rank', () => {
     expect(
       pickTitle({ doc: 'YouTube' }, 'https://youtube.com/'),
     ).toBeUndefined();
   });
 
-  it('thiếu pageUrl -> BỎ QUA luật cắt đuôi, không đoán tên site', () => {
+  it('missing pageUrl -> SKIPS the suffix-stripping rule, does not guess the site name', () => {
     expect(pickTitle({ doc: 'Real - Site' }, undefined)).toBe('Real - Site');
   });
 
-  it('ứng viên chỉ có khoảng trắng bị bỏ qua', () => {
+  it('a candidate with only whitespace is skipped', () => {
     expect(pickTitle({ og: '   ', doc: 'Real Name' }, 'https://a.com/')).toBe(
       'Real Name',
     );
   });
 
-  // 🔴 `stored` là ỨNG VIÊN CÓ HẠNG, không phải `??` cuối chuỗi.
-  it('stored là hạng chót nhưng vẫn được dùng khi không còn ai', () => {
+  // 🔴 `stored` is a RANKED CANDIDATE, not a trailing `??`.
+  it('stored is the lowest rank but is still used when nothing else is available', () => {
     expect(pickTitle({ og: 'Live', stored: 'Stale' }, 'https://a.com/')).toBe(
       'Live',
     );
     expect(pickTitle({ stored: 'Stale' }, 'https://a.com/')).toBe('Stale');
   });
 
-  it('không có ứng viên nào -> undefined', () => {
+  it('no candidates at all -> undefined', () => {
     expect(pickTitle({}, 'https://a.com/')).toBeUndefined();
   });
 
-  // 🔴 BẪY CHO LẦN REFACTOR SAU: og/twitter do tác giả trang tự đặt -> KHÔNG được làm sạch.
-  it('KHÔNG làm sạch og/twitter', () => {
+  // 🔴 TRAP FOR THE NEXT REFACTOR: og/twitter are set by the page author -> must NOT be cleaned.
+  it('does NOT clean og/twitter', () => {
     expect(
       pickTitle({ og: '(3) Real - YouTube' }, 'https://youtube.com/'),
     ).toBe('(3) Real - YouTube');
   });
 
-  // 🔴 REVIEW ĐỐI KHÁNG (3/3 giữ, đo bằng probe): 'live.vtv.vn' sinh token 'live' -> tiêu đề thật
-  // "Chung kết - Live" bị cắt cụt thành "Chung kết". Đúng loại lỗi TÊN SAI mà gói này thề tránh.
-  it('KHÔNG cắt chữ trùng tên NHÃN PHỤ của hostname', () => {
+  // 🔴 Adversarial review (kept 3/3, measured via probe): 'live.vtv.vn' produces the token 'live' ->
+  // the real title "Chung kết - Live" would be truncated to "Chung kết". Exactly the WRONG-NAME bug
+  // this package swore to avoid.
+  it('does NOT strip text that matches a SUBDOMAIN label of the hostname', () => {
     expect(
       pickTitle({ doc: 'Chung kết - Live' }, 'https://live.vtv.vn/x'),
     ).toBe('Chung kết - Live');
   });
 
-  // 🔴 Chứa-chuỗi với token ngắn cắt bừa: token 'abc' từng khớp vào đuôi 'ABC Studio'.
-  it('KHÔNG cắt đuôi chỉ vì nó CHỨA một token ngắn', () => {
+  // 🔴 Substring match with a short token stripping blindly: the token 'abc' used to match into the suffix 'ABC Studio'.
+  it('does NOT strip a suffix just because it CONTAINS a short token', () => {
     expect(
       pickTitle({ doc: 'Phim hay - ABC Studio' }, 'https://abc.vn/x'),
     ).toBe('Phim hay - ABC Studio');
   });
 
-  it('tiêu đề <= 1 ký tự là rác', () => {
+  it('a title <= 1 character is junk', () => {
     expect(pickTitle({ doc: 'A' }, 'https://a.com/')).toBeUndefined();
   });
 });
 
 describe('isJunkTitle', () => {
-  it('rỗng và tên chung chung là rác', () => {
+  it('empty and generic names are junk', () => {
     expect(isJunkTitle('', 'https://a.com/')).toBe(true);
     expect(isJunkTitle('video', 'https://a.com/')).toBe(true);
     expect(isJunkTitle('Tên video thật', 'https://a.com/')).toBe(false);
@@ -137,22 +138,22 @@ describe('isJunkTitle', () => {
 });
 
 describe('sameDocument', () => {
-  it('bỏ qua hash — đổi #t=90 KHÔNG phải điều hướng', () => {
+  it('ignores the hash — changing #t=90 is NOT a navigation', () => {
     expect(sameDocument('https://a.com/w?v=1#t=9', 'https://a.com/w?v=1')).toBe(
       true,
     );
   });
-  it('khác query -> khác trang', () => {
+  it('different query -> different page', () => {
     expect(sameDocument('https://a.com/w?v=1', 'https://a.com/w?v=2')).toBe(
       false,
     );
   });
-  it('thiếu một vế -> false (không đoán)', () => {
+  it('missing one side -> false (does not guess)', () => {
     expect(sameDocument(undefined, 'https://a.com/')).toBe(false);
   });
 
-  // 🔴 REVIEW ĐỐI KHÁNG (3/3 giữ): SPA hash-router thì hash CHÍNH LÀ trang.
-  it('hash-router: #/xem/1 và #/xem/2 là HAI trang khác nhau', () => {
+  // 🔴 Adversarial review (kept 3/3): for an SPA hash-router, the hash IS the page.
+  it('hash-router: #/xem/1 and #/xem/2 are TWO different pages', () => {
     expect(sameDocument('https://a.com/#/xem/1', 'https://a.com/#/xem/2')).toBe(
       false,
     );
@@ -161,14 +162,14 @@ describe('sameDocument', () => {
     );
   });
 
-  // Ghim origin: bản cài đặt bỏ qua origin sẽ lọt hết mấy ca trên.
-  it('khác origin -> khác trang', () => {
+  // Pins the origin check: an implementation that ignores origin would let all the above cases through.
+  it('different origin -> different page', () => {
     expect(sameDocument('https://a.com/w', 'https://b.com/w')).toBe(false);
     expect(sameDocument('https://a.com/w', 'http://a.com/w')).toBe(false);
   });
 
-  // 🔴 W4.3 nợ — tham số RÁC (tracking + tua) tự thêm vào không được đóng cổng đặt tên.
-  it('bỏ qua tham số rác đã biết (utm_*, fbclid, t) -> vẫn CÙNG trang', () => {
+  // 🔴 W4.3 debt — self-appended JUNK params (tracking + seek position) must not defeat the naming gate.
+  it('ignores known junk params (utm_*, fbclid, t) -> still the SAME page', () => {
     expect(
       sameDocument('https://a.com/w?v=1&utm_source=fb', 'https://a.com/w?v=1'),
     ).toBe(true);
@@ -180,15 +181,16 @@ describe('sameDocument', () => {
     ).toBe(true);
   });
 
-  it('thứ tự tham số KHÔNG đổi kết quả (trang có thể sắp lại)', () => {
+  it('param ORDER does NOT change the result (the page may reorder them)', () => {
     expect(
       sameDocument('https://a.com/w?a=1&b=2', 'https://a.com/w?b=2&a=1'),
     ).toBe(true);
   });
 
-  // 🔴 CHỐNG NỚI OAN: tham số ĐỊNH DANH (?v=) khác nhau vẫn phải là HAI trang, nếu không cổng
-  // chống-đặt-nhầm-tên coi hai video là một -> đặt tên video A cho video B.
-  it('tham số LẠ (không thuộc danh sách rác) khác nhau -> KHÁC trang', () => {
+  // 🔴 GUARDS AGAINST BEING TOO LENIENT: different IDENTIFYING params (?v=) must still count as TWO
+  // pages, otherwise the wrong-naming guard treats two different videos as one -> naming video A's
+  // file after video B.
+  it('different UNKNOWN params (not on the junk list) -> DIFFERENT page', () => {
     expect(sameDocument('https://a.com/w?v=1', 'https://a.com/w?v=2')).toBe(
       false,
     );

@@ -1,5 +1,5 @@
-// Parse DASH manifest (.mpd) THUẦN -> danh sách representation chất lượng + danh sách segment.
-// mpd-parser chuẩn hoá MPD về dạng giống HLS (playlists[] + attributes + resolvedUri tuyệt đối).
+// Pure parsing of DASH manifest (.mpd) -> list of quality representations + list of segments.
+// mpd-parser normalizes MPD into an HLS-like shape (playlists[] + attributes + absolute resolvedUri).
 
 import {
   parse,
@@ -23,27 +23,28 @@ export interface DashParseResult {
   isMaster: boolean;
   variants: VariantInfo[];
   /**
-   * W7.1 — DASH khai DRM ngay trong manifest qua `<ContentProtection>`. Trước W7.1 ta KHÔNG đọc thẻ
-   * này, nên video DRM lọt qua bước "Chất lượng" rồi mới hỏng ở tận khâu tải — khó hiểu với user.
+   * W7.1 — DASH declares DRM right in the manifest via `<ContentProtection>`. Before W7.1 we did NOT
+   * read this tag, so DRM videos slipped past the "Quality" step and only failed at the download stage — confusing for the user.
    */
   isProtected: boolean;
-  /** Tên các hệ thống DRM đã khai (để nói ĐÚNG cái gì chặn, không phải câu chung chung). */
+  /** Names of the declared DRM systems (to state EXACTLY what is blocking, not a generic message). */
   drmSystems: string[];
 }
 
 /**
- * Một track DASH (hình hoặc tiếng) kèm danh tính đã chốt.
+ * A single DASH track (video or audio) with its finalized identity.
  *
- * 🔴 VÌ SAO ĐÁNH ID CHUNG MỘT LƯỢT cho cả hình lẫn tiếng: `parseDashSegments` tra track theo id.
- * Nếu hình và tiếng đánh số ở hai không gian tên riêng thì một id có thể trỏ vào HAI track —
- * chọn 1080p mà tải nhầm tiếng, không một dòng lỗi. Một `used` duy nhất, một thứ tự duy nhất
- * (hình trước, tiếng sau) làm `dashTracks()` thành NGUỒN SỰ THẬT DUY NHẤT về danh tính.
+ * 🔴 WHY IDS ARE ASSIGNED IN ONE SHARED PASS for both video and audio: `parseDashSegments` looks up
+ * a track by id. If video and audio numbered ids in two separate namespaces, one id could point to
+ * TWO tracks — picking 1080p could accidentally download audio instead, with no error at all. A single
+ * `used` set and a single ordering (video first, audio second) make `dashTracks()` the SINGLE SOURCE
+ * OF TRUTH for identity.
  */
 interface DashTrack {
   id: string;
   kind: 'video' | 'audio';
   playlist: MpdPlaylist;
-  /** Nhãn của AdaptationSet tiếng (chỉ track tiếng mới có). */
+  /** Label of the audio AdaptationSet (only audio tracks have this). */
   label?: string;
   groupId?: string;
   language?: string;
@@ -51,11 +52,12 @@ interface DashTrack {
 }
 
 /**
- * Liệt kê MỌI track của một MPD với id duy nhất toàn cục.
+ * List EVERY track of an MPD with a globally unique id.
  *
- * ⚠️ Đừng tra theo `attributes.NAME` trực tiếp ở nơi khác: DASH chỉ đòi `Representation@id` duy
- * nhất TRONG một AdaptationSet, nên hai AdaptationSet vẫn có thể cùng khai `id="1"`.
- * `uniqueVariantId` tách chúng bằng hậu tố, và mọi chỗ khác PHẢI dùng lại đúng id đã tách đó.
+ * ⚠️ Don't look up by `attributes.NAME` directly elsewhere: DASH only requires `Representation@id`
+ * to be unique WITHIN a single AdaptationSet, so two AdaptationSets can still both declare `id="1"`.
+ * `uniqueVariantId` disambiguates them with a suffix, and every other place MUST reuse that exact
+ * disambiguated id.
  */
 function dashTracks(manifest: MpdManifest): DashTrack[] {
   const used = new Set<string>();
@@ -70,7 +72,7 @@ function dashTracks(manifest: MpdManifest): DashTrack[] {
     });
   });
 
-  // Tiếng nằm ở mediaGroups.AUDIO[group][label].playlists[] (đã đo thật ở mpd-parser@1.4.0).
+  // Audio lives at mediaGroups.AUDIO[group][label].playlists[] (verified in practice against mpd-parser@1.4.0).
   const groups = manifest.mediaGroups?.AUDIO ?? {};
   let audioIndex = playlists.length;
   for (const [groupId, group] of Object.entries(groups)) {
@@ -95,13 +97,14 @@ function dashTracks(manifest: MpdManifest): DashTrack[] {
 }
 
 /**
- * Rendition tiếng cho popup chọn.
+ * Audio renditions for the popup to pick from.
  *
- * ⚠️ KHÔNG dùng lại `renditionsForVariant` của HLS: hàm đó chốt "cái được chọn" bằng so sánh
- * `uri`, mà DASH SegmentTemplate cho MỌI track cùng một `resolvedUri` (chính file .mpd). So theo
- * uri ở đây thì KHÔNG BAO GIỜ có cái nào `selected` -> popup không tìm ra tiếng -> ghép ra file
- * CÂM mà không một tầng nào báo lỗi. Đúng căn bệnh §2.1 mà W1.1 sinh ra để chữa.
- * Vì vậy DASH chọn theo `default` rồi tới cái đầu, và định danh bằng `id`, không bằng `uri`.
+ * ⚠️ Do NOT reuse HLS's `renditionsForVariant`: that function decides "which one is selected" by
+ * comparing `uri`, but DASH SegmentTemplate gives EVERY track the SAME `resolvedUri` (the .mpd file
+ * itself). Comparing by uri here would mean NOTHING is ever `selected` -> the popup finds no audio
+ * -> muxes a MUTE file with no layer reporting an error. This is exactly the §2.1 disease that W1.1
+ * was created to fix. So DASH selects by `default`, falling back to the first one, and identifies by
+ * `id`, not by `uri`.
  */
 function audioRenditionsOf(
   tracks: DashTrack[],
@@ -114,7 +117,7 @@ function audioRenditionsOf(
     id: t.id,
     groupId: t.groupId ?? 'audio',
     name: t.label ?? t.id,
-    // DASH định danh track bằng `id`; `uri` chỉ để tầng spoof/estimate có một URL thật mà dùng.
+    // DASH identifies a track by `id`; `uri` only exists so the spoof/estimate layer has a real URL to use.
     uri: t.playlist.resolvedUri ?? manifestUrl,
     ...(t.language !== undefined ? { language: t.language } : {}),
     default: t.isDefault === true,
@@ -138,28 +141,28 @@ export function parseDashManifest(
       const res = attr.RESOLUTION;
       const base = variantLabel(res?.height, attr.BANDWIDTH);
       return {
-        // Danh tính THẬT của DASH là Representation@id — mpd-parser để ở attributes.NAME.
-        // Với SegmentTemplate thì `uri` của mọi representation đều là chính file .mpd nên vô dụng.
+        // DASH's REAL identity is Representation@id — mpd-parser puts it in attributes.NAME.
+        // With SegmentTemplate, the `uri` of every representation is the same .mpd file, so it's useless.
         id: t.id,
-        // 🔴 LUÔN là URL manifest, KHÔNG phải `resolvedUri`.
-        // Với SegmentBase, `resolvedUri` là chính file .mp4 — trả về nó thì mọi tầng dưới
-        // (estimate, dò host spoof, offscreen) vốn coi `variantUrl` là TÀI LIỆU MANIFEST sẽ
-        // fetch nguyên file video rồi `res.text()` và parse như XML. Danh tính track của DASH
-        // nằm ở `id`, nên `uri` chỉ cần chỉ đúng chỗ lấy manifest.
+        // 🔴 ALWAYS the manifest URL, NOT `resolvedUri`.
+        // With SegmentBase, `resolvedUri` is the actual .mp4 file — returning that would make every
+        // downstream layer (estimate, spoof-host detection, offscreen), which treats `variantUrl` as
+        // THE MANIFEST DOCUMENT, fetch the whole video file and then `res.text()` and parse it as XML.
+        // DASH's track identity lives in `id`, so `uri` only needs to point to where the manifest is.
         uri: manifestUrl,
-        // Không có độ phân giải thì thêm số thứ tự để phân biệt.
+        // No resolution -> append an index number to disambiguate.
         name: res?.height ? base : `${base} #${index + 1}`,
         bandwidth: attr.BANDWIDTH,
         width: res?.width,
         height: res?.height,
         codecs: attr.CODECS,
-        // DASH LUÔN tách tiếng -> mang sẵn danh sách để popup gửi kèm `audioId` khi tải.
+        // DASH ALWAYS separates audio -> carry the list along so the popup can send `audioId` when downloading.
         ...(audioRenditions ? { audioRenditions } : {}),
       };
     });
 
   sortVariantsDesc(variants);
-  // Soi trên TEXT gốc, không qua mpd-parser: mpd-parser bỏ qua <ContentProtection> hoàn toàn.
+  // Scanned on the RAW TEXT, not via mpd-parser: mpd-parser ignores <ContentProtection> entirely.
   const drmSystems = drmSystemsInMpd(text);
   return {
     isMaster: variants.length > 1,
@@ -170,16 +173,17 @@ export function parseDashManifest(
 }
 
 /**
- * Parse segment theo ĐÚNG định dạng của manifest — điểm rẽ DUY NHẤT giữa HLS và DASH.
+ * Parse segments according to the manifest's ACTUAL format — the ONE branch point between HLS and DASH.
  *
- * 🔴 Vì sao phải có: `parseHlsSegments` nuốt XML mà KHÔNG ném lỗi — m3u8-parser trả về manifest
- * rỗng. Nạp một .mpd vào nó thì ước lượng báo "0 segment", khâu dò host spoof tìm ra 0 host, và
- * job chạy tới 'fetching' rồi 403 sạch. Tất cả đều XANH và IM LẶNG. Mọi nơi từng gọi thẳng
- * `parseHlsSegments` trên một URL do user chọn PHẢI đi qua đây.
+ * 🔴 Why this must exist: `parseHlsSegments` swallows XML WITHOUT throwing — m3u8-parser returns an
+ * empty manifest. Feeding it a .mpd makes the estimate report "0 segments", the spoof-host detection
+ * step finds 0 hosts, and the job runs through to 'fetching' then a clean 403. All of it stays GREEN
+ * and SILENT. Every place that used to call `parseHlsSegments` directly on a user-chosen URL MUST go
+ * through here instead.
  *
- * ⚠️ Kiểu `'hls' | 'dash'` viết tay chứ KHÔNG import `ManifestKind` từ `messages.ts`:
- * `messages.ts` kéo theo `storage.ts`, mà file này được offscreen import — nơi `chrome.storage`
- * KHÔNG tồn tại. Một import nhầm ở đây là TypeError lúc chạy mà tsc/eslint/vitest đều không thấy.
+ * ⚠️ The `'hls' | 'dash'` type is hand-written, NOT imported as `ManifestKind` from `messages.ts`:
+ * `messages.ts` drags in `storage.ts`, and this file is imported by offscreen — where `chrome.storage`
+ * does NOT exist. A wrong import here is a runtime TypeError that tsc/eslint/vitest all miss.
  */
 export function parseTrackSegments(
   text: string,
@@ -192,17 +196,17 @@ export function parseTrackSegments(
     : parseHlsSegments(text, url);
 }
 
-/** Chuyển một segment mpd-parser sang đúng shape `HlsSegment`. */
+/** Convert a single mpd-parser segment into the correct `HlsSegment` shape. */
 function toHlsSegment(s: MpdSegment, index: number): HlsSegment {
   return {
-    // resolvedUri đã tuyệt đối sẵn (mpd-parser resolve theo BaseURL + manifestUri).
+    // resolvedUri is already absolute (mpd-parser resolves it against BaseURL + manifestUri).
     uri: s.resolvedUri ?? s.uri ?? '',
     duration: typeof s.duration === 'number' ? s.duration : 0,
-    // DASH không có media sequence; `seq` chỉ dùng làm IV mặc định của AES-128 HLS nên ở đây là
-    // số trơ. Vẫn điền chỉ số để trường bắt buộc có giá trị xác định.
+    // DASH has no media sequence; `seq` is only used as the default IV for HLS AES-128, so here it's
+    // just a plain index. Still filled in so the required field has a well-defined value.
     seq: index,
-    // Cố ý KHÔNG có keyMethod/keyUri/iv: mã hoá của DASH là CENC = DRM, thuộc ranh giới TỪ CHỐI
-    // (§7), không phải thứ để giải mã. Nhờ vậy nhánh AES-128 ở offscreen thành nhánh chết.
+    // Deliberately WITHOUT keyMethod/keyUri/iv: DASH's encryption is CENC = DRM, which falls under the
+    // REFUSAL boundary (§7), not something to decrypt. This makes the AES-128 branch in offscreen dead code.
     ...(s.map?.resolvedUri ? { initUri: s.map.resolvedUri } : {}),
     ...(s.byterange ? { byterange: s.byterange } : {}),
     ...(s.map?.byterange ? { initByterange: s.map.byterange } : {}),
@@ -210,10 +214,10 @@ function toHlsSegment(s: MpdSegment, index: number): HlsSegment {
 }
 
 /**
- * Từ MPD + id track -> danh sách segment ĐÚNG shape `HlsSegmentsResult`.
+ * From an MPD + track id -> a segment list in the EXACT `HlsSegmentsResult` shape.
  *
- * Trả về đúng kiểu mà `downloadTrack` ở offscreen đang nhận, nên DASH dùng lại NGUYÊN bộ máy
- * fetch/backpressure/retry/mux của HLS thay vì mọc thêm một đường tải thứ hai.
+ * Returns exactly the type that `downloadTrack` in offscreen already accepts, so DASH reuses HLS's
+ * WHOLE fetch/backpressure/retry/mux machinery instead of growing a second download pipeline.
  */
 export function parseDashSegments(
   text: string,
@@ -247,14 +251,15 @@ export function parseDashSegments(
   const segments = raw.map(toHlsSegment);
   const totalDuration = segments.reduce((sum, s) => sum + s.duration, 0);
 
-  // SegmentBase/BaseURL: mpd-parser KHÔNG dựng segment (đo thật) nhưng `resolvedUri` LÀ file media
-  // tải thẳng được. Báo "playlist không có segment nào" ở đây là đúng chữ mà sai hẳn nguyên nhân,
-  // nên chỉ ra đường tải thẳng để tầng trên định tuyến sang luồng progressive.
+  // SegmentBase/BaseURL: mpd-parser does NOT build segments (verified in practice) but `resolvedUri`
+  // IS a directly downloadable media file. Reporting "playlist has no segments" here would be
+  // literally true but entirely wrong about the cause, so surface the direct-download path instead
+  // so the layer above can route it to the progressive flow.
   if (segments.length === 0) {
     const direct = track.playlist.resolvedUri;
-    // Giữ `directUrl` để gói sau định tuyến sang luồng progressive, NHƯNG vẫn phải nêu lý do
-    // ngay bây giờ: chưa có ai tiêu thụ `directUrl` cả, nên im lặng ở đây nghĩa là job chết với
-    // câu "playlist không có segment nào" — đúng ngõ cụt khó hiểu mà nhánh này sinh ra để tránh.
+    // Keep `directUrl` so the caller can route to the progressive flow, BUT the reason must still be
+    // stated right now: nobody consumes `directUrl` yet, so staying silent here means the job just
+    // dies with "playlist has no segments" — exactly the confusing dead end this branch exists to avoid.
     if (direct && direct !== manifestUrl) {
       return {
         ...base,
@@ -269,14 +274,16 @@ export function parseDashSegments(
     };
   }
 
-  // 🔴 Đa Period: mpd-parser TỰ KHÂU các Period thành MỘT playlist, còn `downloadTrack` chỉ nạp
-  // init ĐẦU TIÊN rồi nối mọi segment ra sau nó. ffmpeg vẫn nhận, job vẫn "xong", file thì SAI.
+  // 🔴 Multi-Period: mpd-parser STITCHES the Periods together into ONE playlist by itself, but
+  // `downloadTrack` only loads the FIRST init and appends every segment after it. ffmpeg still
+  // accepts it, the job still "finishes", but the file is WRONG.
   //
-  // 🔬 ĐO THẬT (mpd-parser@1.4.0) — bản đầu của guard này soi "có nhiều init khác nhau không" và
-  // ĐÃ SAI: với SegmentTemplate, `initialization` nội suy ra CÙNG một URI ở mọi Period nên chỉ có
-  // 1 init, guard không bao giờ bắn. Tệ hơn: `startNumber` reset mỗi Period nên URL segment LẶP
-  // (đo được: seg-1, seg-2, seg-1, seg-2) -> ghép mù ra CÙNG 10 giây nối hai lần, đóng gói thành
-  // video 20 giây. Tín hiệu ĐÚNG là `discontinuityStarts` — mpd-parser luôn điền khi khâu Period.
+  // 🔬 VERIFIED IN PRACTICE (mpd-parser@1.4.0) — the first version of this guard checked "are there
+  // multiple distinct inits" and was WRONG: with SegmentTemplate, `initialization` interpolates to
+  // the SAME URI in every Period, so there's only 1 init and the guard never fires. Worse:
+  // `startNumber` resets on every Period, so segment URLs REPEAT (verified: seg-1, seg-2, seg-1,
+  // seg-2) -> blindly muxing produces the SAME 10 seconds concatenated twice, packaged as a 20-second
+  // video. The CORRECT signal is `discontinuityStarts` — mpd-parser always fills it in when stitching Periods.
   const periodStarts = track.playlist.discontinuityStarts ?? [];
   const inits = new Set(
     segments.map((s) => s.initUri).filter((u): u is string => Boolean(u)),
@@ -287,8 +294,9 @@ export function parseDashSegments(
     isProtected: drmSystems.length > 0,
     totalDuration,
     hasInit: inits.size > 0,
-    // W1.4 — điền cho ĐỦ hợp đồng. Với DASH con số này chỉ để BÁO CÁO: ranh giới Period bị guard
-    // ngay bên dưới TỪ CHỐI thẳng, chứ không hạ xuống mức cảnh báo như HLS.
+    // W1.4 — filled in to satisfy the contract fully. For DASH this number is REPORTING ONLY: a
+    // Period boundary gets outright REFUSED by the guard right below, rather than downgraded to a
+    // warning like HLS does.
     discontinuityCount: countDiscontinuities(
       track.playlist.segments ?? [],
       periodStarts,

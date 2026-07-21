@@ -63,7 +63,7 @@ function friendlyDownloadError(code?: string): string {
 function downloadStatusText(entry: DownloadEntry): string {
   switch (entry.state) {
     case 'in_progress': {
-      // W2.5 — progressive fetch trong offscreen báo byte; hiện % nếu biết tổng, không thì indeterminate.
+      // W2.5 — progressive fetch in offscreen reports bytes; show % if the total is known, otherwise indeterminate.
       if (entry.bytesTotal && entry.bytesTotal > 0) {
         const pct = Math.min(
           99,
@@ -84,8 +84,8 @@ function downloadStatusText(entry: DownloadEntry): string {
 }
 
 /**
- * Banner báo có bản mới trên GitHub Releases.
- * Không tự cập nhật được (cài bằng load unpacked) -> chỉ mở trang Release cho người dùng tải tay.
+ * Banner announcing a new version on GitHub Releases.
+ * Cannot self-update (installed via load unpacked) -> just opens the Release page for the user to download manually.
  */
 function UpdateBanner({ update }: { update: UpdateCheck }) {
   return (
@@ -102,7 +102,7 @@ function UpdateBanner({ update }: { update: UpdateCheck }) {
   );
 }
 
-/** Hiển thị tiến trình HLS đầy đủ theo phase: nhãn + % + tốc độ + ETA + thanh bar. */
+/** Renders full HLS progress per phase: label + % + speed + ETA + progress bar. */
 function HlsProgress({ job, now }: { job: HlsJob; now: number }) {
   if (job.phase === 'queued') {
     return (
@@ -113,8 +113,9 @@ function HlsProgress({ job, now }: { job: HlsJob; now: number }) {
     );
   }
   if (job.phase === 'loading') {
-    // Nhãn phải nói ĐÚNG việc đang chạy: ở phase này offscreen tải playlist VÀ dựng bộ ghép song song.
-    // Nhãn cũ chỉ nói "nạp bộ xử lý" -> khi playlist treo, người dùng lại đi nghi oan bộ ghép.
+    // The label must state EXACTLY what's running: in this phase, offscreen fetches the playlist
+    // AND builds the muxer in parallel. The old label only said "loading processor" -> when the
+    // playlist hangs, the user would wrongly suspect the muxer instead.
     return (
       <div className="hls-progress">
         <span className="hls-label">
@@ -144,8 +145,9 @@ function HlsProgress({ job, now }: { job: HlsJob; now: number }) {
         <div className="progress-bar">
           <div className="progress-fill" style={{ width: `${s.pct}%` }} />
         </div>
-        {/* W2.6: mạng trục trặc -> thanh tiến trình đứng im cả phút. Không nói gì thì user tưởng
-            treo và tự tắt. Đây là ghi chú tạm, KHÔNG phải lỗi — job vẫn đang chạy. */}
+        {/* W2.6: flaky network -> the progress bar sits still for a whole minute. Saying nothing
+            makes the user think it's stuck and close it themselves. This is a temporary note,
+            NOT an error — the job is still running. */}
         {job.note ? <span className="hls-note">{job.note}</span> : null}
       </div>
     );
@@ -224,8 +226,8 @@ function MediaRow({
   const [loading, setLoading] = useState(false);
   const [variants, setVariants] = useState<VariantInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Chọn theo `id`, KHÔNG theo `uri`: Apple master và DASH SegmentTemplate cho mọi variant chung
-  // một uri -> so theo uri thì bấm một dòng sáng cả cụm.
+  // Select by `id`, NOT by `uri`: an Apple master playlist and DASH SegmentTemplate give every
+  // variant the same uri -> comparing by uri would light up the whole group on one click.
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [dlError, setDlError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
@@ -246,7 +248,7 @@ function MediaRow({
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     } catch {
-      // clipboard có thể bị chặn.
+      // clipboard access may be blocked.
     }
   }, [media.url]);
 
@@ -261,11 +263,11 @@ function MediaRow({
     async (variant: VariantInfo) => {
       if (tabId == null) return;
       setDlError(null);
-      // Bỏ khoảng im lặng: hiện "Đang kiểm tra…" trong lúc ước tính (job chưa tồn tại).
+      // Remove the dead silence: show "Checking…" while estimating (the job doesn't exist yet).
       setChecking(true);
       const audioRendition = variant.audioRenditions?.find((r) => r.selected);
       const audioUri = audioRendition?.uri;
-      // W1.5 — DASH định danh track bằng id, KHÔNG bằng uri (mọi representation chung một .mpd).
+      // W1.5 — DASH identifies a track by id, NOT by uri (every representation shares one .mpd).
       const kind = media.type === 'dash' ? ('dash' as const) : ('hls' as const);
       const variantId = kind === 'dash' ? variant.id : undefined;
       const audioId = kind === 'dash' ? audioRendition?.id : undefined;
@@ -291,8 +293,8 @@ function MediaRow({
         setDlError(DRM_UNSUPPORTED_ERROR(est.drmName));
         return;
       }
-      // Gộp MỌI cảnh báo vào ĐÚNG MỘT hộp thoại: hai confirm liên tiếp thì user bấm OK theo quán
-      // tính và lời cảnh báo thứ hai coi như không tồn tại.
+      // Merge EVERY warning into EXACTLY ONE dialog: two consecutive confirms and the user just
+      // clicks OK out of habit, so the second warning might as well not exist.
       const warnings: string[] = [];
       if (est.estBytes != null) {
         const threshold = await getSizeWarnBytes();
@@ -303,10 +305,11 @@ function MediaRow({
           );
         }
       }
-      // W1.4 — "chỗ nối" = timestamp bị reset giữa chừng (thường do chèn quảng cáo). Ta nối byte
-      // rồi remux `-c copy`, nên ffmpeg nhận một dòng DTS KHÔNG đơn điệu: file chạy được đoạn đầu
-      // rồi lệch tiếng/đứng hình/sai thời lượng — mà log 'Non-monotonous DTS' chỉ rơi vào
-      // console.debug nên job vẫn báo "Đã tải xong ✓". Nói TRƯỚC còn hơn giao file hỏng kèm dấu tích.
+      // W1.4 — "join point" = a timestamp reset partway through (usually from an ad insertion).
+      // We concatenate bytes then remux with `-c copy`, so ffmpeg receives a DTS stream that is
+      // NOT monotonic: the file plays fine at the start then goes out of sync/freezes/has a wrong
+      // duration — and the 'Non-monotonous DTS' log only lands in console.debug, so the job still
+      // reports "Download complete ✓". Better to warn UP FRONT than hand over a broken file with a checkmark.
       if (est.discontinuityCount > 0) {
         warnings.push(
           `Video có ${est.discontinuityCount} chỗ nối giữa chừng (thường do chèn quảng cáo). ` +
@@ -324,8 +327,9 @@ function MediaRow({
         media.url,
         tabId,
         variant.height,
-        // W1.1: luồng tiếng tách rời mà variant này dùng. Vắng `uri` = tiếng đã nằm sẵn trong
-        // variant (RFC 8216 §4.3.4.2.1) -> không gửi gì -> offscreen giữ đường một-input.
+        // W1.1: the separate audio track this variant uses. A missing `uri` means audio is
+        // already embedded in the variant (RFC 8216 §4.3.4.2.1) -> send nothing -> offscreen
+        // stays on the single-input path.
         audioUri,
         kind,
         variantId,
@@ -435,9 +439,10 @@ function MediaRow({
         </p>
       )}
 
-      {/* W1.5 — DASH nay TẢI ĐƯỢC thật (dùng lại bộ máy fetch/ghép của HLS), nên gợi ý
-          "chưa hỗ trợ tải" đã bỏ. Ca ta cố ý không ghép (đa Period init khác nhau) được offscreen
-          báo lý do cụ thể ngay trên job, không phải một câu chung chung ở đây. */}
+      {/* W1.5 — DASH now REALLY DOWNLOADS (reuses HLS's fetch/mux machinery), so the
+          "download not supported yet" hint has been removed. Cases we deliberately don't mux
+          (multiple Periods with different init) have offscreen report the specific reason
+          right on the job, not a generic sentence here. */}
 
       {hlsJob && (
         <div className={`dl-hls-${hlsJob.phase}`}>
@@ -502,8 +507,8 @@ function buildDownloadIndex(
   const byUrl = new Map<string, DownloadEntry>();
   for (const entry of Object.values(downloads)) {
     const cur = byUrl.get(entry.mediaUrl);
-    // W2.5: khoá là jobId (string) không so sánh thứ tự -> chọn entry MỚI NHẤT theo startedAt
-    // (tải lại cùng URL tạo entry mới; muốn hiện lượt gần nhất).
+    // W2.5: the key is a jobId (string) that isn't order-comparable -> pick the NEWEST entry by
+    // startedAt (re-downloading the same URL creates a new entry; we want to show the latest run).
     if (!cur || (entry.startedAt ?? 0) >= (cur.startedAt ?? 0))
       byUrl.set(entry.mediaUrl, entry);
   }
@@ -526,7 +531,7 @@ function App() {
     DEFAULT_ENABLED_TYPES,
   );
   const [update, setUpdate] = useState<UpdateCheck | null>(null);
-  // Tick 1s để ETA đếm mượt giữa các lần cập nhật storage.
+  // 1s tick so ETA counts smoothly between storage updates.
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -534,12 +539,12 @@ function App() {
       const v = browser.runtime.getManifest().version;
       if (v) setVersion(v);
     } catch {
-      // ngoài ngữ cảnh extension.
+      // outside extension context.
     }
     void (async () => setEnabledTypes(await getEnabledTypes()))();
   }, []);
 
-  // Kiểm tra bản mới (qua cache 6h). Lỗi -> trả null, không báo gì: tính năng phụ, không làm phiền.
+  // Check for a new version (via a 6h cache). Error -> returns null, no message: it's a secondary feature, don't be noisy.
   useEffect(() => {
     let alive = true;
     void (async () => {
@@ -604,8 +609,8 @@ function App() {
 
   const downloadIndex = buildDownloadIndex(downloads);
   const hlsJobIndex = buildHlsJobIndex(hlsJobs);
-  // W4.2 — bỏ playlist con (variant hình / rendition tiếng của một master đã parse): một video
-  // phải là MỘT dòng. Dòng master vẫn cho chọn đủ chất lượng nên không mất chức năng nào.
+  // W4.2 — drop child playlists (video variants / audio renditions of an already-parsed master):
+  // one video must be ONE row. The master row still lets you pick any quality, so no functionality is lost.
   const visible = visibleMedia(items).filter((m) => enabledTypes[m.type]);
 
   return (

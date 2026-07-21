@@ -7,8 +7,8 @@ import {
 } from './progress';
 
 describe('computeFetchStats', () => {
-  it('tính %, tốc độ, ETA theo số segment', () => {
-    // 10/40 segment, 5 MB trong 5 giây -> 1 MB/s; còn 30 segment, tốc độ 2 seg/s -> 15s
+  it('computes %, speed, ETA from segment count', () => {
+    // 10/40 segments, 5 MB in 5 seconds -> 1 MB/s; 30 segments remaining, 2 seg/s -> 15s
     const s = computeFetchStats({
       segmentsDone: 10,
       segmentsTotal: 40,
@@ -46,7 +46,7 @@ describe('computeFetchStats', () => {
     expect(s.etaSec).toBe(0);
   });
 
-  it('elapsed=0 -> ETA null (tránh chia 0), speed 0', () => {
+  it('elapsed=0 -> ETA null (avoids divide by 0), speed 0', () => {
     const s = computeFetchStats({
       segmentsDone: 3,
       segmentsTotal: 40,
@@ -58,7 +58,7 @@ describe('computeFetchStats', () => {
     expect(s.speedBytesPerSec).toBe(0);
   });
 
-  it('segmentsTotal=0 -> pct 0, ETA null (không crash)', () => {
+  it('segmentsTotal=0 -> pct 0, ETA null (no crash)', () => {
     const s = computeFetchStats({
       segmentsDone: 0,
       segmentsTotal: 0,
@@ -72,19 +72,19 @@ describe('computeFetchStats', () => {
 });
 
 describe('formatEta', () => {
-  it('null -> chuỗi ước lượng', () => {
+  it('null -> estimating string', () => {
     expect(formatEta(null)).toBe('đang ước lượng…');
   });
-  it('giây < 60', () => {
+  it('seconds < 60', () => {
     expect(formatEta(45)).toBe('~45 giây');
   });
-  it('phút + giây', () => {
+  it('minutes + seconds', () => {
     expect(formatEta(80)).toBe('~1 phút 20 giây');
   });
-  it('tròn phút', () => {
+  it('exact minutes', () => {
     expect(formatEta(120)).toBe('~2 phút');
   });
-  it('0 giây -> sắp xong', () => {
+  it('0 seconds -> almost done', () => {
     expect(formatEta(0)).toBe('sắp xong');
   });
 });
@@ -93,7 +93,7 @@ describe('formatSpeed', () => {
   it('MB/s', () => {
     expect(formatSpeed(1024 * 1024)).toBe('1.0 MB/s');
   });
-  it('0 -> chuỗi rỗng-ish', () => {
+  it('0 -> empty-ish string', () => {
     expect(formatSpeed(0)).toBe('0 B/s');
   });
 });

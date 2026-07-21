@@ -225,7 +225,7 @@
   margin: 6px 0 0;
 }
 
-/* Thanh tiến trình tải/ghép HLS (v0.5.0) */
+/* HLS download/mux progress bar (v0.5.0) */
 .hls-progress {
   display: flex;
   flex-direction: column;
@@ -236,7 +236,7 @@
   font-size: 12px;
   color: #cbd5e1;
 }
-/* W2.6 — ghi chú "đang thử lại": vàng cảnh báo, KHÔNG đỏ (job chưa hỏng, vẫn đang chạy). */
+/* W2.6 — "retrying" note: warning amber, NOT red (job hasn't failed, still running). */
 .hls-note {
   font-size: 11px;
   color: #fbbf24;
@@ -273,8 +273,8 @@
   }
 }
 
-/* Banner báo bản mới trên GitHub Releases (v0.6.0).
-   Dùng màu nhấn + color inherit để chạy được cả nền sáng lẫn tối (xem :root color-scheme). */
+/* Banner announcing a new version on GitHub Releases (v0.6.0).
+   Uses an accent color + color inherit so it works on both light and dark backgrounds (see :root color-scheme). */
 .update-banner {
   display: flex;
   align-items: center;
@@ -290,8 +290,8 @@
   font-size: 0.78rem;
 }
 
-/* Giữ color: inherit của .ghost-btn: chữ #2f6feb chỉ đạt 4.10:1 trên nền tối (WCAG AA cần 4.5).
-   Nhấn bằng viền + nền hover thay vì đổi màu chữ -> đủ tương phản ở cả nền sáng lẫn tối. */
+/* Keep .ghost-btn's color: inherit: #2f6feb text only reaches 4.10:1 on a dark bg (WCAG AA needs 4.5).
+   Emphasize with a border + hover background instead of changing text color -> enough contrast on both light and dark. */
 .update-btn {
   flex: 0 0 auto;
   border-color: rgba(47, 111, 235, 0.6);

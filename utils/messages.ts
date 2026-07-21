@@ -1,5 +1,5 @@
-// Giao thức message runtime giữa content script / popup / options / offscreen và background.
-// Discriminated union theo trường `kind` để type-safe.
+// Runtime message protocol between content script / popup / options / offscreen and background.
+// Discriminated union on the `kind` field for type safety.
 
 import type { DownloadEntry, HlsJob } from './storage';
 import type { MediaType, VariantInfo } from './types';
@@ -9,19 +9,19 @@ export interface DomMediaCandidate {
   contentTypeHint?: string;
 }
 
-/** Chỉ HLS/DASH mới có manifest để liệt kê chất lượng. */
+/** Only HLS/DASH have a manifest to enumerate quality levels. */
 export type ManifestKind = Extract<MediaType, 'hls' | 'dash'>;
 
 export type VariantsResponse =
   | { ok: true; isMaster: boolean; variants: VariantInfo[] }
   | { ok: false; error: string };
 
-// W2.5 — progressive nay fetch bytes trong offscreen TRƯỚC khi có chrome downloadId, nên trả về
-// `key` (jobId ổn định) thay vì downloadId. Popup dùng key để tra trạng thái + huỷ.
+// W2.5 — progressive now fetches bytes in offscreen BEFORE a chrome downloadId exists, so it returns
+// `key` (a stable jobId) instead of downloadId. Popup uses the key to look up status + cancel.
 export type DownloadStartResponse =
   { ok: true; key: string } | { ok: false; error: string };
 
-/** ACK cho 'download/progress' — offscreen await để giữ đúng thứ tự cập nhật (như hls/progress). */
+/** ACK for 'download/progress' — offscreen awaits it to preserve update ordering (like hls/progress). */
 export type DownloadProgressResponse = { ok: true };
 
 export type EngineSelfTestResponse =
@@ -31,16 +31,17 @@ export type HlsEstimateResponse =
   | {
       ok: true;
       protected: boolean;
-      /** Tên hãng DRM để thông báo nói rõ (FairPlay/PlayReady/Widevine/...). */
+      /** DRM vendor name for a clear notice (FairPlay/PlayReady/Widevine/...). */
       drmName?: string;
       segmentCount: number;
       durationSec: number;
-      /** dung lượng ước tính (byte) nếu biết bitrate. */
+      /** Estimated size (bytes) if bitrate is known. */
       estBytes?: number;
       /**
-       * W1.4 — số chỗ nối (timestamp reset, thường do chèn quảng cáo) bên trong luồng sắp tải.
-       * > 0 -> popup PHẢI cảnh báo trước khi tải: ta ghép byte rồi `-c copy`, ffmpeg gặp DTS
-       * không đơn điệu sẽ cho ra file lệch tiếng/sai thời lượng mà vẫn báo "Đã tải xong ✓".
+       * W1.4 — number of splices (timestamp resets, usually from ad insertion) inside the stream
+       * about to be downloaded. > 0 -> popup MUST warn before downloading: we concatenate bytes then
+       * `-c copy`; if ffmpeg hits non-monotonic DTS it produces a file with drifted audio/wrong
+       * duration while still reporting "Download complete ✓".
        */
       discontinuityCount: number;
     }
@@ -49,20 +50,23 @@ export type HlsEstimateResponse =
 export type HlsDownloadResponse =
   { ok: true; jobId: string } | { ok: false; error: string };
 
-/** ACK cho 'hls/progress' — offscreen await để giữ đúng thứ tự cập nhật. */
+/** ACK for 'hls/progress' — offscreen awaits it to preserve update ordering. */
 export type HlsProgressResponse = { ok: true };
 
-/** Message gửi tới BACKGROUND (từ content/popup/options/offscreen). */
+/** Message sent TO BACKGROUND (from content/popup/options/offscreen). */
 export type RuntimeMessage =
   | { kind: 'media/dom'; candidates: DomMediaCandidate[] }
   | { kind: 'media/mse'; url: string }
-  // W7.1 — content script báo trang xin DRM/EME. `keySystem` rỗng = biết có DRM nhưng không rõ hãng
-  // (tín hiệu đến từ sự kiện 'encrypted', chỗ đó không lộ tên hệ thống).
+  // W7.1 — content script reports the page requesting DRM/EME. Empty `keySystem` = DRM is known to
+  // be present but the vendor is unknown (signal comes from the 'encrypted' event, which doesn't
+  // expose the system name).
   | { kind: 'media/drm'; keySystem: string }
-  // content script sniff được manifest HLS/DASH bị nguỵ trang (đọc #EXTM3U/<MPD từ body).
+  // content script sniffed an HLS/DASH manifest disguised under another extension (reads
+  // #EXTM3U/<MPD from the body).
   | { kind: 'media/manifest'; url: string; mediaType: ManifestKind }
-  // W2.2: `tabId` để background tra `media.pageUrl` -> spoof Referer ÔM SÁT cú fetch manifest.
-  // Không có nó thì cú fetch đầu tiên trần trụi và site chống hotlink 403 ngay ở bước chọn chất lượng.
+  // W2.2: `tabId` lets background look up `media.pageUrl` -> spoof Referer TIGHTLY around the
+  // manifest fetch. Without it the first fetch goes out bare and a hotlink-protected site 403s
+  // right at the quality-selection step.
   | {
       kind: 'manifest/variants';
       url: string;
@@ -71,30 +75,30 @@ export type RuntimeMessage =
     }
   | { kind: 'download/progressive'; url: string; tabId: number }
   | { kind: 'engine/selftest' }
-  // popup -> background: ước tính dung lượng + kiểm tra DRM trước khi tải HLS.
+  // popup -> background: estimate size + check for DRM before downloading HLS.
   | {
       kind: 'hls/estimate';
       variantUrl: string;
       bandwidth?: number;
-      /** W1.1: playlist tiếng tách rời — job sẽ tải CẢ nó, nên ước lượng phải tính cả. */
+      /** W1.1: separate audio playlist — the job will download it TOO, so the estimate must include it. */
       audioUrl?: string;
-      /** W2.2: tra `media.pageUrl` để spoof Referer trước khi fetch playlist ước lượng. */
+      /** W2.2: looks up `media.pageUrl` to spoof Referer before fetching the estimate playlist. */
       tabId?: number;
       /**
-       * W1.5 — định dạng manifest. Vắng = 'hls' (mọi lượt tải trước W1.5).
+       * W1.5 — manifest format. Absent = 'hls' (every download before W1.5).
        *
-       * 🔴 URL KHÔNG định danh nổi track của DASH: với SegmentTemplate thì `resolvedUri` của MỌI
-       * representation (kể cả tiếng) đều là chính file `.mpd`. Vì vậy phải kèm `variantId`/`audioId`
-       * — thiếu chúng thì tầng dưới bốc đại representation đầu tiên: user chọn 1080p nhận về 240p,
-       * hoặc tải nhầm tiếng làm hình, KHÔNG một dòng lỗi nào.
+       * 🔴 URL CANNOT identify a DASH track: with SegmentTemplate, the `resolvedUri` of EVERY
+       * representation (including audio) is the `.mpd` file itself. So `variantId`/`audioId` must be
+       * included — without them the layer below just grabs the first representation: a user picking
+       * 1080p gets 240p, or audio gets downloaded as video, with NOT a single line of error.
        */
       mediaType?: ManifestKind;
-      /** W1.5 — id representation hình (DASH). Xem `VariantInfo.id`. */
+      /** W1.5 — video representation id (DASH). See `VariantInfo.id`. */
       variantId?: string;
-      /** W1.5 — id representation tiếng (DASH). Xem `RenditionInfo.id`. */
+      /** W1.5 — audio representation id (DASH). See `RenditionInfo.id`. */
       audioId?: string;
     }
-  // popup -> background: bắt đầu tải & ghép HLS.
+  // popup -> background: start downloading & muxing HLS.
   | {
       kind: 'hls/download';
       variantUrl: string;
@@ -102,30 +106,30 @@ export type RuntimeMessage =
       tabId: number;
       height?: number;
       /**
-       * URL playlist TIẾNG tách rời (W1.1) — lấy từ rendition `selected` của variant.
-       * Vắng = tiếng đã nằm trong variant -> đường một-input.
-       * W4.4 (chọn ngôn ngữ) chỉ việc gửi URL khác vào đây, KHÔNG phải đổi giao thức lần nữa.
+       * Separate AUDIO playlist URL (W1.1) — taken from the variant's `selected` rendition.
+       * Absent = audio already inside the variant -> single-input path.
+       * W4.4 (language selection) just needs to send a different URL here, NO protocol change needed.
        */
       audioUrl?: string;
       /**
-       * W1.5 — định dạng manifest. Vắng = 'hls' (mọi lượt tải trước W1.5).
+       * W1.5 — manifest format. Absent = 'hls' (every download before W1.5).
        *
-       * 🔴 URL KHÔNG định danh nổi track của DASH: với SegmentTemplate thì `resolvedUri` của MỌI
-       * representation (kể cả tiếng) đều là chính file `.mpd`. Vì vậy phải kèm `variantId`/`audioId`
-       * — thiếu chúng thì tầng dưới bốc đại representation đầu tiên: user chọn 1080p nhận về 240p,
-       * hoặc tải nhầm tiếng làm hình, KHÔNG một dòng lỗi nào.
+       * 🔴 URL CANNOT identify a DASH track: with SegmentTemplate, the `resolvedUri` of EVERY
+       * representation (including audio) is the `.mpd` file itself. So `variantId`/`audioId` must be
+       * included — without them the layer below just grabs the first representation: a user picking
+       * 1080p gets 240p, or audio gets downloaded as video, with NOT a single line of error.
        */
       mediaType?: ManifestKind;
-      /** W1.5 — id representation hình (DASH). Xem `VariantInfo.id`. */
+      /** W1.5 — video representation id (DASH). See `VariantInfo.id`. */
       variantId?: string;
-      /** W1.5 — id representation tiếng (DASH). Xem `RenditionInfo.id`. */
+      /** W1.5 — audio representation id (DASH). See `RenditionInfo.id`. */
       audioId?: string;
     }
-  // offscreen -> background: cập nhật tiến trình job HLS.
-  // Offscreen KHÔNG ghi thẳng chrome.storage được (chỉ có chrome.runtime) -> mọi thay đổi state
-  // phải đi qua đây để background ghi hộ. Đây là ràng buộc của Chrome, không phải lựa chọn.
+  // offscreen -> background: update HLS job progress.
+  // Offscreen CANNOT write chrome.storage directly (only has chrome.runtime) -> every state change
+  // must go through here for background to write on its behalf. This is a Chrome constraint, not a choice.
   | { kind: 'hls/progress'; jobId: string; patch: Partial<HlsJob> }
-  // offscreen -> background: đã có file (HLS ghép, hoặc progressive fetch xong), nhờ background LƯU.
+  // offscreen -> background: a file is ready (HLS muxed, or progressive fetch done), ask background to SAVE it.
   | {
       kind: 'download/blob';
       blobUrl: string;
@@ -134,28 +138,31 @@ export type RuntimeMessage =
       tabId: number;
       jobId: string;
       /**
-       * W2.4 — id MỌI session rule spoof đã áp cho job này (một id cho mỗi host: hình + tiếng +
-       * segment/key/init khác host). Offscreen chỉ mang hộ để gửi ngược cho background DỌN đúng
-       * những rule đó — offscreen KHÔNG có chrome.declarativeNetRequest nên tự nó không xoá được.
+       * W2.4 — id of EVERY spoof session rule applied for this job (one id per host: video + audio +
+       * segment/key/init on a different host). Offscreen just carries it to hand back to background so
+       * it can clean up exactly those rules — offscreen has NO chrome.declarativeNetRequest so it
+       * cannot delete them itself.
        */
       spoofRuleIds?: number[];
       /**
-       * W2.5 — có mặt khi blob này là của một lượt PROGRESSIVE (không phải HLS). Là khoá của
-       * DownloadEntry in-flight để background gắn chromeDownloadId vào đúng entry đó (không tạo mới).
-       * Vắng = luồng HLS cũ -> background tạo DownloadEntry keyed theo jobId.
+       * W2.5 — present when this blob belongs to a PROGRESSIVE download (not HLS). It's the key of the
+       * in-flight DownloadEntry so background attaches the chromeDownloadId to that exact entry
+       * (instead of creating a new one). Absent = the old HLS flow -> background creates a
+       * DownloadEntry keyed by jobId.
        */
       downloadKey?: string;
     }
-  // offscreen -> background: tiến trình fetch progressive (W2.5). Offscreen không ghi storage được
-  // (chỉ có chrome.runtime) nên báo qua đây; background updateDownload hộ. ACK để giữ đúng thứ tự.
+  // offscreen -> background: progressive fetch progress (W2.5). Offscreen cannot write storage
+  // (only has chrome.runtime) so it reports through here; background calls updateDownload on its
+  // behalf. ACK to preserve ordering.
   | { kind: 'download/progress'; key: string; patch: Partial<DownloadEntry> }
   | { kind: 'hls/cancel'; jobId: string }
-  // W2.5 — huỷ theo KHOÁ (jobId) thay vì downloadId: lúc đang fetch trong offscreen chưa có
-  // chromeDownloadId. Background tự chọn: có chromeDownloadId -> chrome.downloads.cancel; chưa có
-  // -> báo offscreen abort cú fetch.
+  // W2.5 — cancel by KEY (jobId) instead of downloadId: while fetching in offscreen there is no
+  // chromeDownloadId yet. Background picks the right path itself: chromeDownloadId present ->
+  // chrome.downloads.cancel; absent -> tell offscreen to abort the fetch.
   | { kind: 'download/cancel'; key: string };
 
-/** Message gửi TỪ background TỚI offscreen (có `target: 'offscreen'` để phân biệt). */
+/** Message sent FROM background TO offscreen (has `target: 'offscreen'` to distinguish it). */
 export type OffscreenRequest =
   | { target: 'offscreen'; kind: 'engine/selftest' }
   | {
@@ -166,33 +173,34 @@ export type OffscreenRequest =
       filename: string;
       mediaUrl: string;
       tabId: number;
-      /** W2.4 — id mọi rule spoof của job -> offscreen gửi ngược lại để background dọn đúng rule. */
+      /** W2.4 — id of every spoof rule for the job -> offscreen sends it back so background cleans up the right rules. */
       spoofRuleIds?: number[];
-      /** W1.1: playlist tiếng tách rời. Có -> offscreen tải 2 bộ segment rồi ghép 2 input. */
+      /** W1.1: separate audio playlist. Present -> offscreen downloads 2 sets of segments then muxes 2 inputs. */
       audioUrl?: string;
       /**
-       * Số luồng tải song song. PHẢI do background đọc từ settings rồi truyền vào:
-       * offscreen KHÔNG có `chrome.storage` (chỉ có `chrome.runtime`) nên không tự đọc được.
+       * Number of parallel download threads. MUST be read from settings by background and passed in:
+       * offscreen has NO `chrome.storage` (only `chrome.runtime`) so it cannot read it itself.
        */
       concurrency: number;
       /**
-       * W1.5 — định dạng manifest. Vắng = 'hls' (mọi lượt tải trước W1.5).
+       * W1.5 — manifest format. Absent = 'hls' (every download before W1.5).
        *
-       * 🔴 URL KHÔNG định danh nổi track của DASH: với SegmentTemplate thì `resolvedUri` của MỌI
-       * representation (kể cả tiếng) đều là chính file `.mpd`. Vì vậy phải kèm `variantId`/`audioId`
-       * — thiếu chúng thì tầng dưới bốc đại representation đầu tiên: user chọn 1080p nhận về 240p,
-       * hoặc tải nhầm tiếng làm hình, KHÔNG một dòng lỗi nào.
+       * 🔴 URL CANNOT identify a DASH track: with SegmentTemplate, the `resolvedUri` of EVERY
+       * representation (including audio) is the `.mpd` file itself. So `variantId`/`audioId` must be
+       * included — without them the layer below just grabs the first representation: a user picking
+       * 1080p gets 240p, or audio gets downloaded as video, with NOT a single line of error.
        */
       mediaType?: ManifestKind;
-      /** W1.5 — id representation hình (DASH). Xem `VariantInfo.id`. */
+      /** W1.5 — video representation id (DASH). See `VariantInfo.id`. */
       variantId?: string;
-      /** W1.5 — id representation tiếng (DASH). Xem `RenditionInfo.id`. */
+      /** W1.5 — audio representation id (DASH). See `RenditionInfo.id`. */
       audioId?: string;
     }
   | { target: 'offscreen'; kind: 'revoke'; url: string }
   | { target: 'offscreen'; kind: 'hls/cancel'; jobId: string }
-  // W2.5 — tải progressive qua offscreen: fetch bytes (Range chunk cho file lớn) với rule spoof đang
-  // bật, dựng Blob, gửi ngược download/blob. `chrome.downloads.download` do đó CHỈ nhận blob: URL.
+  // W2.5 — progressive download via offscreen: fetch bytes (Range chunks for large files) while the
+  // spoof rule is active, build a Blob, send download/blob back. `chrome.downloads.download` therefore
+  // ONLY ever receives a blob: URL.
   | {
       target: 'offscreen';
       kind: 'download/run';
@@ -201,17 +209,17 @@ export type OffscreenRequest =
       filename: string;
       mediaUrl: string;
       tabId: number;
-      /** id rule spoof đã áp -> mang hộ để gửi lại cho background dọn (offscreen không đụng DNR). */
+      /** id of the applied spoof rule -> carried along so background can clean it up (offscreen doesn't touch DNR). */
       spoofRuleIds?: number[];
     }
-  // W2.5 — huỷ một lượt fetch progressive đang bay trong offscreen (abort AbortController).
+  // W2.5 — cancel a progressive fetch in flight inside offscreen (abort the AbortController).
   | { target: 'offscreen'; kind: 'download/abort'; key: string };
 
 export async function sendRuntimeMessage(msg: RuntimeMessage): Promise<void> {
   try {
     await browser.runtime.sendMessage(msg);
   } catch {
-    // background có thể chưa sẵn sàng; bỏ qua an toàn.
+    // background may not be ready yet; safe to ignore.
   }
 }
 
@@ -312,7 +320,7 @@ export async function requestHlsDownload(
   }
 }
 
-/** Huỷ một job HLS đang chạy. */
+/** Cancel a running HLS job. */
 export async function requestHlsCancel(jobId: string): Promise<void> {
   try {
     await browser.runtime.sendMessage({ kind: 'hls/cancel', jobId });
@@ -321,7 +329,7 @@ export async function requestHlsCancel(jobId: string): Promise<void> {
   }
 }
 
-/** Huỷ một lượt tải progressive đang chạy (theo khoá jobId — W2.5). */
+/** Cancel a running progressive download (by jobId key — W2.5). */
 export async function requestDownloadCancel(key: string): Promise<void> {
   try {
     await browser.runtime.sendMessage({ kind: 'download/cancel', key });

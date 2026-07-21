@@ -21,35 +21,36 @@ const MPD = `<?xml version="1.0"?>
 describe('parseDashManifest', () => {
   const r = parseDashManifest(MPD, 'https://ex.com/dir/stream.mpd');
 
-  it('2 representation, sắp xếp giảm dần theo height', () => {
+  it('2 representations, sorted descending by height', () => {
     expect(r.variants).toHaveLength(2);
     expect(r.variants[0]!.height).toBe(720);
     expect(r.variants[1]!.height).toBe(360);
   });
 
-  // ⚠️ Test này TRƯỚC ĐÂY ghim `uri` = file media ('…/video720.mp4') và giả định đó ĐÃ SAI —
-  // review đối kháng W1.5 chỉ ra: mọi tầng dưới coi `variantUrl` là TÀI LIỆU MANIFEST và gọi
-  // `res.text()` + parse trên nó, nên trả về .mp4 khiến chúng nuốt nguyên file video làm XML.
-  // Danh tính track của DASH nằm ở `id`; `uri` chỉ cần chỉ đúng chỗ lấy manifest.
-  it('uri của variant là MANIFEST, không phải file media', () => {
+  // ⚠️ This test PREVIOUSLY pinned `uri` = the media file ('…/video720.mp4') and that assumption
+  // was WRONG — adversarial review W1.5 pointed out: every downstream layer treats `variantUrl`
+  // as the MANIFEST DOCUMENT and calls `res.text()` + parses it, so returning .mp4 makes them
+  // swallow the raw video file and try to parse it as XML. DASH track identity lives in `id`;
+  // `uri` only needs to point to where the manifest can be fetched.
+  it('variant uri is the MANIFEST, not the media file', () => {
     expect(r.variants[0]!.uri).toBe('https://ex.com/dir/stream.mpd');
   });
 
-  it('isMaster true khi có nhiều hơn 1 variant', () => {
+  it('isMaster is true when there is more than 1 variant', () => {
     expect(r.isMaster).toBe(true);
   });
 });
 
 // ===========================================================================
-// W0.4 — FIXTURE CA KHÓ (DASH). Fixture cũ ở trên dùng SegmentBase+BaseURL —
-// đúng dạng DASH DUY NHẤT mà `resolvedUri` là file media thật. Dạng phổ biến
-// nhất ngoài đời là SegmentTemplate, và ở đó resolvedUri CHÍNH LÀ file .mpd.
+// W0.4 — HARD-CASE FIXTURE (DASH). The fixture above uses SegmentBase+BaseURL —
+// the ONLY DASH shape where `resolvedUri` is an actual media file. The most
+// common shape in the wild is SegmentTemplate, where resolvedUri IS the .mpd file.
 //
-// Quy ước 3 lớp test giống utils/hls.test.ts: hợp đồng thư viện (xanh) /
-// it.fails (đỏ thật, tự bật khi Đợt 1 sửa xong) / test canh.
+// Same 3-layer test convention as utils/hls.test.ts: library contract (green) /
+// it.fails (real red, auto-flips green once Batch 1 is fixed) / guard test.
 // ===========================================================================
 
-/** Shape mediaGroups.AUDIO đã ĐO THẬT ở mpd-parser@1.4.0. */
+/** mediaGroups.AUDIO shape, ACTUALLY MEASURED on mpd-parser@1.4.0. */
 interface MpdAudioRendition {
   language?: string;
   default?: boolean;
@@ -60,7 +61,7 @@ interface MpdAudioRendition {
 }
 
 // --- Fixture: SegmentTemplate + AdaptationSet audio ----------------------
-// DASH LUÔN LUÔN tách tiếng -> đây là ca chuẩn, không phải ngoại lệ.
+// DASH ALWAYS separates audio -> this is the standard case, not an exception.
 const MPD_TEMPLATE = `<?xml version="1.0" encoding="utf-8"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT60S" minBufferTime="PT2S">
  <Period id="p0">
@@ -77,11 +78,11 @@ const MPD_TEMPLATE = `<?xml version="1.0" encoding="utf-8"?>
 </MPD>`;
 const TPL_BASE = 'https://ex.com/dir/stream.mpd';
 
-describe('W0.4 hợp đồng mpd-parser: SegmentTemplate', () => {
+describe('W0.4 mpd-parser contract: SegmentTemplate', () => {
   const m = parseMpd(MPD_TEMPLATE, { manifestUri: TPL_BASE });
 
-  it('MỌI representation có resolvedUri = chính file .mpd (không phải media)', () => {
-    // Đây là gốc rễ của "bấm 720p thì mọi dòng cùng sáng": uri không phân biệt nổi.
+  it('EVERY representation has resolvedUri = the .mpd file itself (not the media)', () => {
+    // This is the root cause of "clicking 720p lights up every row": uri can't tell them apart.
     expect(m.playlists!.map((p) => p.resolvedUri)).toEqual([
       TPL_BASE,
       TPL_BASE,
@@ -89,20 +90,20 @@ describe('W0.4 hợp đồng mpd-parser: SegmentTemplate', () => {
     expect(m.playlists![0]!.uri).toBe('');
   });
 
-  it('danh tính thật nằm ở attributes.NAME = id của Representation', () => {
+  it('real identity lives in attributes.NAME = the Representation id', () => {
     expect(m.playlists!.map((p) => p.attributes!.NAME)).toEqual([
       'v720',
       'v360',
     ]);
   });
 
-  it('segment media THÌ có resolvedUri tuyệt đối (dữ liệu tải được nằm sẵn)', () => {
+  it('media segments DO have an absolute resolvedUri (downloadable data is right there)', () => {
     const segs = m.playlists![0]!.segments as { resolvedUri?: string }[];
     expect(segs[0]!.resolvedUri).toBe('https://ex.com/dir/v720/seg-1.m4s');
     expect(segs).toHaveLength(15);
   });
 
-  it('tiếng nằm ở mediaGroups.AUDIO[group][label].playlists[0].segments[]', () => {
+  it('audio lives at mediaGroups.AUDIO[group][label].playlists[0].segments[]', () => {
     const mg = m.mediaGroups as {
       AUDIO?: Record<string, Record<string, MpdAudioRendition>>;
     };
@@ -115,37 +116,37 @@ describe('W0.4 hợp đồng mpd-parser: SegmentTemplate', () => {
   });
 });
 
-describe('W0.4/W1.5 DASH SegmentTemplate -> variant không phân biệt nổi + mất tiếng', () => {
+describe('W0.4/W1.5 DASH SegmentTemplate -> variants indistinguishable + lost audio', () => {
   const r = parseDashManifest(MPD_TEMPLATE, TPL_BASE);
 
-  it('hiện trạng: 2 variant nhưng uri TRÙNG HỆT (chính là file .mpd)', () => {
+  it('current state: 2 variants but uri is IDENTICAL (it is the .mpd file)', () => {
     expect(r.variants).toHaveLength(2);
     expect(new Set(r.variants.map((v) => v.uri)).size).toBe(1);
     expect(r.variants[0]!.uri).toBe(TPL_BASE);
   });
 
-  // W1.5 XONG: `id` lấy từ Representation@id (attributes.NAME) -> phân biệt được dù uri trùng.
-  it('variant phải có `id` riêng (lấy từ attributes.NAME)', () => {
+  // W1.5 DONE: `id` is taken from Representation@id (attributes.NAME) -> distinguishable even with matching uri.
+  it('variant must have its own `id` (taken from attributes.NAME)', () => {
     const ids = r.variants.map((v) => v.id);
     expect(ids).toEqual(['v720', 'v360']);
   });
 
-  // ✅ W1.5 nửa sau: parseDashManifest nay đọc mediaGroups.AUDIO -> tiếng lộ ra cho popup chọn.
-  it('kết quả phải lộ ra representation tiếng a128', () => {
+  // ✅ W1.5 second half: parseDashManifest now reads mediaGroups.AUDIO -> audio surfaces for popup selection.
+  it('result must surface the a128 audio representation', () => {
     expect(JSON.stringify(r)).toContain('a128');
   });
 
-  // CANH: AdaptationSet tiếng KHÔNG được lẫn vào danh sách chất lượng hình.
-  it('không được liệt kê tiếng như một mức chất lượng hình', () => {
+  // GUARD: the audio AdaptationSet must NOT be mixed into the video-quality list.
+  it('must not list audio as a video quality level', () => {
     expect(r.variants.map((v) => v.height)).toEqual([720, 360]);
   });
 });
 
-// --- Fixture: DASH đa Period --------------------------------------------
-// mpd-parser TỰ KHÂU nhiều Period thành MỘT playlist -> không cần xử lý riêng.
-// NHƯNG ranh giới Period là một discontinuity thật, VÀ mỗi Period có init
-// segment RIÊNG -> HlsSegment.initUri (một init duy nhất cho cả playlist)
-// không diễn đạt nổi ca này.
+// --- Fixture: multi-Period DASH --------------------------------------------
+// mpd-parser AUTOMATICALLY STITCHES multiple Periods into ONE playlist -> no
+// special handling needed. BUT the Period boundary IS a real discontinuity,
+// AND each Period has its OWN init segment -> HlsSegment.initUri (a single
+// init for the whole playlist) cannot express this case.
 const MPD_MULTI_PERIOD = `<?xml version="1.0" encoding="utf-8"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT20S" minBufferTime="PT2S">
  <Period id="p0" duration="PT10S">
@@ -162,13 +163,13 @@ const MPD_MULTI_PERIOD = `<?xml version="1.0" encoding="utf-8"?>
  </Period>
 </MPD>`;
 
-describe('W0.4 hợp đồng mpd-parser: đa Period', () => {
+describe('W0.4 mpd-parser contract: multi-Period', () => {
   const m = parseMpd(MPD_MULTI_PERIOD, {
     manifestUri: 'https://ex.com/dir/multi.mpd',
   });
   const p = m.playlists![0]!;
 
-  it('tự khâu 2 Period thành MỘT playlist 4 segment', () => {
+  it('automatically stitches 2 Periods into ONE playlist with 4 segments', () => {
     expect(m.playlists).toHaveLength(1);
     const segs = p.segments as { resolvedUri?: string }[];
     expect(segs.map((s) => s.resolvedUri)).toEqual([
@@ -179,14 +180,14 @@ describe('W0.4 hợp đồng mpd-parser: đa Period', () => {
     ]);
   });
 
-  it('ranh giới Period LÀ một discontinuity thật (chỉ số 2)', () => {
+  it('Period boundary IS a real discontinuity (index 2)', () => {
     expect(p.discontinuityStarts).toEqual([2]);
     const segs = p.segments as { discontinuity?: boolean; timeline?: number }[];
     expect(segs[2]!.discontinuity).toBe(true);
     expect(segs.map((s) => s.timeline)).toEqual([0, 0, 10, 10]);
   });
 
-  it('MỖI Period có init segment RIÊNG -> một initUri cho cả playlist là SAI', () => {
+  it('EACH Period has its OWN init segment -> one initUri for the whole playlist is WRONG', () => {
     const segs = p.segments as { map?: { resolvedUri?: string } }[];
     expect(segs.map((s) => s.map!.resolvedUri)).toEqual([
       'https://ex.com/dir/p0/v720-init.mp4',
@@ -197,8 +198,8 @@ describe('W0.4 hợp đồng mpd-parser: đa Period', () => {
   });
 });
 
-describe('W7.1 — DASH khai DRM trong manifest thì phải DỪNG (ranh giới cứng §7)', () => {
-  it('MPD có <ContentProtection> Widevine -> isProtected + nêu tên hãng', () => {
+describe('W7.1 — DASH declaring DRM in the manifest must STOP (hard boundary §7)', () => {
+  it('MPD with <ContentProtection> Widevine -> isProtected + names the vendor', () => {
     const mpd = `<?xml version="1.0"?><MPD><Period><AdaptationSet mimeType="video/mp4">
       <ContentProtection schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"/>
       <Representation id="1" bandwidth="800000" width="640" height="360"/>
@@ -208,7 +209,7 @@ describe('W7.1 — DASH khai DRM trong manifest thì phải DỪNG (ranh giới 
     expect(r.drmSystems).toContain('Widevine');
   });
 
-  it('MPD thường -> KHÔNG protected (đừng chặn oan video sạch)', () => {
+  it('a normal MPD -> NOT protected (do not wrongly block clean video)', () => {
     const mpd = `<?xml version="1.0"?><MPD><Period><AdaptationSet mimeType="video/mp4">
       <Representation id="1" bandwidth="800000" width="640" height="360"/>
       </AdaptationSet></Period></MPD>`;
@@ -218,10 +219,11 @@ describe('W7.1 — DASH khai DRM trong manifest thì phải DỪNG (ranh giới 
   });
 });
 
-// --- W1.5: id đụng nhau THẬT trên đường parse, không chỉ ở mức hàm ---------
-// mpd-parser gom representation theo BaseURL rồi mới gộp theo id, nên hai AdaptationSet khai
-// TRÙNG @id mà khác BaseURL thì sống sót thành hai playlist riêng. DASH cho phép điều này: @id
-// chỉ cần duy nhất trong MỘT AdaptationSet. Thêm một @id đã mang sẵn dấu '#' đúng dạng ta sinh ra.
+// --- W1.5: id collisions REALLY happen during parsing, not just at the function level ---------
+// mpd-parser groups representations by BaseURL before merging by id, so two AdaptationSets that
+// declare the SAME @id but differ in BaseURL survive as two separate playlists. DASH allows this:
+// @id only needs to be unique WITHIN one AdaptationSet. Also add an @id that already carries a
+// '#' character, matching the shape we generate ourselves.
 const MPD_DUP_IDS = `<?xml version="1.0"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT30S" minBufferTime="PT2S">
  <Period>
@@ -246,68 +248,68 @@ const MPD_DUP_IDS = `<?xml version="1.0"?>
  </Period>
 </MPD>`;
 
-describe('W1.5 DASH: @id trùng nhau giữa các AdaptationSet vẫn phải ra id duy nhất', () => {
+describe('W1.5 DASH: matching @id across AdaptationSets must still produce unique ids', () => {
   const r = parseDashManifest(MPD_DUP_IDS, 'https://ex.com/x/manifest.mpd');
 
-  // Ghim ĐÚNG hậu quả người dùng thấy: trùng id = trùng key React = bấm một dòng sáng cả cụm.
-  it('mọi variant có id riêng dù manifest khai @id trùng', () => {
+  // Pin down the EXACT consequence the user sees: duplicate id = duplicate React key = clicking one row lights up the whole cluster.
+  it('every variant has its own id even when the manifest declares duplicate @id', () => {
     expect(r.variants).toHaveLength(3);
     expect(new Set(r.variants.map((v) => v.id)).size).toBe(3);
   });
 });
 
 // ===========================================================================
-// W1.5 NỬA SAU — parseDashSegments: DASH tải được thật.
-// Trả về ĐÚNG shape HlsSegmentsResult để dùng lại nguyên bộ máy fetch/mux của HLS.
+// W1.5 SECOND HALF — parseDashSegments: DASH can actually be downloaded.
+// Returns the EXACT HlsSegmentsResult shape to reuse the entire HLS fetch/mux machinery.
 // ===========================================================================
 
-// Đa Period nhưng MỖI Period một init khác nhau -> ghép mù sẽ ra file hỏng ÂM THẦM.
+// Multi-Period but EACH Period has a different init -> stitching blindly produces a SILENTLY corrupt file.
 const MPD_MULTI_INIT = MPD_MULTI_PERIOD;
 
-// SegmentBase: mpd-parser trả về 0 segment, còn resolvedUri LÀ file media tải thẳng được.
+// SegmentBase: mpd-parser returns 0 segments, while resolvedUri IS a directly downloadable media file.
 const MPD_SEGMENT_BASE = MPD;
 
-describe('W1.5 parseDashSegments — hình', () => {
+describe('W1.5 parseDashSegments — video', () => {
   const r = parseDashSegments(MPD_TEMPLATE, TPL_BASE, 'v720');
 
-  it('trả segment tuyệt đối đúng representation đã chọn', () => {
+  it('returns absolute segments for exactly the selected representation', () => {
     expect(r.segments).toHaveLength(15);
     expect(r.segments[0]!.uri).toBe('https://ex.com/dir/v720/seg-1.m4s');
     expect(r.segments[0]!.duration).toBe(4);
   });
 
-  it('init segment lấy từ segments[0].map', () => {
+  it('init segment is taken from segments[0].map', () => {
     expect(r.hasInit).toBe(true);
     expect(r.segments[0]!.initUri).toBe('https://ex.com/dir/v720/init.mp4');
   });
 
-  it('DASH không có AES-128 kiểu HLS -> encryption none, không khoá', () => {
+  it('DASH has no HLS-style AES-128 -> encryption none, no key', () => {
     expect(r.encryption).toBe('none');
     expect(r.isProtected).toBe(false);
     expect(r.segments[0]!.keyUri).toBeUndefined();
     expect(r.segments[0]!.keyMethod).toBeUndefined();
   });
 
-  it('tổng thời lượng cộng từ segment', () => {
+  it('total duration is summed from the segments', () => {
     expect(r.totalDuration).toBe(60);
   });
 
-  // W1.4 — `discontinuityCount` là trường BẮT BUỘC của HlsSegmentsResult, nên DASH phải điền nó
-  // luôn (một Period = không chỗ nối nào). Thiếu -> tầng trên đọc `undefined` rồi so sánh `> 0`
-  // ra false: im lặng đúng kiểu §2.1 chứ không phải lỗi ồn ào.
-  it('một Period -> discontinuityCount = 0 (không cảnh báo oan)', () => {
+  // W1.4 — `discontinuityCount` is a REQUIRED field of HlsSegmentsResult, so DASH must always fill
+  // it in (one Period = no boundary at all). Missing it -> the upper layer reads `undefined`, compares
+  // it with `> 0`, gets false: a §2.1-style silent failure rather than a loud error.
+  it('one Period -> discontinuityCount = 0 (no false warning)', () => {
     expect(r.discontinuityCount).toBe(0);
   });
 
-  // Chọn ĐÚNG representation, không phải cái đầu tiên gặp.
-  it('chọn v360 thì ra segment của v360', () => {
+  // Selects the CORRECT representation, not just the first one encountered.
+  it('selecting v360 yields v360 segments', () => {
     const r360 = parseDashSegments(MPD_TEMPLATE, TPL_BASE, 'v360');
     expect(r360.segments[0]!.uri).toBe('https://ex.com/dir/v360/seg-1.m4s');
   });
 });
 
-describe('W1.5 parseDashSegments — tiếng (DASH LUÔN tách tiếng)', () => {
-  it('tra được representation tiếng theo id', () => {
+describe('W1.5 parseDashSegments — audio (DASH ALWAYS separates audio)', () => {
+  it('looks up the audio representation by id', () => {
     const r = parseDashSegments(MPD_TEMPLATE, TPL_BASE, 'a128');
     expect(r.segments).toHaveLength(15);
     expect(r.segments[0]!.uri).toBe('https://ex.com/dir/a128/seg-1.m4s');
@@ -315,10 +317,10 @@ describe('W1.5 parseDashSegments — tiếng (DASH LUÔN tách tiếng)', () => 
   });
 });
 
-describe('W1.5 parseDashManifest phải lộ tiếng ra cho popup chọn', () => {
+describe('W1.5 parseDashManifest must surface audio for popup selection', () => {
   const r = parseDashManifest(MPD_TEMPLATE, TPL_BASE);
 
-  it('mỗi variant mang danh sách rendition tiếng, đúng MỘT cái selected', () => {
+  it('each variant carries a list of audio renditions, with exactly ONE selected', () => {
     const rends = r.variants[0]!.audioRenditions;
     expect(rends).toBeDefined();
     expect(rends!.map((x) => x.id)).toEqual(['a128']);
@@ -326,10 +328,11 @@ describe('W1.5 parseDashManifest phải lộ tiếng ra cho popup chọn', () =>
   });
 });
 
-describe('W1.5 CHẶN TRUNG THỰC các ca ghép ra file hỏng âm thầm', () => {
-  // Mỗi Period một init riêng: downloadTrack chỉ nạp init ĐẦU rồi nối mọi segment ra sau ->
-  // ffmpeg vẫn nhận, job vẫn báo "xong", file thì SAI. Thà dừng và nói thẳng.
-  it('đa Period init khác nhau -> nêu lý do không hỗ trợ, KHÔNG im lặng', () => {
+describe('W1.5 HONESTLY BLOCK the cases that would produce silently corrupt files', () => {
+  // Each Period has its own init: downloadTrack only loads the FIRST init then appends every
+  // segment after it -> ffmpeg still accepts it, the job still reports "done", but the file is WRONG.
+  // Better to stop and say so plainly.
+  it('multi-Period with different inits -> states the unsupported reason, does NOT stay silent', () => {
     const r = parseDashSegments(
       MPD_MULTI_INIT,
       'https://ex.com/dir/multi.mpd',
@@ -339,9 +342,9 @@ describe('W1.5 CHẶN TRUNG THỰC các ca ghép ra file hỏng âm thầm', () 
     expect(r.unsupportedReason).toContain('Period');
   });
 
-  // SegmentBase: 0 segment nhưng resolvedUri là file .mp4 tải thẳng được -> phải chỉ ra đường đó,
-  // không được báo "playlist không có segment nào" (đúng chữ, sai hoàn toàn về nguyên nhân).
-  it('SegmentBase -> chỉ ra URL tải thẳng thay vì báo rỗng khó hiểu', () => {
+  // SegmentBase: 0 segments but resolvedUri is a directly downloadable .mp4 file -> must point to
+  // that URL instead of reporting "playlist has no segments" (technically true, but entirely wrong about the cause).
+  it('SegmentBase -> points to the direct-download URL instead of a confusing empty report', () => {
     const r = parseDashSegments(
       MPD_SEGMENT_BASE,
       'https://ex.com/dir/stream.mpd',
@@ -352,11 +355,11 @@ describe('W1.5 CHẶN TRUNG THỰC các ca ghép ra file hỏng âm thầm', () 
   });
 });
 
-describe('W1.5 tra id KHÔNG được trúng nhầm representation khi @id đụng nhau', () => {
-  it('id đã tách bằng hậu tố thì tra đúng cái đã tách', () => {
+describe('W1.5 id lookup must NOT hit the wrong representation when @id collides', () => {
+  it('an id disambiguated with a suffix looks up the correctly disambiguated one', () => {
     const m = parseDashManifest(MPD_DUP_IDS, 'https://ex.com/x/manifest.mpd');
     const ids = m.variants.map((v) => v.id);
-    // Mỗi id phải tra ra ĐÚNG representation có uri riêng của nó.
+    // Each id must look up EXACTLY the representation with its own uri.
     const uris = ids.map(
       (id) =>
         parseDashSegments(MPD_DUP_IDS, 'https://ex.com/x/manifest.mpd', id)
@@ -367,14 +370,14 @@ describe('W1.5 tra id KHÔNG được trúng nhầm representation khi @id đụ
 });
 
 // ===========================================================================
-// Review đối kháng W1.5 nửa sau bắt được — ĐÃ ĐO, không phải suy luận.
+// Caught by adversarial review of W1.5's second half — ACTUALLY MEASURED, not inferred.
 // ===========================================================================
 
-// Đa Period nhưng template init nội suy ra CÙNG một URI (dạng SegmentTemplate phổ biến nhất).
-// 🔬 ĐO THẬT ở mpd-parser@1.4.0: 2 Period -> 1 playlist, 4 segment, init duy nhất 1 cái, và
-// media URI LẶP: seg-v0-1, seg-v0-2, seg-v0-1, seg-v0-2 (startNumber reset mỗi Period).
-// => Guard "nhiều init khác nhau" KHÔNG bắn, và ghép mù cho ra CÙNG 10 giây nối hai lần,
-//    đóng gói thành video 20 giây. ffmpeg nhận, job báo "xong". Hỏng ÂM THẦM.
+// Multi-Period but the init template interpolates to the SAME URI (the most common SegmentTemplate shape).
+// 🔬 ACTUALLY MEASURED on mpd-parser@1.4.0: 2 Periods -> 1 playlist, 4 segments, a single shared init, and
+// REPEATED media URIs: seg-v0-1, seg-v0-2, seg-v0-1, seg-v0-2 (startNumber resets per Period).
+// => The "multiple different inits" guard does NOT fire, and blind stitching produces the SAME 10
+//    seconds appended twice, packaged as a 20-second video. ffmpeg accepts it, the job reports "done". SILENT corruption.
 const MPD_MULTI_PERIOD_SAME_INIT = `<?xml version="1.0"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT20S" minBufferTime="PT2S">
  <Period id="p0" duration="PT10S">
@@ -391,53 +394,53 @@ const MPD_MULTI_PERIOD_SAME_INIT = `<?xml version="1.0"?>
  </Period>
 </MPD>`;
 
-describe('W1.5 đa Period phải bị chặn kể cả khi init GIỐNG nhau', () => {
+describe('W1.5 multi-Period must be blocked even when inits are IDENTICAL', () => {
   const r = parseDashSegments(
     MPD_MULTI_PERIOD_SAME_INIT,
     'https://x.test/m.mpd',
     'v0',
   );
 
-  it('ghim hiện tượng đã đo: segment LẶP URL vì startNumber reset mỗi Period', () => {
+  it('pins the measured phenomenon: segment URIs REPEAT because startNumber resets per Period', () => {
     expect(r.segments).toHaveLength(4);
     expect(new Set(r.segments.map((s) => s.uri)).size).toBe(2);
   });
 
-  it('phải nêu lý do không hỗ trợ, KHÔNG được ghép ra file lặp nội dung', () => {
+  it('must state an unsupported reason, must NOT stitch out a file with duplicated content', () => {
     expect(r.unsupportedReason).toBeTruthy();
     expect(r.unsupportedReason).toContain('Period');
   });
 
-  // W1.4 — ca "một Period -> 0" ở trên được thoả mãn bởi một số 0 CỨNG, nên tự nó không chứng
-  // minh parseDashSegments có thật sự gọi countDiscontinuities. Ranh giới Period là chỗ nối THẬT,
-  // nên đây là ca duy nhất buộc con số phải đến từ manifest.
-  it('ranh giới Period là chỗ nối thật -> đếm ra 1 (không phải số 0 cứng)', () => {
+  // W1.4 — the "one Period -> 0" case above is satisfied by a HARDCODED 0, so on its own it doesn't
+  // prove parseDashSegments actually calls countDiscontinuities. A Period boundary is a REAL
+  // boundary, so this is the one case that forces the number to come from the manifest itself.
+  it('a Period boundary is a real boundary -> counts to 1 (not a hardcoded 0)', () => {
     expect(r.discontinuityCount).toBe(1);
   });
 });
 
-describe('W1.5 DASH: uri của variant PHẢI là manifest, không phải file media', () => {
-  // Mọi tầng dưới (estimate/spoof/offscreen) coi `variantUrl` là TÀI LIỆU MANIFEST và gọi
-  // parse trên text của nó. Với SegmentBase, `resolvedUri` là file .mp4 -> trả về nó nghĩa là
-  // tầng dưới fetch nguyên file video rồi `res.text()` nó và parse như XML. Định danh track của
-  // DASH là `id`, nên uri KHÔNG cần mang thông tin gì khác ngoài chỗ lấy manifest.
-  it('SegmentBase: uri vẫn là .mpd chứ không phải .mp4', () => {
+describe('W1.5 DASH: variant uri MUST be the manifest, not a media file', () => {
+  // Every downstream layer (estimate/spoof/offscreen) treats `variantUrl` as the MANIFEST DOCUMENT
+  // and parses its text. With SegmentBase, `resolvedUri` is a .mp4 file -> returning it means the
+  // downstream layer fetches the raw video file, calls `res.text()` on it, and parses it as XML.
+  // DASH track identity is `id`, so uri does NOT need to carry any information beyond where to fetch the manifest.
+  it('SegmentBase: uri is still .mpd, not .mp4', () => {
     const m = parseDashManifest(MPD, 'https://ex.com/dir/stream.mpd');
     expect(m.variants[0]!.uri).toBe('https://ex.com/dir/stream.mpd');
   });
 
-  it('SegmentTemplate: uri cũng là .mpd', () => {
+  it('SegmentTemplate: uri is also .mpd', () => {
     const m = parseDashManifest(MPD_TEMPLATE, TPL_BASE);
     expect(m.variants.every((v) => v.uri === TPL_BASE)).toBe(true);
   });
 });
 
-describe('W1.5 SegmentBase chưa tải được thì phải NÓI, không dẫn vào ngõ cụt', () => {
-  it('nêu lý do đọc được thay vì để job chết với "không có segment nào"', () => {
+describe('W1.5 SegmentBase that cannot be downloaded yet must SAY SO, not lead into a dead end', () => {
+  it('states a legible reason instead of letting the job die with "no segments"', () => {
     const r = parseDashSegments(MPD, 'https://ex.com/dir/stream.mpd', '2');
     expect(r.segments).toHaveLength(0);
     expect(r.unsupportedReason).toBeTruthy();
-    // Vẫn giữ đường tải thẳng cho gói sau định tuyến sang progressive.
+    // Still keeps the direct-download path for the follow-up work that routes to progressive.
     expect(r.directUrl).toBe('https://ex.com/dir/video720.mp4');
   });
 });

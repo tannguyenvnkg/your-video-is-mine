@@ -1,21 +1,23 @@
-// HỢP ĐỒNG NHẮN TIN (W0.1) — test lớp mà 130 test cũ KHÔNG chạm tới.
+// MESSAGING CONTRACT (W0.1) — a test layer the old 130 tests never touched.
 //
-// ⚠️ File này nằm ở `tests/` chứ KHÔNG phải cạnh `entrypoints/background.ts` (khác quy ước
-// `utils/*.test.ts` của dự án) vì WXT coi MỌI file trong `entrypoints/` là một entrypoint:
-// `background.test.ts` trùng tên với `background.ts` -> `pnpm build` chết với
-// "Multiple entrypoints with the same name". Đừng chuyển nó về `entrypoints/`.
+// Warning: this file lives in `tests/` instead of next to `entrypoints/background.ts`
+// (unlike the project's `utils/*.test.ts` convention) because WXT treats EVERY file under
+// `entrypoints/` as an entrypoint: `background.test.ts` would collide with `background.ts` ->
+// `pnpm build` dies with "Multiple entrypoints with the same name". Don't move it there.
 //
-// Vì sao file này tồn tại: listener `onMessage` từng TRẢ VỀ PROMISE. Đó là hợp đồng của
-// webextension-polyfill, KHÔNG phải của Chrome gốc. Chrome chỉ hỗ trợ trả Promise từ bản 148,
-// và còn "rolling out gradually" -> máy dev (Edge 150) chạy ngon trong khi máy user cũ hơn
-// nhận về `undefined`. Chrome docs: `return true` chạy "whether this capability is enabled or not".
+// Why this file exists: the `onMessage` listener used to RETURN A PROMISE. That's the contract
+// of webextension-polyfill, NOT of vanilla Chrome. Chrome only supports returning a Promise
+// from version 148, and it's still "rolling out gradually" -> dev machine (Edge 150) runs fine
+// while an older user machine gets back `undefined`. Chrome docs: `return true` works
+// "whether this capability is enabled or not".
 //
-// => MỌI nhánh async PHẢI trả `true` ĐỒNG BỘ rồi gọi `sendResponse` sau. Test này ghim điều đó.
+// => EVERY async branch MUST return `true` SYNCHRONOUSLY, then call `sendResponse` later.
+// This test pins that down.
 //
-// Cách test: `defineBackground(fn)` chỉ trả `{ main: fn }` (không tự chạy), nên ta gọi `main()`
-// để đăng ký listener rồi TỰ GỌI listener với ĐỦ 3 THAM SỐ. Phải tự gọi vì fakeBrowser mô phỏng
-// hợp đồng polyfill (chỉ truyền 2 tham số, không có `sendResponse`) — dùng `.trigger()` sẽ đo
-// nhầm thứ cần đo.
+// How the test works: `defineBackground(fn)` just returns `{ main: fn }` (doesn't auto-run),
+// so we call `main()` to register the listener, then CALL THE LISTENER OURSELVES with ALL 3
+// PARAMETERS. We must call it manually because fakeBrowser simulates the polyfill contract
+// (passes only 2 params, no `sendResponse`) — using `.trigger()` would measure the wrong thing.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing';
@@ -32,15 +34,16 @@ type MessageListener = (
 const SENDER = { tab: { id: 1, url: 'https://example.com/watch', title: 'T' } };
 
 /**
- * fakeBrowser KHÔNG cài đặt webRequest (gọi vào là ném "not implemented"). Ta chỉ đo hợp đồng
- * nhắn tin nên vô hiệu hoá các đăng ký listener khác — nếu không, test sẽ đỏ vì hạ tầng test
- * thiếu API chứ không phải vì lỗi thật, và như thế thì nó chẳng chứng minh được gì.
+ * fakeBrowser does NOT implement webRequest (calling into it throws "not implemented"). We
+ * only measure the messaging contract here, so we neutralize the other listener registrations
+ * — otherwise the test would fail because the test infrastructure lacks the API, not because
+ * of a real bug, which would prove nothing.
  */
 function stubUnrelatedListeners(): void {
   const events = [
     browser.webRequest?.onBeforeRequest,
     browser.webRequest?.onHeadersReceived,
-    // W2.1 — listener bắt header thật của player. fakeBrowser cũng không cài đặt cái này.
+    // W2.1 — listener that captures the player's real headers. fakeBrowser doesn't implement this either.
     browser.webRequest?.onSendHeaders,
     browser.downloads?.onChanged,
     browser.storage?.onChanged,
@@ -49,31 +52,32 @@ function stubUnrelatedListeners(): void {
   for (const ev of events) {
     if (ev) vi.spyOn(ev, 'addListener').mockImplementation(() => undefined);
   }
-  // `download/cancel` gọi thẳng browser.downloads.cancel ở thân listener (không bọc try/catch),
-  // mà fakeBrowser ném ĐỒNG BỘ trong khi Chrome thật trả Promise -> stub cho giống thật.
-  // (Không cần stub downloads.download: handleDownload đã tự bọc try/catch.)
+  // `download/cancel` calls browser.downloads.cancel directly in the listener body (no
+  // try/catch), and fakeBrowser throws SYNCHRONOUSLY while real Chrome returns a Promise ->
+  // stub it to match reality.
+  // (No need to stub downloads.download: handleDownload already wraps itself in try/catch.)
   vi.spyOn(browser.downloads, 'cancel').mockResolvedValue(undefined);
 }
 
-/** Chạy main() và lấy ra listener THẬT đã đăng ký. */
+/** Run main() and get the ACTUAL registered listener. */
 function registerBackground(): MessageListener {
   stubUnrelatedListeners();
   const spy = vi.spyOn(browser.runtime.onMessage, 'addListener');
   background.main!();
   const listener = spy.mock.calls[0]?.[0] as unknown as MessageListener;
-  expect(listener, 'background phải đăng ký onMessage listener').toBeTypeOf(
+  expect(listener, 'background must register an onMessage listener').toBeTypeOf(
     'function',
   );
   return listener;
 }
 
-/** Đợi microtask/timer để sendResponse kịp bắn. */
+/** Wait for a microtask/timer so sendResponse has time to fire. */
 async function flush(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
 }
 
-// Mọi `kind` mà popup/options GỬI ĐI RỒI CHỜ CÂU TRẢ LỜI. Đây là danh sách phải giữ đồng bộ với
-// utils/messages.ts: thiếu một dòng ở đây = một nhánh async lọt lưới.
+// Every `kind` that popup/options SENDS AND THEN WAITS FOR A RESPONSE. This list must stay in
+// sync with utils/messages.ts: missing a line here = an async branch slipping through the net.
 const ASYNC_KINDS: Array<{ name: string; message: Record<string, unknown> }> = [
   {
     name: 'manifest/variants',
@@ -126,13 +130,13 @@ const ASYNC_KINDS: Array<{ name: string; message: Record<string, unknown> }> = [
   },
 ];
 
-describe('background onMessage — hợp đồng Chrome gốc (W0.1)', () => {
+describe('background onMessage — vanilla Chrome contract (W0.1)', () => {
   let listener: MessageListener;
 
   beforeEach(() => {
     fakeBrowser.reset();
     vi.restoreAllMocks();
-    // Chặn mọi request thật ra internet trong unit test.
+    // Block any real network request during the unit test.
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response('#EXTM3U', { status: 200 })),
@@ -141,30 +145,30 @@ describe('background onMessage — hợp đồng Chrome gốc (W0.1)', () => {
   });
 
   it.each(ASYNC_KINDS)(
-    '$name trả về `true` ĐỒNG BỘ (không phải Promise)',
+    '$name returns `true` SYNCHRONOUSLY (not a Promise)',
     ({ message }) => {
       const sendResponse = vi.fn();
       const ret = listener(message, SENDER, sendResponse);
 
-      // Đây là dòng bắt được lỗi: code cũ trả Promise -> Chrome <148 đóng kênh, popup nhận undefined.
+      // This is the line that catches the bug: old code returned a Promise -> Chrome <148 closes the channel, popup gets undefined.
       expect(ret).toBe(true);
       expect(ret).not.toBeInstanceOf(Promise);
     },
   );
 
   it.each(ASYNC_KINDS)(
-    '$name thực sự gọi sendResponse',
+    '$name actually calls sendResponse',
     async ({ message }) => {
       const sendResponse = vi.fn();
       listener(message, SENDER, sendResponse);
       await flush();
       expect(sendResponse).toHaveBeenCalledTimes(1);
-      // Câu trả lời phải là object (không undefined) -> popup cast được.
+      // The response must be an object (not undefined) so popup can cast it.
       expect(sendResponse.mock.calls[0]![0]).toBeTypeOf('object');
     },
   );
 
-  it('handler ném lỗi -> vẫn sendResponse {ok:false} chứ không treo kênh', async () => {
+  it('handler throws -> still sendResponse {ok:false} instead of hanging the channel', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
@@ -187,19 +191,19 @@ describe('background onMessage — hợp đồng Chrome gốc (W0.1)', () => {
     expect(sendResponse.mock.calls[0]![0]).toMatchObject({ ok: false });
   });
 
-  it('message của offscreen (target:offscreen) -> KHÔNG chiếm kênh', () => {
+  it('message for offscreen (target:offscreen) -> does NOT claim the channel', () => {
     const sendResponse = vi.fn();
     const ret = listener(
       { target: 'offscreen', kind: 'engine/selftest' },
       SENDER,
       sendResponse,
     );
-    // Trả true ở đây = background cướp kênh của offscreen -> offscreen không trả lời được.
+    // Returning true here = background steals offscreen's channel -> offscreen can't respond.
     expect(ret).toBeUndefined();
     expect(sendResponse).not.toHaveBeenCalled();
   });
 
-  it('message lạ -> KHÔNG chiếm kênh', () => {
+  it('unknown message -> does NOT claim the channel', () => {
     const sendResponse = vi.fn();
     expect(listener({ hello: 'world' }, SENDER, sendResponse)).toBeUndefined();
     expect(listener(null, SENDER, sendResponse)).toBeUndefined();
@@ -218,7 +222,7 @@ describe('background onMessage — hợp đồng Chrome gốc (W0.1)', () => {
       message: { kind: 'download/cancel', key: 'k1' },
     },
   ])(
-    '$name là fire-and-forget -> trả undefined (không giữ kênh chờ)',
+    '$name is fire-and-forget -> returns undefined (does not hold the channel open)',
     ({ message }) => {
       const sendResponse = vi.fn();
       expect(listener(message, SENDER, sendResponse)).toBeUndefined();

@@ -1,13 +1,13 @@
-// Harness E2E runtime: nạp bản build vào Edge THẬT rồi chạy thử tính năng chủ lực.
+// E2E runtime harness: loads the build into REAL Edge and runs the core feature end-to-end.
 //
-// VÌ SAO CẦN: compile/lint/test/build đều XANH suốt thời gian tải HLS đã chết (bug ffmpeg core
-// UMD-vs-ESM sống sót từ commit đầu tiên). Không cổng TĨNH nào bắt được lớp lỗi này — chỉ có chạy
-// thật mới bắt được. Harness này là cổng ĐỘNG đó.
+// WHY THIS IS NEEDED: compile/lint/test/build all stayed GREEN throughout the period when HLS
+// downloading was dead (the ffmpeg core UMD-vs-ESM bug survived from the first commit). No STATIC
+// gate catches this class of bug — only an actual run does. This harness is that DYNAMIC gate.
 //
-// Dùng Edge cài sẵn (channel msedge) + playwright-core -> không tải browser 150MB.
-// Extension chỉ nạp được ở persistent context + headed (giới hạn của Chromium).
+// Uses the pre-installed Edge (channel msedge) + playwright-core -> no 150MB browser download.
+// The extension only loads in a persistent context + headed mode (Chromium limitation).
 //
-// Chạy: pnpm e2e
+// Run: pnpm e2e
 
 import { chromium } from 'playwright-core';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EXT = join(root, '.output/chrome-mv3');
 
-// Playlist demo công khai: HLS .ts thường, KHÔNG mã hoá, 184 segment.
+// Public demo playlist: plain HLS .ts, NOT encrypted, 184 segments.
 const MEDIA_URL =
   'https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8';
 const VARIANT_URL =
@@ -27,7 +27,7 @@ const VARIANT_URL =
 const HLS_TIMEOUT_MS = Number(process.env.HLS_TIMEOUT_MS ?? 120_000);
 
 if (!existsSync(EXT)) {
-  console.error(`✗ Chưa có bản build ở ${EXT}. Chạy \`pnpm build\` trước.`);
+  console.error(`✗ No build found at ${EXT}. Run \`pnpm build\` first.`);
   process.exit(1);
 }
 
@@ -49,7 +49,7 @@ const ctx = await chromium.launchPersistentContext(userDataDir, {
   ],
 });
 
-// Gom log của MỌI ngữ cảnh (kể cả offscreen document) — đây là thứ trước đây không ai nhìn thấy.
+// Collect logs from EVERY context (including the offscreen document) — this is what nobody could see before.
 const logs = [];
 const watch = (target, tag) => {
   target.on?.('console', (m) => {
@@ -67,14 +67,14 @@ ctx.on('page', (p) => watch(p, `page ${p.url() || 'about:blank'}`));
 ctx.on('serviceworker', (w) => watch(w, 'sw'));
 
 try {
-  // --- Lấy extension id từ service worker ---
+  // --- Get extension id from the service worker ---
   let [sw] = ctx.serviceWorkers();
   if (!sw) sw = await ctx.waitForEvent('serviceworker', { timeout: 30_000 });
   watch(sw, 'sw');
   const extId = new URL(sw.url()).host;
-  ok(`Extension đã nạp: ${extId}`);
+  ok(`Extension loaded: ${extId}`);
 
-  // --- TEST 1: ffmpeg khởi tạo + chạy được (đường này await nên lỗi hiện ra) ---
+  // --- TEST 1: ffmpeg initializes + runs (this path awaits so errors surface) ---
   const options = await ctx.newPage();
   watch(options, 'options');
   await options.goto(`chrome-extension://${extId}/options.html`);
@@ -92,16 +92,17 @@ try {
     if (!ffText) ffText = await options.innerText('body');
   } catch {
     fail(
-      'ffmpeg: TREO — không ra ✓ lẫn ✗ sau 90s. ensureFfmpeg() không settle.',
+      'ffmpeg: HANG — neither ✓ nor ✗ after 90s. ensureFfmpeg() did not settle.',
     );
   }
   const ffLine = (ffText.match(/[✓✗][^\n]*/) ?? [''])[0].trim();
   if (ffLine.startsWith('✓')) ok(`ffmpeg: ${ffLine}`);
   else if (ffLine.startsWith('✗')) fail(`ffmpeg: ${ffLine}`);
 
-  // --- TEST 2: tải HLS thật, theo dõi dòng thời gian phase ---
-  // Gửi thẳng 'hls/download' từ trang extension: background xử lý y hệt lúc popup bấm nút.
-  // tabId -1 = không có media item trong storage -> vẫn chạy được (spoof dùng chính variantUrl).
+  // --- TEST 2: real HLS download, track the phase timeline ---
+  // Send 'hls/download' directly from the extension page: background handles it exactly like
+  // when the popup button is clicked. tabId -1 = no media item in storage -> still works (spoof
+  // uses variantUrl itself).
   const start = await options.evaluate(
     async ([variantUrl, mediaUrl]) =>
       await chrome.runtime.sendMessage({
@@ -113,9 +114,9 @@ try {
     [VARIANT_URL, MEDIA_URL],
   );
   if (!start?.ok) {
-    fail(`hls/download bị từ chối ngay: ${JSON.stringify(start)}`);
+    fail(`hls/download was rejected immediately: ${JSON.stringify(start)}`);
   } else {
-    ok(`hls/download đã nhận, jobId=${start.jobId}`);
+    ok(`hls/download accepted, jobId=${start.jobId}`);
 
     const t0 = Date.now();
     let last = '';
@@ -141,25 +142,25 @@ try {
 
     if (!final) {
       fail(
-        `HLS: TREO ở phase "${last}" sau ${HLS_TIMEOUT_MS / 1000}s. ` +
-          `(phase 'queued' = message không tới offscreen; 'loading' = kẹt trước khi tải segment)`,
+        `HLS: HUNG at phase "${last}" after ${HLS_TIMEOUT_MS / 1000}s. ` +
+          `(phase 'queued' = message never reached offscreen; 'loading' = stuck before segment download)`,
       );
     } else if (final.phase === 'done') {
-      ok(`HLS: tải + ghép xong (${final.segmentsTotal} segment)`);
+      ok(`HLS: download + mux done (${final.segmentsTotal} segments)`);
     } else {
-      fail(`HLS: ${final.phase} — ${final.error ?? 'không rõ'}`);
+      fail(`HLS: ${final.phase} — ${final.error ?? 'unknown'}`);
     }
   }
 } catch (e) {
-  fail(`Harness lỗi: ${e?.message ?? e}`);
+  fail(`Harness error: ${e?.message ?? e}`);
 } finally {
   if (failed && logs.length) {
-    console.log('\n--- Log các ngữ cảnh (kể cả offscreen) ---');
+    console.log('\n--- Logs from all contexts (including offscreen) ---');
     for (const l of logs.slice(-40)) console.log(`  ${l}`);
   }
   await ctx.close().catch(() => {});
   rmSync(userDataDir, { recursive: true, force: true });
 }
 
-console.log(failed ? '\n✗ E2E THẤT BẠI' : '\n✓ E2E XANH');
+console.log(failed ? '\n✗ E2E FAILED' : '\n✓ E2E GREEN');
 process.exit(failed ? 1 : 0);

@@ -1,7 +1,7 @@
 import { sendRuntimeMessage, type DomMediaCandidate } from '@/utils/messages';
 
-// Content script (isolated world): quét DOM tìm <video>/<source>/<audio> có URL trực tiếp,
-// và nhận tín hiệu MSE từ mse-hook (MAIN world) rồi forward tới background.
+// Content script (isolated world): scans the DOM for <video>/<source>/<audio> with a direct URL,
+// and receives MSE signals from mse-hook (MAIN world) then forwards them to background.
 export default defineContentScript({
   matches: ['<all_urls>'],
   runAt: 'document_idle',
@@ -23,7 +23,7 @@ export default defineContentScript({
         typeHint?: string | null,
       ) => {
         if (!raw) return;
-        // blob:/data: -> MSE/blob, do mse-hook xử lý (bỏ qua tại đây).
+        // blob:/data: -> MSE/blob, handled by mse-hook (skip here).
         if (raw.startsWith('blob:') || raw.startsWith('data:')) return;
         const url = absolutize(raw);
         if (seen.has(url)) return;
@@ -51,7 +51,7 @@ export default defineContentScript({
 
     report();
 
-    // Theo dõi DOM động (SPA/player chèn muộn), debounce 500ms tránh spam.
+    // Watch for dynamic DOM changes (SPA/player inserting elements late), debounce 500ms to avoid spam.
     let timer: ReturnType<typeof setTimeout> | undefined;
     const schedule = () => {
       if (timer !== undefined) return;
@@ -68,10 +68,10 @@ export default defineContentScript({
       attributeFilter: ['src'],
     });
 
-    // Nhận tín hiệu MSE từ mse-hook (MAIN world) qua window.postMessage.
+    // Receive MSE signals from mse-hook (MAIN world) via window.postMessage.
     window.addEventListener('message', (e: MessageEvent) => {
-      // Bỏ qua chính cái ping của mình (xem handshake bên dưới) — nếu không sẽ tự xử lý tin của
-      // mình và, tệ hơn, vòng lặp postMessage.
+      // Ignore our own ping (see the handshake below) — otherwise we'd process our own message and,
+      // worse, get a postMessage loop.
       if ((e.data as { kind?: string } | null)?.kind === 'isolated-ready')
         return;
       const data = e.data as {
@@ -86,14 +86,14 @@ export default defineContentScript({
       if (data.kind === 'mse-detected' && typeof data.url === 'string') {
         void sendRuntimeMessage({ kind: 'media/mse', url: data.url });
       }
-      // W7.1 — trang xin DRM/EME -> báo background gắn cờ cho tab này (ranh giới cứng §7).
+      // W7.1 — the page requests DRM/EME -> tell background to flag this tab (hard boundary §7).
       if (data.kind === 'drm-detected') {
         void sendRuntimeMessage({
           kind: 'media/drm',
           keySystem: typeof data.keySystem === 'string' ? data.keySystem : '',
         });
       }
-      // Manifest HLS/DASH bị nguỵ trang (mse-hook đã sniff từ body) -> forward tới background.
+      // Disguised HLS/DASH manifest (mse-hook already sniffed it from the body) -> forward to background.
       if (
         data.kind === 'manifest' &&
         typeof data.url === 'string' &&
@@ -107,9 +107,9 @@ export default defineContentScript({
       }
     });
 
-    // 🔴 BẮT TAY VỚI MAIN WORLD — phải làm SAU khi listener trên đã đăng ký.
-    // Lý do (đã đo): file này chạy ở `document_idle`, còn trang gọi EME từ lúc PARSE. Mọi tín hiệu
-    // DRM bắn trước thời điểm này đã rơi vào khoảng trống. Ping một cái để MAIN phát lại hàng đợi.
+    // 🔴 HANDSHAKE WITH THE MAIN WORLD — must be done AFTER the listener above is registered.
+    // Reason (measured): this file runs at `document_idle`, while the page calls EME as early as
+    // PARSE time. Any DRM signal fired before this point has already fallen into the void. Send a ping so MAIN replays its queue.
     try {
       window.postMessage({ __yvim: 'yvim-mse', kind: 'isolated-ready' }, '*');
     } catch {

@@ -1,9 +1,10 @@
-// Kiểm tra bản mới trên GitHub Releases.
-// Extension phát hành qua GitHub Releases (.zip, load unpacked) chứ KHÔNG qua Web Store
-// -> không tự cập nhật được. Ở đây chỉ BÁO cho người dùng + mở trang Release để tải tay.
+// Checks for new releases on GitHub Releases.
+// The extension is published via GitHub Releases (.zip, load unpacked) rather than through the
+// Web Store -> it cannot auto-update. This only NOTIFIES the user + opens the Release page for a
+// manual download.
 //
-// Ràng buộc: GitHub giới hạn 60 request/giờ/IP cho API không xác thực
-// -> luôn đi qua cache TTL trong storage.local, không gọi mỗi lần mở popup.
+// Constraint: GitHub limits unauthenticated API calls to 60 requests/hour/IP
+// -> always go through the TTL cache in storage.local, never call on every popup open.
 
 import {
   getUpdateCheck,
@@ -18,8 +19,8 @@ const LATEST_RELEASE_API =
 const FETCH_TIMEOUT_MS = 8000;
 
 /**
- * Cache còn hạn không? Tách thuần để unit test.
- * Đồng hồ máy chạy lùi (checkedAt > now) -> coi như hết hạn, kiểm tra lại.
+ * Is the cache still fresh? Kept pure for unit testing.
+ * If the machine clock runs backward (checkedAt > now) -> treat it as expired and check again.
  */
 export function isCacheFresh(
   checkedAt: number,
@@ -31,8 +32,8 @@ export function isCacheFresh(
 }
 
 /**
- * Lọc JSON từ GitHub — dữ liệu mạng, không tin. Chỉ nhận tag + link release hợp lệ.
- * Tách thuần để unit test.
+ * Sanitizes JSON from GitHub — network data, not trusted. Only accepts a valid tag + release link.
+ * Kept pure for unit testing.
  */
 export function parseLatestRelease(
   data: unknown,
@@ -43,15 +44,15 @@ export function parseLatestRelease(
     return null;
   }
   if (o.tag_name === '') return null;
-  // Link sẽ được mở bằng tabs.create -> chặn javascript:/data: bằng cách khớp tiền tố github.com.
+  // The link will be opened with tabs.create -> block javascript:/data: by matching the github.com prefix.
   if (!o.html_url.startsWith('https://github.com/')) return null;
   return { latestTag: o.tag_name, releaseUrl: o.html_url };
 }
 
 /**
- * Lấy release mới nhất: dùng cache nếu còn hạn, hết hạn thì gọi API rồi cache lại.
- * Mọi lỗi (mạng, timeout, rate-limit 403, JSON sai) -> trả cache cũ nếu có, không thì null.
- * KHÔNG ném lỗi và KHÔNG hiện lỗi ra UI: đây là tính năng phụ, không được làm phiền.
+ * Fetches the latest release: uses the cache if still fresh, otherwise calls the API and caches the result.
+ * Any error (network, timeout, 403 rate-limit, bad JSON) -> returns the stale cache if present, else null.
+ * Does NOT throw and does NOT surface an error in the UI: this is a secondary feature and must not be intrusive.
  */
 export async function fetchLatestRelease(
   now: number = Date.now(),
@@ -61,7 +62,7 @@ export async function fetchLatestRelease(
 
   try {
     const res = await fetch(LATEST_RELEASE_API, {
-      // KHÔNG gửi cookie github.com sang API (khác với fetch media dùng credentials: 'include').
+      // Does NOT send github.com cookies to the API (unlike the media fetch which uses credentials: 'include').
       credentials: 'omit',
       headers: { Accept: 'application/vnd.github+json' },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),

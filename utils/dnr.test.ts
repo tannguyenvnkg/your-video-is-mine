@@ -11,7 +11,7 @@ import {
 } from './dnr';
 
 describe('hostFromUrl / originFromUrl', () => {
-  it('lấy host & origin', () => {
+  it('extracts host & origin', () => {
     expect(hostFromUrl('https://cdn.example.com:8443/a/b.ts?x=1')).toBe(
       'cdn.example.com',
     );
@@ -19,7 +19,7 @@ describe('hostFromUrl / originFromUrl', () => {
       'https://cdn.example.com:8443',
     );
   });
-  it('URL sai -> null', () => {
+  it('a malformed URL -> null', () => {
     expect(hostFromUrl('not a url')).toBeNull();
     expect(originFromUrl('not a url')).toBeNull();
   });
@@ -33,13 +33,13 @@ describe('buildRefererSpoofRule', () => {
     'https://page.example.com',
   );
 
-  it('nhận id TƯỜNG MINH (W2.4: id theo từng download, không suy từ host)', () => {
-    // Trước W2.4 id = hash(host) -> hai download cùng CDN giật rule của nhau (§2.10). Nay caller
-    // cấp id riêng cho mỗi (download, host) nên builder chỉ việc dùng nguyên id truyền vào.
+  it('accepts an EXPLICIT id (W2.4: one id per download, not derived from host)', () => {
+    // Before W2.4, id = hash(host) -> two downloads on the same CDN would steal each other's rule (§2.10).
+    // Now the caller assigns a separate id per (download, host) pair, so the builder simply uses the id passed in.
     expect(rule.id).toBe(2345);
   });
 
-  it('modifyHeaders set Referer + Origin', () => {
+  it('modifyHeaders sets Referer + Origin', () => {
     expect(rule.action.type).toBe('modifyHeaders');
     const headers = rule.action.requestHeaders;
     expect(headers).toEqual([
@@ -52,29 +52,30 @@ describe('buildRefererSpoofRule', () => {
     ]);
   });
 
-  it('condition giới hạn theo host + resourceTypes của EXTENSION', () => {
+  it('condition is restricted to host + resourceTypes belonging to the EXTENSION', () => {
     expect(rule.condition.requestDomains).toEqual(['cdn.example.com']);
     expect(rule.condition.resourceTypes).toContain('xmlhttprequest');
     expect(rule.condition.resourceTypes).toContain('other');
   });
 
-  it('W2.4: KHÔNG spoof loại request của PLAYER TRANG (media/sub_frame/object)', () => {
-    // §2.10: rule cũ phủ media/sub_frame/object -> ghi đè Referer/Origin lên chính traffic của
-    // trang (player, iframe) -> user thấy player hỏng / API 403 / bị đăng xuất. Bỏ hẳn 3 loại này.
+  it("W2.4: does NOT spoof request types belonging to the PAGE'S OWN PLAYER (media/sub_frame/object)", () => {
+    // §2.10: the old rule covered media/sub_frame/object -> it overwrote Referer/Origin on the
+    // page's own traffic (player, iframe) -> the user saw a broken player / API 403 / got logged out.
+    // These 3 types are dropped entirely.
     expect(rule.condition.resourceTypes).not.toContain('media');
     expect(rule.condition.resourceTypes).not.toContain('sub_frame');
     expect(rule.condition.resourceTypes).not.toContain('object');
   });
 
-  it('W2.4: tabIds:[-1] -> CHỈ khớp request do extension phát, không đụng traffic trang', () => {
-    // -1 = request không gắn với tab nào (do SW/offscreen của extension phát). Một dòng này biến
-    // lỗ hổng từ "gây hại cho duyệt web" thành "chỉ ảnh hưởng fetch của chính extension".
+  it('W2.4: tabIds:[-1] -> matches ONLY requests issued by the extension, never touches page traffic', () => {
+    // -1 = a request not tied to any tab (issued by the extension's SW/offscreen document). This one
+    // line turns the vulnerability from "harms general browsing" into "affects only the extension's own fetches".
     expect(rule.condition.tabIds).toEqual([-1]);
   });
 });
 
-describe('staleSpoofRuleIds (đối soát rule rò rỉ — W2.4 sweep)', () => {
-  it('xoá id spoof KHÔNG còn job sống, GIỮ id còn sống', () => {
+describe('staleSpoofRuleIds (reconciling leaked rules — W2.4 sweep)', () => {
+  it('removes spoof ids with NO live job, KEEPS ids that are still alive', () => {
     const session = [
       SPOOF_RULE_ID_MIN,
       SPOOF_RULE_ID_MIN + 1,
@@ -87,21 +88,21 @@ describe('staleSpoofRuleIds (đối soát rule rò rỉ — W2.4 sweep)', () => 
     ]);
   });
 
-  it('KHÔNG bao giờ đụng rule id < ngưỡng (rule của người khác / dải khác)', () => {
-    // Sweep chỉ được phép dọn trong dải rule spoof của ta (>= MIN). Rule id nhỏ hơn là của cơ chế
-    // khác -> tuyệt đối không xoá dù không có trong tập "còn sống".
+  it('NEVER touches a rule id below the threshold (belongs to someone else / another range)', () => {
+    // The sweep is only allowed to clean up within our own spoof rule range (>= MIN). A lower rule id
+    // belongs to some other mechanism -> absolutely must not be deleted even if it's not in the "alive" set.
     const session = [1, 42, 1999, SPOOF_RULE_ID_MIN];
     expect(staleSpoofRuleIds(session, [])).toEqual([SPOOF_RULE_ID_MIN]);
   });
 
-  it('tập sống rỗng + không rule spoof nào -> không xoá gì', () => {
+  it('empty alive set + no spoof rules -> deletes nothing', () => {
     expect(staleSpoofRuleIds([1, 2, 3], [])).toEqual([]);
   });
 });
 
 // ── W2.1 ─────────────────────────────────────────────────────────────────────────────────────
-describe('buildHeaderSpoofRule — phát lại header THẬT của player', () => {
-  it('sinh đúng một mục modifyHeaders cho mỗi header được giao', () => {
+describe("buildHeaderSpoofRule — replays the player's ACTUAL headers", () => {
+  it('generates exactly one modifyHeaders entry per header given', () => {
     const rule = buildHeaderSpoofRule(SPOOF_RULE_ID_MIN, 'cdn.example', {
       referer: 'https://site.example/watch',
       'x-playback-session-id': 'sess-9',
@@ -116,9 +117,9 @@ describe('buildHeaderSpoofRule — phát lại header THẬT của player', () =
     ]);
   });
 
-  it('🔴 KHÔNG tự thêm Origin khi không được giao (quy tắc vàng §2.11)', () => {
-    // Bản BỊA cũ luôn kèm Origin. Player thật thường không gửi Origin trên GET, và một số CDN
-    // 403 chính vì cái Origin lạ đó -> rule "chống 403" tự gây 403.
+  it('🔴 does NOT add Origin on its own when not given one (§2.11 golden rule)', () => {
+    // The old FABRICATED version always included Origin. A real player usually doesn't send Origin
+    // on a GET, and some CDNs 403 precisely because of that unexpected Origin -> the "anti-403" rule caused its own 403.
     const rule = buildHeaderSpoofRule(SPOOF_RULE_ID_MIN, 'cdn.example', {
       referer: 'https://site.example/',
     });
@@ -127,7 +128,7 @@ describe('buildHeaderSpoofRule — phát lại header THẬT của player', () =
     ]);
   });
 
-  it('giữ nguyên bán kính sát thương đã thu hẹp ở W2.4 (tabIds:[-1], không có media/sub_frame)', () => {
+  it('keeps the blast radius narrowed at W2.4 (tabIds:[-1], no media/sub_frame)', () => {
     const rule = buildHeaderSpoofRule(SPOOF_RULE_ID_MIN, 'cdn.example', {
       referer: 'https://site.example/',
     });
@@ -137,7 +138,7 @@ describe('buildHeaderSpoofRule — phát lại header THẬT của player', () =
     expect(rule.condition.resourceTypes).not.toContain('sub_frame');
   });
 
-  it('header rỗng -> rule không có mục nào (caller phải tự tránh áp rule vô nghĩa)', () => {
+  it('empty headers -> rule has no entries (caller must avoid applying a meaningless rule)', () => {
     expect(
       buildHeaderSpoofRule(SPOOF_RULE_ID_MIN, 'cdn.example', {}).action
         .requestHeaders,

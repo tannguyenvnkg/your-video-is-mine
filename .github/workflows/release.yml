@@ -1,6 +1,6 @@
 name: Release
 
-# Kích hoạt khi push tag dạng v* (vd v0.4.0) -> build + đóng gói .zip + tạo GitHub Release.
+# Triggered when a v* tag is pushed (e.g. v0.4.0) -> build + package .zip + create a GitHub Release.
 on:
   push:
     tags:
@@ -27,18 +27,18 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Kiểm tra (compile + lint + test)
+      - name: Check (compile + lint + test)
         run: |
           pnpm compile
           pnpm lint
           pnpm test
 
-      - name: Đóng gói (Chrome/Edge MV3)
+      - name: Package (Chrome/Edge MV3)
         run: pnpm zip
 
-      # Thân release = đúng mục CHANGELOG của phiên bản đang tag, để người tải thấy ngay
-      # "bản này làm được gì" thay vì chỉ danh sách commit thô. Thiếu mục -> FAIL (ép ghi CHANGELOG).
-      - name: Trích ghi chú phát hành từ CHANGELOG
+      # Release body = the CHANGELOG section for the tagged version, so downloaders immediately see
+      # "what this build does" instead of a raw commit list. Missing section -> FAIL (forces a CHANGELOG entry).
+      - name: Extract release notes from CHANGELOG
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           awk -v hdr="## [$VERSION] " '
@@ -47,12 +47,12 @@ jobs:
             found               { print }
           ' CHANGELOG.md > release-notes.md
           if [ ! -s release-notes.md ]; then
-            echo "::error::Không tìm thấy mục '## [$VERSION]' trong CHANGELOG.md — hãy thêm trước khi tag."
+            echo "::error::Could not find the '## [$VERSION]' section in CHANGELOG.md — add it before tagging."
             exit 1
           fi
           cat release-notes.md
 
-      - name: Tạo GitHub Release + đính kèm .zip
+      - name: Create GitHub Release + attach .zip
         uses: softprops/action-gh-release@v2
         with:
           files: .output/*.zip

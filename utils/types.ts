@@ -1,130 +1,140 @@
-// Kiểu dữ liệu media dùng chung giữa background / content / popup / offscreen.
-// Dùng từ Giai đoạn 1 (phát hiện media) trở đi.
+// Media data types shared between background / content / popup / offscreen.
+// Used from Stage 1 (media detection) onward.
 
 export type MediaType = 'hls' | 'dash' | 'progressive' | 'blob';
 
-/** Cách phát hiện ra media. */
+/** How the media was detected. */
 export type MediaDetectSource = 'network' | 'dom' | 'mse';
 
 export interface MediaItem {
-  /** id ổn định (hash từ url). */
+  /** stable id (hash of the url). */
   id: string;
   type: MediaType;
-  /** URL gốc của manifest/media (đã resolve tuyệt đối). */
+  /** original URL of the manifest/media (resolved to absolute). */
   url: string;
-  /** tab phát hiện ra media. */
+  /** tab that detected the media. */
   tabId: number;
-  /** URL trang chứa media (đặt tên file, hiển thị). */
+  /** URL of the page containing the media (for filename, display). */
   pageUrl?: string;
   /**
-   * W4.3 — URL trang tại THỜI ĐIỂM PHÁT HIỆN, do `addTabMedia` đóng dấu từ `TabMediaState.navUrl`.
+   * W4.3 — page URL AT THE MOMENT OF DETECTION, stamped by `addTabMedia` from `TabMediaState.navUrl`.
    *
-   * Cố ý TÁCH khỏi `pageUrl`: `pageUrl` đang là nguồn dựng Referer chống 403 (W2.1/W2.4), đụng vào
-   * nó là đụng vào tầng mạng đã đo kỹ. Trường này CHỈ phục vụ đặt tên file — so với URL trang hiện
-   * tại lúc tải để biết media có còn thuộc trang đang mở không (SPA đổi video).
+   * Deliberately SEPARATED from `pageUrl`: `pageUrl` is the source used to build the Referer for
+   * bypassing 403s (W2.1/W2.4), touching it means touching a network layer that's already been
+   * carefully measured. This field is ONLY for filenames — compared against the page's current
+   * URL at download time to know whether the media still belongs to the open page (SPA video change).
    */
   detectPageUrl?: string;
-  /** tiêu đề trang. */
+  /** page title. */
   title?: string;
   contentType?: string;
-  /** kích thước (byte) nếu biết từ Content-Length. */
+  /** size (bytes) if known from Content-Length. */
   size?: number;
-  /** server hỗ trợ range request (gợi ý progressive tải được). */
+  /** server supports range requests (hint that progressive download is possible). */
   acceptRanges?: boolean;
-  /** epoch ms lúc phát hiện. */
+  /** epoch ms at detection time. */
   detectedAt: number;
-  /** cách phát hiện (network / dom / mse). */
+  /** detection method (network / dom / mse). */
   detectSource?: MediaDetectSource;
-  /** độ phân giải nếu biết (điền ở G2 khi parse manifest). */
+  /** resolution if known (filled in at G2 when parsing the manifest). */
   width?: number;
   height?: number;
-  /** thời lượng (giây) nếu biết. */
+  /** duration (seconds) if known. */
   durationSec?: number;
   /**
-   * Nghi ngờ nội dung được bảo vệ (DRM/EME hoặc SAMPLE-AES qua EME).
-   * true -> KHÔNG cho tải (điền ở G5). Ranh giới cứng theo §7 lộ trình.
+   * Suspected protected content (DRM/EME or SAMPLE-AES via EME).
+   * true -> download NOT allowed (filled in at G5). Hard boundary per roadmap §7.
    */
   protected?: boolean;
   /**
-   * Playlist CON của một master ĐÃ PARSE (variant hình hoặc rendition tiếng) -> ẩn khỏi popup (W4.2).
+   * CHILD playlist of an ALREADY-PARSED master (video variant or audio rendition) -> hidden from
+   * the popup (W4.2).
    *
-   * VÌ SAO ẨN: webRequest thấy MỌI `.m3u8` mà player fetch, nên một video tách tiếng hiện ra ĐÚNG
-   * 3 dòng cùng nhãn "HLS" (master + video.m3u8 + audio.m3u8 — đã đo trên Edge thật). Trước W1.1,
-   * dòng tiếng là cách DUY NHẤT lấy được tiếng nên còn có lý do tồn tại; từ sau W1.1 offscreen tự
-   * ghép tiếng vào, nên nó chỉ còn là rác: bấm vào ra "video" chỉ có tiếng. Dòng master vẫn cho
-   * chọn đủ chất lượng nên KHÔNG mất chức năng nào.
+   * WHY HIDDEN: webRequest sees EVERY `.m3u8` the player fetches, so a video with a separate
+   * audio track shows up as EXACTLY 3 rows all labeled "HLS" (master + video.m3u8 + audio.m3u8 —
+   * measured on real Edge). Before W1.1, the audio row was the ONLY way to get audio so it had a
+   * reason to exist; since W1.1 offscreen muxes the audio in itself, so it's now just clutter:
+   * clicking it produces a "video" that's audio-only. The master row still lets users pick full
+   * quality so NO functionality is lost.
    */
   child?: boolean;
-  /** URL master đã khai ra item này (giải thích vì sao bị ẩn; dùng cho nhãn ở W4.4). */
+  /** URL of the master that declared this item (explains why it's hidden; used for the label at W4.4). */
   parentUrl?: string;
   /**
-   * W2.1 — bản chụp header THẬT mà player của trang đã gửi cho chính URL này (`onSendHeaders`),
-   * tên header đã hạ chữ thường. Dùng để PHÁT LẠI thay vì BỊA Referer/Origin (§2.11).
+   * W2.1 — snapshot of the REAL headers the page's player sent for this exact URL
+   * (`onSendHeaders`), header names lowercased. Used to REPLAY instead of FABRICATING
+   * Referer/Origin (§2.11).
    *
-   * Vắng = chưa quan sát được request nào của player cho URL này (vd media phát hiện qua DOM, hoặc
-   * content script báo sau khi request đã bay) -> caller PHẢI lùi về đường spoof Referer cũ.
-   * Lọc/chia rổ bằng `planHeaderReplay` (utils/headers.ts) — KHÔNG dùng thẳng map này.
+   * Absent = no request from the player was ever observed for this URL (e.g. media detected via
+   * DOM, or the content script reported it after the request had already gone out) -> the caller
+   * MUST fall back to the old Referer-spoofing path. Filter/bucket using `planHeaderReplay`
+   * (utils/headers.ts) — do NOT use this map directly.
    */
   sentHeaders?: Record<string, string>;
 }
 
 /**
- * Một luồng tách rời khai bằng `#EXT-X-MEDIA` (HLS mediaGroups) — tiếng hoặc phụ đề.
+ * A separate stream declared via `#EXT-X-MEDIA` (HLS mediaGroups) — audio or subtitles.
  *
- * VÌ SAO MANG CẢ DANH SÁCH thay vì một `audioUri` đã resolve: W4.4 (cho user chọn ngôn ngữ) cần
- * thấy MỌI lựa chọn. Mang sẵn từ W1.1 thì thêm picker sau KHÔNG phải đổi lại giao thức
- * `messages.ts` lần nữa.
+ * WHY CARRY THE WHOLE LIST instead of one resolved `audioUri`: W4.4 (letting the user pick a
+ * language) needs to see EVERY option. Carrying it since W1.1 means adding the picker later does
+ * NOT require changing the `messages.ts` protocol again.
  */
 export interface RenditionInfo {
   /**
-   * W1.5 — danh tính track khi `uri` KHÔNG phân biệt nổi (DASH: mọi track chung một `.mpd`).
-   * HLS không có id tự nhiên nên bỏ trống và vẫn định danh bằng `uri` như cũ.
+   * W1.5 — track identity for when `uri` CANNOT distinguish tracks (DASH: every track shares one
+   * `.mpd`). HLS has no natural id so this is left blank and identity is still keyed on `uri` as before.
    */
   id?: string;
-  /** GROUP-ID của `#EXT-X-MEDIA`; variant trỏ tới group qua `AUDIO=` / `SUBTITLES=`. */
+  /** GROUP-ID from `#EXT-X-MEDIA`; a variant points to a group via `AUDIO=` / `SUBTITLES=`. */
   groupId: string;
-  /** NAME — key trong group, cũng là nhãn hiển thị cho user. */
+  /** NAME — the key within the group, also the label shown to the user. */
   name: string;
   /**
-   * URL tuyệt đối của playlist rendition.
+   * Absolute URL of the rendition playlist.
    *
-   * VẮNG khi `#EXT-X-MEDIA` không khai URI. Theo RFC 8216 §4.3.4.2.1 điều đó nghĩa là luồng này
-   * ĐÃ nằm sẵn trong variant -> KHÔNG có gì để tải riêng -> giữ nguyên đường một-input.
+   * ABSENT when `#EXT-X-MEDIA` doesn't declare a URI. Per RFC 8216 §4.3.4.2.1 that means this
+   * stream is ALREADY embedded in the variant -> nothing to download separately -> keep the
+   * existing single-input path.
    */
   uri?: string;
   language?: string;
   default: boolean;
   autoselect: boolean;
   /**
-   * true ở ĐÚNG MỘT rendition của danh sách: cái mà variant này THẬT SỰ dùng.
-   * (`selected` mà `uri` vắng = luồng nằm sẵn trong variant, không cần tải riêng.)
+   * true on EXACTLY ONE rendition in the list: the one this variant ACTUALLY uses.
+   * (`selected` with `uri` absent = the stream is already embedded in the variant, nothing to
+   * download separately.)
    */
   selected?: boolean;
 }
 
-/** Một mức chất lượng (variant HLS / representation DASH) để user chọn (G2). */
+/** A quality level (HLS variant / DASH representation) for the user to choose (G2). */
 export interface VariantInfo {
   /**
-   * Danh tính DUY NHẤT trong một manifest. BẮT BUỘC — không được suy ra từ `uri`.
+   * UNIQUE identity within one manifest. REQUIRED — must not be inferred from `uri`.
    *
-   * Nhiều master cho MỌI variant chung một `uri`: Apple master trỏ 3 variant vào cùng playlist,
-   * còn DASH SegmentTemplate thì `resolvedUri` của mọi Representation đều là chính file .mpd.
-   * Key/chọn theo `uri` ở popup vì thế sinh trùng key React và bấm "720p" thì MỌI dòng cùng sáng.
+   * Many masters give EVERY variant the same `uri`: an Apple master points 3 variants at the same
+   * playlist, and for DASH SegmentTemplate every Representation's `resolvedUri` is the .mpd file
+   * itself. Keying/selecting by `uri` in the popup therefore produces duplicate React keys, and
+   * clicking "720p" lights up EVERY row at once.
    */
   id: string;
-  /** URL tuyệt đối của media playlist / representation. */
+  /** absolute URL of the media playlist / representation. */
   uri: string;
-  /** nhãn hiển thị, vd "720p" hoặc "800 kbps". */
+  /** display label, e.g. "720p" or "800 kbps". */
   name: string;
   bandwidth?: number;
   width?: number;
   height?: number;
   codecs?: string;
   /**
-   * Luồng tiếng tách rời (`#EXT-X-MEDIA:TYPE=AUDIO`) của MỌI group trong master, cờ `selected` ở
-   * cái variant này dùng. Vắng = master không khai tiếng tách rời -> tiếng nằm trong variant.
+   * Separate audio stream (`#EXT-X-MEDIA:TYPE=AUDIO`) from EVERY group in the master, using the
+   * `selected` flag this variant uses. Absent = the master declares no separate audio -> audio is
+   * embedded in the variant.
    *
-   * Bỏ qua trường này chính là bệnh CÂM (§2.1): dữ liệu nằm sẵn trong manifest và bị vứt đi.
+   * Dropping this field is exactly the SILENT bug pattern (§2.1): the data is right there in the
+   * manifest and gets thrown away.
    */
   audioRenditions?: RenditionInfo[];
 }

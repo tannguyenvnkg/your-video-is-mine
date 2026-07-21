@@ -1,22 +1,24 @@
-// HỢP ĐỒNG NHẮN TIN CỦA OFFSCREEN (W0.1) — nửa còn lại của bản sửa.
+// OFFSCREEN MESSAGING CONTRACT (W0.1) — the other half of the fix.
 //
-// Vì sao file này PHẢI tồn tại: review đối kháng đã CHỨNG MINH bằng thực nghiệm rằng hai nửa
-// KHÔNG đối xứng. Nhét `async` vào listener của background -> 12 test đỏ (bắt được). Nhét đúng
-// lỗi đó vào listener của offscreen -> compile + lint + toàn bộ test **XANH HẾT** (không ai thấy).
-// Tệ hơn: khi listener bị đánh dấu `async`, chính tsc gợi ý "Did you mean to write
-// 'Promise<true | undefined>'?" — làm theo gợi ý đó thì mọi cổng xanh trong khi hợp đồng đã hỏng.
+// Why this file MUST exist: adversarial review PROVED empirically that the two halves are
+// NOT symmetric. Sticking `async` on the background listener -> 12 tests turn red (caught).
+// Sticking that exact same bug on the offscreen listener -> compile + lint + every test
+// stays **ALL GREEN** (nobody notices). Worse: when the listener gets marked `async`, tsc
+// itself suggests "Did you mean to write 'Promise<true | undefined>'?" — follow that
+// suggestion and every gate stays green while the contract is broken.
 //
-// Và đây đúng là file có tiền sử tệ nhất dự án: giả định sai về `chrome.storage` ở đây từng sống
-// sót qua MỌI cổng tĩnh kể từ commit đầu tiên. Nên nó phải được ghim.
+// And this really is the file with the worst track record in the project: the wrong
+// assumption about `chrome.storage` here survived EVERY static gate since the first commit.
+// So it has to be pinned down.
 //
-// (Để ở `tests/` chứ không phải `entrypoints/` — xem tests/background-messaging.test.ts.)
+// (Lives in `tests/`, not `entrypoints/` — see tests/background-messaging.test.ts.)
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing';
 import { browser } from 'wxt/browser';
 
-// W3.1 — Worker ghép video không dựng được trong Node (không có OPFS/SyncAccessHandle), và ta
-// KHÔNG đo việc ghép ở đây, chỉ đo HỢP ĐỒNG NHẮN TIN. Nên thay `MuxSession` bằng bản giả.
+// W3.1 — The mux worker can't build in Node (no OPFS/SyncAccessHandle), and we're NOT
+// measuring muxing here, only the MESSAGING CONTRACT. So swap `MuxSession` for a fake.
 vi.mock('@/entrypoints/offscreen/libav-mux', () => ({
   MuxSession: {
     start: async () => ({
@@ -48,15 +50,15 @@ type MessageListener = (
 ) => unknown;
 
 /**
- * offscreen/main.ts đăng ký listener NGAY LÚC IMPORT -> phải cài spy TRƯỚC khi import, và
- * resetModules() để mỗi lần lấy lại là một lần đăng ký mới.
+ * offscreen/main.ts registers its listener AT IMPORT TIME -> the spy must be installed
+ * BEFORE importing, and resetModules() ensures each fetch is a fresh registration.
  */
 async function loadOffscreenListener(): Promise<MessageListener> {
   vi.resetModules();
   const spy = vi.spyOn(browser.runtime.onMessage, 'addListener');
   await import('../entrypoints/offscreen/main');
   const listener = spy.mock.calls[0]?.[0] as unknown as MessageListener;
-  expect(listener, 'offscreen phải đăng ký onMessage listener').toBeTypeOf(
+  expect(listener, 'offscreen must register an onMessage listener').toBeTypeOf(
     'function',
   );
   return listener;
@@ -66,7 +68,7 @@ async function flush(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
 }
 
-describe('offscreen onMessage — hợp đồng Chrome gốc (W0.1)', () => {
+describe('offscreen onMessage — vanilla Chrome contract (W0.1)', () => {
   let listener: MessageListener;
 
   beforeEach(async () => {
@@ -79,7 +81,7 @@ describe('offscreen onMessage — hợp đồng Chrome gốc (W0.1)', () => {
     listener = await loadOffscreenListener();
   });
 
-  it('engine/selftest trả `true` ĐỒNG BỘ rồi mới sendResponse', async () => {
+  it('engine/selftest returns `true` SYNCHRONOUSLY, then sendResponse later', async () => {
     const sendResponse = vi.fn();
     const ret = listener(
       { target: 'offscreen', kind: 'engine/selftest' },
@@ -87,7 +89,7 @@ describe('offscreen onMessage — hợp đồng Chrome gốc (W0.1)', () => {
       sendResponse,
     );
 
-    // Dòng bắt lỗi: trả Promise -> Chrome <148 đóng kênh -> nút kiểm tra bộ ghép treo mãi.
+    // Line that catches the bug: returning a Promise -> Chrome <148 closes the channel -> the mux self-test button hangs forever.
     expect(ret).toBe(true);
     expect(ret).not.toBeInstanceOf(Promise);
 
@@ -96,10 +98,10 @@ describe('offscreen onMessage — hợp đồng Chrome gốc (W0.1)', () => {
     expect(sendResponse.mock.calls[0]![0]).toBeTypeOf('object');
   });
 
-  it('message KHÔNG phải của offscreen -> trả undefined (không cướp kênh của background)', () => {
+  it("message NOT meant for offscreen -> returns undefined (does not steal background's channel)", () => {
     const sendResponse = vi.fn();
-    // Cả background lẫn offscreen đều nhận MỌI runtime message. Nếu offscreen trả `true` ở đây,
-    // nó cướp kênh và câu trả lời thật của background bị mất.
+    // Both background and offscreen receive EVERY runtime message. If offscreen returns
+    // `true` here, it steals the channel and background's real response is lost.
     expect(
       listener(
         { kind: 'hls/progress', jobId: 'j', patch: {} },
@@ -123,7 +125,7 @@ describe('offscreen onMessage — hợp đồng Chrome gốc (W0.1)', () => {
       name: 'revoke',
       message: { target: 'offscreen', kind: 'revoke', url: 'blob:x' },
     },
-  ])('$name là fire-and-forget -> trả undefined', ({ message }) => {
+  ])('$name is fire-and-forget -> returns undefined', ({ message }) => {
     const sendResponse = vi.fn();
     expect(listener(message, {}, sendResponse)).toBeUndefined();
   });

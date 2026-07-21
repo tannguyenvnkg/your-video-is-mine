@@ -1,10 +1,10 @@
-// Giải mã AES-128 cho segment HLS bằng WebCrypto (không cần lib ngoài).
-// Chuẩn HLS: AES-128-CBC, dữ liệu có PKCS7 padding (WebCrypto tự bỏ padding khi decrypt);
-// IV = IV khai báo trong #EXT-X-KEY, hoặc số thứ tự media sequence (128-bit big-endian).
+// AES-128 decryption for HLS segments using WebCrypto (no external lib needed).
+// HLS spec: AES-128-CBC, data has PKCS7 padding (WebCrypto strips padding automatically on decrypt);
+// IV = the IV declared in #EXT-X-KEY, or the media sequence number (128-bit big-endian).
 
 /**
- * IV 16 byte cho segment: dùng IV khai báo, hoặc media sequence big-endian (4 byte cuối).
- * Luôn trả buffer ArrayBuffer-backed (hợp kiểu BufferSource cho WebCrypto).
+ * 16-byte IV for a segment: use the declared IV, or the big-endian media sequence (last 4 bytes).
+ * Always returns an ArrayBuffer-backed buffer (matches the BufferSource type WebCrypto expects).
  */
 export function hlsSegmentIv(
   seq: number,
@@ -15,24 +15,26 @@ export function hlsSegmentIv(
     iv.set(explicitIv);
     return iv;
   }
-  // HLS: IV mặc định = số thứ tự segment dạng 128-bit big-endian.
+  // HLS: default IV = the segment's sequence number as a 128-bit big-endian value.
   new DataView(iv.buffer).setUint32(12, seq >>> 0, false);
   return iv;
 }
 
 /**
- * IV của MỘT segment đã parse — đây là chỗ DUY NHẤT được quyết định "lấy IV ở đâu".
+ * The IV for ONE parsed segment — this is the ONE AND ONLY place that decides "where does the IV come from".
  *
- * 🔴 VÌ SAO TÁCH RA THÀNH HÀM RIÊNG (đừng gộp ngược vào chỗ gọi): lỗi IV KHÔNG QUAN SÁT ĐƯỢC qua
- * file kết quả. Đo trên fixture thật (2026-07-19): dùng nhầm chỉ số mảng thay cho `seg.seq` làm
- * lệch ĐÚNG 10/143.444 byte, số khung không đổi, md5 luồng hình không đổi, và file .mp4 ra GIỐNG
- * HỆT TỪNG BYTE — vì CBC chỉ cho IV chi phối khối 16 byte đầu mỗi segment. Nghĩa là e2e/ffprobe
- * mù hoàn toàn với lớp lỗi này. Tách thành hàm thuần là cách DUY NHẤT còn lại để có lưới: unit
- * test ghim thẳng vector IV (xem `utils/crypto.test.ts`).
+ * 🔴 WHY THIS IS SPLIT INTO ITS OWN FUNCTION (don't merge it back into the call site): an IV bug is
+ * NOT OBSERVABLE through the output file. Measured on a real fixture (2026-07-19): mistakenly using
+ * the array index instead of `seg.seq` shifts EXACTLY 10/143,444 bytes, the frame count doesn't
+ * change, the video stream's md5 doesn't change, and the resulting .mp4 comes out BYTE-FOR-BYTE
+ * IDENTICAL — because CBC only lets the IV affect the first 16-byte block of each segment. That
+ * means e2e/ffprobe are completely blind to this class of bug. Splitting it into a pure function is
+ * the ONLY remaining way to get a safety net: a unit test that pins the IV vector directly
+ * (see `utils/crypto.test.ts`).
  *
- * Hai luật, đúng thứ tự: `#EXT-X-KEY:IV=` nếu có; nếu không thì media sequence TUYỆT ĐỐI của
- * segment (KHÔNG phải vị trí của nó trong mảng — playlist có `#EXT-X-MEDIA-SEQUENCE` khác 0 thì
- * hai số đó lệch nhau).
+ * Two rules, in order: `#EXT-X-KEY:IV=` if present; otherwise the segment's ABSOLUTE media
+ * sequence (NOT its position in the array — if the playlist has a nonzero
+ * `#EXT-X-MEDIA-SEQUENCE`, those two numbers diverge).
  */
 export function segmentIv(seg: {
   seq: number;
@@ -41,7 +43,7 @@ export function segmentIv(seg: {
   return hlsSegmentIv(seg.seq, seg.iv);
 }
 
-/** Giải mã AES-128-CBC. WebCrypto tự bỏ PKCS7 padding sau khi giải mã. */
+/** Decrypts AES-128-CBC. WebCrypto strips PKCS7 padding automatically after decrypting. */
 export async function decryptAes128Cbc(
   data: BufferSource,
   key: BufferSource,

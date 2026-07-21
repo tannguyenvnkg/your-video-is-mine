@@ -1,5 +1,5 @@
-// Khai báo type tối thiểu cho m3u8-parser và mpd-parser (2 package KHÔNG kèm .d.ts).
-// Chỉ khai báo các trường dự án dùng; phần còn lại để index signature `unknown`.
+// Minimal type declarations for m3u8-parser and mpd-parser (2 packages that do NOT ship a .d.ts).
+// Only declares the fields the project uses; everything else falls to the `unknown` index signature.
 
 declare module 'm3u8-parser' {
   export interface M3u8Attributes {
@@ -8,28 +8,28 @@ declare module 'm3u8-parser' {
     RESOLUTION?: { width: number; height: number };
     CODECS?: string;
     NAME?: string;
-    /** GROUP-ID của nhóm tiếng tách rời mà variant này dùng (trỏ vào mediaGroups.AUDIO). */
+    /** GROUP-ID of the separate audio group this variant uses (points into mediaGroups.AUDIO). */
     AUDIO?: string;
-    /** GROUP-ID của nhóm phụ đề (trỏ vào mediaGroups.SUBTITLES). */
+    /** GROUP-ID of the subtitle group (points into mediaGroups.SUBTITLES). */
     SUBTITLES?: string;
     [key: string]: unknown;
   }
 
-  /** Một rendition khai bằng #EXT-X-MEDIA. */
+  /** A rendition declared via #EXT-X-MEDIA. */
   export interface M3u8Rendition {
     default?: boolean;
     autoselect?: boolean;
     language?: string;
     /**
-     * ⚠️ VẮNG HẲN (không phải undefined) khi #EXT-X-MEDIA không khai URI — đã đo thật ở
-     * m3u8-parser@7.2.0. Theo RFC 8216 §4.3.4.2.1 nghĩa là luồng nằm sẵn trong mọi variant.
-     * ⚠️ NGUYÊN VĂN manifest: parser KHÔNG resolve, phải tự resolveUri.
+     * ⚠️ COMPLETELY ABSENT (not undefined) when #EXT-X-MEDIA declares no URI — actually measured on
+     * m3u8-parser@7.2.0. Per RFC 8216 §4.3.4.2.1 this means the stream is already present in every variant.
+     * ⚠️ VERBATIM from the manifest: the parser does NOT resolve it, resolveUri must be called manually.
      */
     uri?: string;
     [key: string]: unknown;
   }
 
-  /** mediaGroups[TYPE][GROUP-ID][NAME] — ⚠️ key trong group là NAME, không phải id. */
+  /** mediaGroups[TYPE][GROUP-ID][NAME] — ⚠️ the key within a group is NAME, not id. */
   export interface M3u8MediaGroups {
     AUDIO?: Record<string, Record<string, M3u8Rendition>>;
     SUBTITLES?: Record<string, Record<string, M3u8Rendition>>;
@@ -39,15 +39,15 @@ declare module 'm3u8-parser' {
   export interface M3u8Key {
     method?: string;
     uri?: string;
-    /** IV 16 byte, m3u8-parser trả về Uint32Array (4 x uint32). */
+    /** 16-byte IV, m3u8-parser returns it as a Uint32Array (4 x uint32). */
     iv?: Uint32Array;
     [key: string]: unknown;
   }
 
   /**
-   * Byterange của SEGMENT (#EXT-X-BYTERANGE).
-   * ⚠️ m3u8-parser ĐÃ cộng dồn `offset` thành TUYỆT ĐỐI (thiếu `@offset` = nối tiếp segment trước)
-   * -> đừng cộng dồn lần nữa, sẽ nhân đôi.
+   * Byterange of a SEGMENT (#EXT-X-BYTERANGE).
+   * ⚠️ m3u8-parser has ALREADY accumulated `offset` into an ABSOLUTE value (missing `@offset` =
+   * continues from the previous segment) -> don't accumulate it again, it will double.
    */
   export interface M3u8ByteRange {
     length: number;
@@ -55,9 +55,9 @@ declare module 'm3u8-parser' {
   }
 
   /**
-   * Byterange của #EXT-X-MAP — LUẬT KHÁC hẳn segment (đã đo thật):
-   * KHÔNG cộng dồn, và thiếu `@offset` thì key `offset` **VẮNG HẲN** (không mặc định 0).
-   * Theo RFC 8216 §4.3.2.5, vắng `@offset` nghĩa là bắt đầu từ byte 0.
+   * Byterange of #EXT-X-MAP — a COMPLETELY DIFFERENT rule from segments (actually measured):
+   * NOT accumulated, and when `@offset` is missing the `offset` key is **COMPLETELY ABSENT** (not defaulted to 0).
+   * Per RFC 8216 §4.3.2.5, an absent `@offset` means starting at byte 0.
    */
   export interface M3u8MapByteRange {
     length: number;
@@ -76,7 +76,7 @@ declare module 'm3u8-parser' {
     key?: M3u8Key;
     map?: M3u8Map;
     byterange?: M3u8ByteRange;
-    /** W1.4 — CHỈ có mặt khi = true (parser không ghi `false`). */
+    /** W1.4 — ONLY present when = true (the parser never writes `false`). */
     discontinuity?: boolean;
     [key: string]: unknown;
   }
@@ -95,11 +95,11 @@ declare module 'm3u8-parser' {
     targetDuration?: number;
     endList?: boolean;
     /**
-     * W1.4 — CHỈ SỐ MẢNG `segments` (không phải media sequence). ĐO THẬT: chỉ số có thể LẶP khi
-     * hai tag DISCONTINUITY đứng liền nhau, và có thể là 0 khi tag đứng trước segment đầu.
+     * W1.4 — INDEX into the `segments` array (not a media sequence). ACTUALLY MEASURED: the index
+     * can REPEAT when two DISCONTINUITY tags sit right next to each other, and can be 0 when the tag precedes the first segment.
      */
     discontinuityStarts?: number[];
-    /** Số lần đứt TRƯỚC cửa sổ playlist này — KHÔNG phải số chỗ nối bên trong nó. */
+    /** Number of discontinuities BEFORE this playlist window — NOT the count of boundaries inside it. */
     discontinuitySequence?: number;
     [key: string]: unknown;
   }
@@ -120,22 +120,22 @@ declare module 'mpd-parser' {
     [key: string]: unknown;
   }
 
-  /** Đoạn byte — cùng shape với HLS: `offset` là byte đầu tiên (tính từ 0). */
+  /** A byte range — same shape as HLS: `offset` is the first byte (0-based). */
   export interface MpdByteRange {
     length: number;
     offset: number;
   }
 
   /**
-   * Một segment DASH đã được mpd-parser dựng sẵn.
-   * ⚠️ `map` là init segment và mpd-parser gắn nó vào TỪNG segment — với MPD đa Period, mỗi
-   * Period mang `map.resolvedUri` KHÁC nhau (đã đo, ghim ở utils/dash.test.ts).
+   * A DASH segment already built by mpd-parser.
+   * ⚠️ `map` is the init segment and mpd-parser attaches it to EVERY segment — for a multi-Period
+   * MPD, each Period carries a DIFFERENT `map.resolvedUri` (measured, pinned in utils/dash.test.ts).
    */
   export interface MpdSegment {
     uri?: string;
     resolvedUri?: string;
     duration?: number;
-    /** mpd-parser đánh dấu segment ĐẦU của mỗi Period sau Period đầu tiên. */
+    /** mpd-parser marks the FIRST segment of every Period after the first one. */
     discontinuity?: boolean;
     byterange?: MpdByteRange;
     map?: {
@@ -148,20 +148,20 @@ declare module 'mpd-parser' {
 
   export interface MpdPlaylist {
     uri?: string;
-    /** URL tuyệt đối đã resolve (mpd-parser điền sẵn). */
+    /** Absolute, already-resolved URL (filled in by mpd-parser). */
     resolvedUri?: string;
     attributes?: MpdAttributes;
     segments?: MpdSegment[];
     /**
-     * Chỉ số các segment mở đầu một Period mới, do mpd-parser tính khi khâu nhiều Period.
-     * 🔬 ĐÃ ĐO: đây là tín hiệu đa-Period LUÔN có mặt — khác `map.resolvedUri`, thứ có thể GIỐNG
-     * nhau giữa các Period khi template init nội suy ra cùng một URI.
+     * Indexes of the segments that open a new Period, computed by mpd-parser when stitching multiple Periods.
+     * 🔬 ACTUALLY MEASURED: this is the ALWAYS-present multi-Period signal — unlike `map.resolvedUri`,
+     * which can be IDENTICAL across Periods when the init template interpolates to the same URI.
      */
     discontinuityStarts?: number[];
     [key: string]: unknown;
   }
 
-  /** Một AdaptationSet tiếng, đã dàn theo mediaGroups.AUDIO[group][label]. */
+  /** An audio AdaptationSet, laid out under mediaGroups.AUDIO[group][label]. */
   export interface MpdAudioRendition {
     language?: string;
     default?: boolean;

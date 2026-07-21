@@ -1,35 +1,36 @@
-// W2.1 — bắt & phát lại header THẬT mà player của trang đã gửi, thay vì BỊA Referer/Origin.
+// W2.1 — capture & replay the REAL headers the page's player sent, instead of FABRICATING Referer/Origin.
 //
-// VÌ SAO: §2.11. Trước gói này ta set CỨNG đúng 2 header do mình nghĩ ra, và set `Origin` VÔ ĐIỀU
-// KIỆN lên GET — điều player thật gần như không bao giờ làm. Một số CDN coi Origin lạ trên GET là
-// vi phạm CORS và 403 nó, nghĩa là chính cái rule "chống 403" có thể GÂY RA 403. Đồng thời ta mù
-// hoàn toàn với CDN gác bằng thứ khác: token trong header riêng (`X-Playback-Session-Id`,
-// `Authorization: Bearer`).
+// WHY: §2.11. Before this package we hard-set exactly 2 headers we made up, and set `Origin`
+// UNCONDITIONALLY on GET — something a real player almost never does. Some CDNs treat an unfamiliar
+// Origin on GET as a CORS violation and 403 it, meaning the very rule meant to "fight 403" can CAUSE
+// a 403. At the same time we were completely blind to CDNs gated by something else: a token in a
+// dedicated header (`X-Playback-Session-Id`, `Authorization: Bearer`).
 //
-// 🔬 ĐO THẬT TRONG EDGE (2026-07-19) — bảng này quyết định toàn bộ thiết kế, đừng đoán lại:
+// 🔬 REAL MEASUREMENT IN EDGE (2026-07-19) — this table drives the entire design, do not re-guess it:
 //
-//   header                | fetch(url,{headers}) từ SW | DNR modifyHeaders
-//   ----------------------|----------------------------|------------------
-//   Cookie                | ❌ RƠI, KHÔNG NÉM          | ✅ tới nơi
-//   Referer               | ❌ RƠI, KHÔNG NÉM          | ✅ tới nơi
-//   User-Agent            | ❌ RƠI, KHÔNG NÉM          | ✅ tới nơi
-//   Origin                | ✅ tới nơi                 | ✅ tới nơi
-//   Authorization         | ✅ tới nơi                 | ✅ tới nơi
-//   X-Playback-Session-Id | ✅ tới nơi                 | ✅ tới nơi
+//   header                | fetch(url,{headers}) from SW | DNR modifyHeaders
+//   ----------------------|-------------------------------|------------------
+//   Cookie                | ❌ DROPPED, NO THROW           | ✅ delivered
+//   Referer               | ❌ DROPPED, NO THROW           | ✅ delivered
+//   User-Agent            | ❌ DROPPED, NO THROW           | ✅ delivered
+//   Origin                | ✅ delivered                   | ✅ delivered
+//   Authorization         | ✅ delivered                   | ✅ delivered
+//   X-Playback-Session-Id | ✅ delivered                   | ✅ delivered
 //
-// => PHÁT LẠI TOÀN BỘ QUA DNR. Hai lý do:
-//   1. `fetch` nuốt Referer/Cookie/User-Agent trong IM LẶNG (không ném) — đúng loại lỗi
-//      XANH-VÀ-IM-LẶNG đã ba lần giết dự án này.
-//   2. DNR đặt được MỌI header đã đo, nên không cần luồn header qua 5 tầng vào offscreen. Tránh
-//      luôn bẫy `utils/retry.ts`: thêm một key `headers` thứ hai cạnh nhánh `Range` sẽ ĐÈ MẤT
-//      `Range` -> byterange (fMP4/CMAF, W1.3) hỏng câm.
+// => REPLAY EVERYTHING VIA DNR. Two reasons:
+//   1. `fetch` silently swallows Referer/Cookie/User-Agent (no throw) — exactly the kind of
+//      GREEN-AND-SILENT bug that has killed this project three times already.
+//   2. DNR can set EVERY header we measured, so there's no need to thread headers through 5 layers
+//      into offscreen. This also avoids a trap in `utils/retry.ts`: adding a second `headers` key
+//      next to the `Range` branch would SILENTLY OVERWRITE `Range` -> byterange (fMP4/CMAF, W1.3)
+//      breaks silently.
 
-/** Bản chụp header của một request player thật đã gửi. Tên header LUÔN chữ thường. */
+/** Header snapshot of one request a real player sent. Header names are ALWAYS lowercase. */
 export type CapturedHeaders = Record<string, string>;
 
-/** Header do trình duyệt/tầng vận chuyển tự quản — phát lại là vô nghĩa hoặc phá request của ta. */
+/** Headers the browser/transport layer manages itself — replaying them is meaningless or breaks our request. */
 const NEVER_REPLAY = new Set([
-  // tầng vận chuyển: trình duyệt tự dựng lại cho request của ta.
+  // transport layer: the browser rebuilds these for our own request.
   'host',
   'connection',
   'content-length',
@@ -43,45 +44,48 @@ const NEVER_REPLAY = new Set([
   'expect',
   'date',
   'accept-encoding',
-  // 🔴 Vá sau review: `accept` / `accept-language` là header VÔ HẠI mà player nào cũng gửi. Giữ
-  // chúng lại thì một bản chụp KHÔNG có referer (trang đặt `Referrer-Policy: no-referrer` — rất
-  // phổ biến đúng trên site chống hotlink) vẫn cho `isEmpty=false`, khiến caller tưởng đã bắt được
-  // header thật và BỎ đường lùi Referer bịa -> mất luôn tính năng vượt 403 đang chạy được.
+  // 🔴 Post-review patch: `accept` / `accept-language` are HARMLESS headers every player sends.
+  // Keeping them means a snapshot WITHOUT a referer (page sets `Referrer-Policy: no-referrer` —
+  // quite common exactly on anti-hotlink sites) would still yield `isEmpty=false`, making the
+  // caller think it captured real headers and DROP the fabricated-Referer fallback -> losing the
+  // 403-bypass feature that was actually working.
   'accept',
   'accept-language',
-  // 🔴 Vá sau review: cache validator. Phát lại `If-None-Match`/`If-Modified-Since` của trang lên
-  // cú fetch MỚI của ta -> máy chủ trả **304 không body** -> parse ra playlist rỗng. Live HLS
-  // refresh liên tục nên ca này không hiếm.
+  // 🔴 Post-review patch: cache validators. Replaying the page's `If-None-Match`/`If-Modified-Since`
+  // on our NEW fetch -> the server returns **304 with no body** -> parses into an empty playlist.
+  // Live HLS refreshes constantly so this case isn't rare.
   'if-none-match',
   'if-modified-since',
   'if-match',
   'if-unmodified-since',
   'cache-control',
   'pragma',
-  // Range là header của TA: offscreen tự đặt cho byterange (W1.3). Phát lại Range của trang sẽ
-  // cắt nhầm segment.
+  // Range is OUR header: offscreen sets it itself for byterange (W1.3). Replaying the page's
+  // Range would cut the wrong segment.
   'range',
   'if-range',
-  // 🔴 Cookie: KHÔNG phát lại. Mọi cú fetch media của ta đều đã `credentials:'include'` nên jar
-  // của trình duyệt TỰ gửi cookie thật, mới nhất (đã đo). Phát lại bản chụp chỉ tổ (a) đè cookie
-  // cũ lên cookie mới, (b) rò cookie site sang host CDN khác khi rule phủ nhiều host.
+  // 🔴 Cookie: do NOT replay. Every one of our media fetches already uses `credentials:'include'`
+  // so the browser's cookie jar sends the real, freshest cookies itself (measured). Replaying the
+  // snapshot only (a) overwrites a fresh cookie with a stale one, (b) leaks the site's cookie to a
+  // different CDN host when a rule covers multiple hosts.
   'cookie',
   'cookie2',
-  // danh tính trình duyệt: ta CHÍNH LÀ trình duyệt đó, phát lại không đổi gì mà chỉ nặng rule.
+  // browser identity: we ARE that browser, replaying it changes nothing and just bloats the rule.
   'user-agent',
   'dnt',
 ]);
 
-/** Tiền tố header cũng thuộc nhóm KHÔNG phát lại. */
+/** Header prefixes that also fall into the NEVER-replay group. */
 const NEVER_REPLAY_PREFIX = ['proxy-', 'sec-', 'access-control-'];
 
 /**
- * Header ĐƯỢC phép bắn sang host KHÁC host đã chụp.
+ * Headers ALLOWED to be sent to a host OTHER than the one they were captured on.
  *
- * Vì sao phải thu hẹp: rule DNR khớp theo HOST và ôm MỌI request tab-less tới host đó. Bắn
- * `Authorization` của site A sang CDN B là RÒ THÔNG TIN XÁC THỰC — tệ hơn hẳn cái 403 nó định chữa.
- * Referer/Origin thì ngược lại: chúng là danh tính TRANG, và bắn sang CDN chính là mục đích (§2.4 —
- * key/segment hay nằm host khác và đó lại là chỗ kiểm Referer gắt nhất).
+ * Why this needs restricting: a DNR rule matches by HOST and covers EVERY tab-less request to that
+ * host. Sending site A's `Authorization` to CDN B is a CREDENTIAL LEAK — worse than the 403 it was
+ * meant to fix. Referer/Origin are the opposite: they're the PAGE's identity, and sending them to
+ * the CDN is the whole point (§2.4 — the key/segment often lives on a different host, and that's
+ * exactly where Referer checks are strictest).
  */
 const CROSS_HOST_SAFE = new Set(['referer', 'origin']);
 
@@ -90,20 +94,20 @@ function isReplayable(name: string): boolean {
   return !NEVER_REPLAY_PREFIX.some((p) => name.startsWith(p));
 }
 
-/** Chuẩn hoá danh sách header của webRequest thành map chữ thường. */
+/** Normalize a webRequest header list into a lowercase map. */
 export function capturedFromHeaderList(
   list: readonly { name: string; value?: string }[],
 ): CapturedHeaders {
   const out: CapturedHeaders = {};
   for (const h of list) {
-    // value vắng = webRequest trả binaryValue (header nhị phân) -> không phát lại được.
+    // missing value = webRequest returned binaryValue (a binary header) -> not replayable.
     if (typeof h.value !== 'string') continue;
     out[h.name.toLowerCase()] = h.value;
   }
   return out;
 }
 
-/** Thông tin tối thiểu của một request để quyết định có bắt header hay không. */
+/** Minimal info about a request used to decide whether to capture its headers. */
 export interface CaptureCandidate {
   tabId: number;
   initiator?: string;
@@ -111,53 +115,56 @@ export interface CaptureCandidate {
 }
 
 /**
- * Chỉ bắt header của PLAYER TRANG.
+ * Only capture headers from the PAGE'S PLAYER.
  *
- * 🔬 ĐO THẬT: fetch của CHÍNH extension CŨNG lọt vào `onSendHeaders`, mang
- * `initiator='chrome-extension://<id>'` và thường `tabId=-1`. Không lọc thì ta bắt lại chính
- * header BỊA của mình rồi "phát lại" ở lần sau — vòng tự đầu độc, mà mọi cổng vẫn XANH.
+ * 🔬 REAL MEASUREMENT: the extension's OWN fetches also land in `onSendHeaders`, carrying
+ * `initiator='chrome-extension://<id>'` and usually `tabId=-1`. Without filtering, we'd capture our
+ * own FABRICATED headers and "replay" them next time — a self-poisoning loop, while every gate
+ * stays GREEN.
  */
 export function shouldCaptureRequest(
   d: CaptureCandidate,
   extensionId: string,
 ): boolean {
   if (d.tabId < 0) return false;
-  if (d.type === 'main_frame') return false; // điều hướng trang, không phải request player.
+  if (d.type === 'main_frame') return false; // page navigation, not a player request.
   if (d.initiator?.startsWith(`chrome-extension://${extensionId}`))
     return false;
   return true;
 }
 
 export interface HeaderReplayPlan {
-  /** Header sẽ đặt qua DNR cho host này. */
+  /** Headers that will be set via DNR for this host. */
   headers: CapturedHeaders;
   /**
-   * Có ít nhất một header NHẠY CẢM (không thuộc `CROSS_HOST_SAFE`, vd `Authorization`, token `x-*`).
+   * At least one SENSITIVE header (not in `CROSS_HOST_SAFE`, e.g. `Authorization`, an `x-*` token).
    *
-   * 🔴 Vì sao caller PHẢI quan tâm: `requestDomains:['example.com']` của DNR khớp **cả subdomain**
-   * (`api.`, `accounts.`, `cdn.`). Nên rule mang `Authorization` của media trên apex sẽ bắn token
-   * đó sang MỌI subdomain extension fetch tới — vô hiệu hoá đúng lá chắn cross-host ở trên. Rule
-   * nào `hasSensitive` thì caller phải NEO theo origin (`urlFilter`), đừng phủ theo host.
+   * 🔴 Why the caller MUST care: DNR's `requestDomains:['example.com']` matches **all subdomains**
+   * too (`api.`, `accounts.`, `cdn.`). So a rule carrying the media's apex `Authorization` would
+   * send that token to EVERY subdomain the extension fetches — defeating the cross-host shield
+   * above. Any rule with `hasSensitive` must be caller-ANCHORED to the origin (`urlFilter`),
+   * never spread across the whole host.
    */
   hasSensitive: boolean;
-  /** Tên header đã bị bỏ (để giải thích/kiểm chứng, không dùng cho logic mạng). */
+  /** Header names that were dropped (for explanation/verification, not used in network logic). */
   dropped: string[];
   /**
-   * KHÔNG có gì phát lại được -> caller PHẢI lùi về đường spoof cũ (Referer bịa từ pageUrl).
+   * NOTHING is replayable -> caller MUST fall back to the old spoof path (fabricated Referer from pageUrl).
    *
-   * 🔴 Đây là chốt chống hồi quy quan trọng nhất của W2.1: nếu isEmpty sai thành false, caller
-   * tưởng đã có header thật nên bỏ đường lùi -> mất tính năng vượt 403 ĐANG CHẠY ĐƯỢC.
+   * 🔴 This is W2.1's most important anti-regression guard: if isEmpty is wrongly false, the caller
+   * thinks it has real headers and drops the fallback -> losing the 403-bypass feature that was
+   * ACTUALLY WORKING.
    */
   isEmpty: boolean;
 }
 
 /**
- * Chọn tập header sẽ phát lại cho một host.
+ * Pick the set of headers to replay for a host.
  *
- * QUY TẮC VÀNG (§2.11): trang **không gửi** header nào thì ta **không sinh** header đó. Hàm này
- * chỉ lọc bớt bản chụp, TUYỆT ĐỐI không thêm gì vào.
+ * GOLDEN RULE (§2.11): if the page **didn't send** a header, we **don't generate** it. This
+ * function only filters the snapshot down — it NEVER adds anything.
  *
- * @param sameHost true nếu đang dựng rule cho ĐÚNG host đã chụp được header.
+ * @param sameHost true if building the rule for the EXACT host the headers were captured on.
  */
 export function planHeaderReplay(
   captured: CapturedHeaders,
@@ -185,11 +192,12 @@ export function planHeaderReplay(
 }
 
 /**
- * W2.1 nợ (a) — hạ một plan xuống chỉ còn header CROSS-HOST-SAFE (referer/origin), bỏ mọi header
- * nhạy cảm. Dùng khi host này đã có một rule nhạy cảm của job khác đang sống: chồng thêm rule
- * nhạy cảm thứ hai làm job trước nhận nhầm token (xem `hasConflictingSensitiveRule`). Hạ cấp thế này
- * an toàn hơn: job sau mất token (segment có thể 403 — lỗi HIỆN RÕ) còn hơn job trước âm thầm
- * nhận sai token và tải nhầm nội dung.
+ * W2.1 debt (a) — downgrade a plan to only the CROSS-HOST-SAFE headers (referer/origin), dropping
+ * every sensitive header. Used when this host already has a live sensitive rule from another job:
+ * stacking a second sensitive rule would make the earlier job pick up the wrong token (see
+ * `hasConflictingSensitiveRule`). This downgrade is safer: the later job losing its token (segment
+ * may 403 — a VISIBLE error) beats the earlier job silently picking up the wrong token and
+ * downloading the wrong content.
  */
 export function stripSensitive(plan: HeaderReplayPlan): HeaderReplayPlan {
   const headers: CapturedHeaders = {};
@@ -205,12 +213,13 @@ export function stripSensitive(plan: HeaderReplayPlan): HeaderReplayPlan {
 }
 
 /**
- * Lọc bản chụp NGAY LÚC BẮT: chỉ giữ header có khả năng được phát lại.
+ * Filter the snapshot RIGHT AT CAPTURE TIME: keep only headers that could possibly be replayed.
  *
- * 🔴 Vá sau review (riêng tư): listener chạy trên `<all_urls>`, nên lưu nguyên bản chụp đồng nghĩa
- * `Cookie` THÔ của mọi site có video (LMS nội bộ, khoá học trả phí, viewer riêng tư…) nằm trong
- * `chrome.storage.session` dù user chưa hề bấm tải gì. Ta đã quyết KHÔNG phát lại Cookie — vậy thì
- * đừng lưu nó ngay từ đầu. Lọc ở đây cũng làm bản ghi nhỏ đi đáng kể.
+ * 🔴 Post-review patch (privacy): the listener runs on `<all_urls>`, so storing the raw snapshot
+ * would mean the RAW `Cookie` of every site with video (internal LMS, paid courses, private
+ * viewers…) sits in `chrome.storage.session` even though the user never clicked download. We've
+ * already decided NOT to replay Cookie — so don't store it in the first place. Filtering here also
+ * shrinks the stored record considerably.
  */
 export function filterCapturable(captured: CapturedHeaders): CapturedHeaders {
   const out: CapturedHeaders = {};

@@ -1,21 +1,21 @@
-// Helper thuần cho tiến trình tải HLS: tính %, tốc độ, ETA và định dạng hiển thị.
-// Tách khỏi UI để unit test dễ dàng (vitest).
+// Pure helpers for HLS download progress: compute %, speed, ETA, and display formatting.
+// Split from the UI to make unit testing easy (vitest).
 
 export interface FetchStatsInput {
   segmentsDone: number;
   segmentsTotal: number;
   bytesDownloaded: number;
-  /** epoch ms lúc bắt đầu tải segment. */
+  /** epoch ms when segment downloading started. */
   startedAt: number;
-  /** epoch ms hiện tại. */
+  /** current epoch ms. */
   now: number;
 }
 
 export interface FetchStats {
-  /** phần trăm 0..100 (làm tròn). */
+  /** percentage 0..100 (rounded). */
   pct: number;
   speedBytesPerSec: number;
-  /** giây còn lại; null nếu chưa đủ dữ liệu để ước lượng. */
+  /** seconds remaining; null if not enough data to estimate. */
   etaSec: number | null;
 }
 
@@ -27,7 +27,7 @@ export function computeFetchStats(input: FetchStatsInput): FetchStats {
       ? Math.min(100, Math.round((segmentsDone / segmentsTotal) * 100))
       : 0;
   const elapsedSec = Math.max(0, (now - startedAt) / 1000);
-  // Chưa chạy hoặc chưa tải xong segment nào -> không ước lượng được.
+  // Not started yet or no segment finished downloading yet -> cannot estimate.
   if (elapsedSec <= 0 || segmentsDone <= 0) {
     return { pct, speedBytesPerSec: 0, etaSec: null };
   }

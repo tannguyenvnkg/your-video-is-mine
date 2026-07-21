@@ -10,8 +10,8 @@ lerna-debug.log*
 node_modules
 .output
 
-# ⚠️ public/libav/ CỐ Ý KHÔNG bị ignore. Nó KHÔNG có trên npm: variant `ts2mp4d` là bản TỰ DỰNG
-# từ mã nguồn và KHÔNG có trên npm, nên binary phải nằm trong git. Xem public/libav/BUILD.md.
+# ⚠️ public/libav/ is DELIBERATELY NOT ignored. It is NOT on npm: the `ts2mp4d` variant is SELF-BUILT
+# from source and unavailable on npm, so the binary must live in git. See public/libav/BUILD.md.
 stats.html
 stats-*.json
 .wxt
@@ -28,7 +28,7 @@ web-ext.config.ts
 *.sln
 *.sw?
 
-# AI / local-only — KHÔNG commit (bộ nhớ trợ lý, lộ trình, skills...)
+# AI / local-only — do NOT commit (assistant memory, roadmap, skills...)
 .claude/
 CLAUDE.md
 AGENTS.md

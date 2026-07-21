@@ -13,7 +13,7 @@ const RELEASE_URL =
 
 const NOW = 1_700_000_000_000;
 
-/** Giả response của fetch (chỉ 2 field mà code dùng tới). */
+/** Fake fetch response (only the 2 fields the code actually uses). */
 function jsonResponse(body: unknown, ok = true): Response {
   return {
     ok,
@@ -22,35 +22,35 @@ function jsonResponse(body: unknown, ok = true): Response {
 }
 
 describe('isCacheFresh', () => {
-  it('vừa kiểm tra xong -> còn hạn', () => {
+  it('just checked -> still fresh', () => {
     expect(isCacheFresh(NOW, NOW)).toBe(true);
   });
 
-  it('trong TTL -> còn hạn', () => {
+  it('within TTL -> still fresh', () => {
     expect(isCacheFresh(NOW - UPDATE_CHECK_TTL_MS + 1000, NOW)).toBe(true);
   });
 
-  it('đúng bằng TTL -> hết hạn', () => {
+  it('exactly at TTL -> expired', () => {
     expect(isCacheFresh(NOW - UPDATE_CHECK_TTL_MS, NOW)).toBe(false);
   });
 
-  it('quá TTL -> hết hạn', () => {
+  it('past TTL -> expired', () => {
     expect(isCacheFresh(NOW - UPDATE_CHECK_TTL_MS - 1, NOW)).toBe(false);
   });
 
-  it('đồng hồ chạy lùi (checkedAt ở tương lai) -> coi như hết hạn', () => {
+  it('clock running backward (checkedAt in the future) -> treated as expired', () => {
     expect(isCacheFresh(NOW + 60_000, NOW)).toBe(false);
   });
 });
 
 describe('parseLatestRelease', () => {
-  it('nhận tag + link release hợp lệ', () => {
+  it('accepts a valid tag + release link', () => {
     expect(
       parseLatestRelease({ tag_name: 'v0.6.0', html_url: RELEASE_URL }),
     ).toEqual({ latestTag: 'v0.6.0', releaseUrl: RELEASE_URL });
   });
 
-  it('bỏ qua field thừa của GitHub', () => {
+  it('ignores extra GitHub fields', () => {
     const parsed = parseLatestRelease({
       tag_name: 'v0.6.0',
       html_url: RELEASE_URL,
@@ -60,7 +60,7 @@ describe('parseLatestRelease', () => {
     expect(parsed).toEqual({ latestTag: 'v0.6.0', releaseUrl: RELEASE_URL });
   });
 
-  it('trả null khi thiếu/sai kiểu field', () => {
+  it('returns null when a field is missing/wrong type', () => {
     expect(parseLatestRelease(null)).toBeNull();
     expect(parseLatestRelease('v0.6.0')).toBeNull();
     expect(parseLatestRelease({})).toBeNull();
@@ -72,13 +72,13 @@ describe('parseLatestRelease', () => {
     expect(parseLatestRelease({ tag_name: 'v0.6.0', html_url: 5 })).toBeNull();
   });
 
-  it('trả null khi tag rỗng', () => {
+  it('returns null when the tag is empty', () => {
     expect(
       parseLatestRelease({ tag_name: '', html_url: RELEASE_URL }),
     ).toBeNull();
   });
 
-  it('từ chối link không phải github.com (sẽ mở bằng tabs.create)', () => {
+  it('rejects a link that is not github.com (will open via tabs.create)', () => {
     for (const url of [
       'javascript:alert(1)',
       'http://github.com/x/y/releases',
@@ -106,7 +106,7 @@ describe('fetchLatestRelease', () => {
     vi.unstubAllGlobals();
   });
 
-  it('cache còn hạn -> KHÔNG gọi API (tránh rate limit 60 req/giờ)', async () => {
+  it('cache still fresh -> does NOT call the API (avoids the 60 req/hour rate limit)', async () => {
     const cached: UpdateCheck = {
       latestTag: 'v0.6.0',
       releaseUrl: RELEASE_URL,
@@ -118,7 +118,7 @@ describe('fetchLatestRelease', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('chưa có cache -> gọi API và lưu lại kèm checkedAt', async () => {
+  it('no cache yet -> calls the API and saves it along with checkedAt', async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({ tag_name: 'v0.6.0', html_url: RELEASE_URL }),
     );
@@ -129,7 +129,7 @@ describe('fetchLatestRelease', () => {
       checkedAt: NOW,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    // Đã ghi cache -> lần sau đọc lại được.
+    // Cache has been written -> readable again next time.
     expect(await getUpdateCheck()).toEqual({
       latestTag: 'v0.6.0',
       releaseUrl: RELEASE_URL,
@@ -137,7 +137,7 @@ describe('fetchLatestRelease', () => {
     });
   });
 
-  it('không gửi cookie github.com, có header Accept của GitHub API', async () => {
+  it('does not send github.com cookies, includes the GitHub API Accept header', async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({ tag_name: 'v0.6.0', html_url: RELEASE_URL }),
     );
@@ -149,7 +149,7 @@ describe('fetchLatestRelease', () => {
     expect(init.headers).toEqual({ Accept: 'application/vnd.github+json' });
   });
 
-  it('cache hết hạn -> gọi lại API và cập nhật', async () => {
+  it('cache expired -> calls the API again and updates it', async () => {
     await setUpdateCheck({
       latestTag: 'v0.5.0',
       releaseUrl: RELEASE_URL,
@@ -163,7 +163,7 @@ describe('fetchLatestRelease', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('API lỗi mạng -> giữ cache cũ, KHÔNG ném lỗi', async () => {
+  it('API network error -> keeps the old cache, does NOT throw', async () => {
     const stale: UpdateCheck = {
       latestTag: 'v0.5.0',
       releaseUrl: RELEASE_URL,
@@ -173,11 +173,11 @@ describe('fetchLatestRelease', () => {
     fetchMock.mockRejectedValue(new Error('network down'));
 
     expect(await fetchLatestRelease(NOW)).toEqual(stale);
-    // Cache cũ KHÔNG bị ghi đè -> lần mở popup sau vẫn thử lại.
+    // Old cache is NOT overwritten -> next time the popup opens it will retry.
     expect(await getUpdateCheck()).toEqual(stale);
   });
 
-  it('API trả 403 (hết quota) -> giữ cache cũ', async () => {
+  it('API returns 403 (quota exhausted) -> keeps the old cache', async () => {
     const stale: UpdateCheck = {
       latestTag: 'v0.5.0',
       releaseUrl: RELEASE_URL,
@@ -191,20 +191,20 @@ describe('fetchLatestRelease', () => {
     expect(await fetchLatestRelease(NOW)).toEqual(stale);
   });
 
-  it('JSON sai dạng -> giữ cache cũ, không ghi rác', async () => {
+  it('malformed JSON -> keeps the old cache, does not write garbage', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ foo: 'bar' }));
 
     expect(await fetchLatestRelease(NOW)).toBeNull();
     expect(await getUpdateCheck()).toBeNull();
   });
 
-  it('chưa có cache + API lỗi -> null (không banner)', async () => {
+  it('no cache yet + API error -> null (no banner)', async () => {
     fetchMock.mockRejectedValue(new Error('offline'));
 
     expect(await fetchLatestRelease(NOW)).toBeNull();
   });
 
-  it('cache trong storage bị hỏng -> coi như chưa có, gọi lại API', async () => {
+  it('corrupted cache in storage -> treated as none, calls the API again', async () => {
     await browser.storage.local.set({
       'settings:updateCheck': { latestTag: 5 },
     });
