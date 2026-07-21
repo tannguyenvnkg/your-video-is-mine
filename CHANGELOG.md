@@ -2,7 +2,28 @@
 
 Mọi thay đổi đáng chú ý được ghi ở đây. Định dạng theo [Keep a Changelog], phiên bản theo [SemVer].
 
-## [Chưa phát hành]
+## [0.8.0] - 2026-07-21
+
+### Bộ ghép video mới — NHẸ HƠN ~14 LẦN và KHÔNG còn ngốn RAM
+
+- **Thay toàn bộ engine ghép video.** Bản cũ dùng ffmpeg.wasm (32MB, giữ NGUYÊN cả video trong RAM
+  nên video lớn dễ làm hết bộ nhớ) nay được thay bằng libav.js tự dựng (1.56MB) chảy dữ liệu qua đĩa
+  (OPFS). Kết quả: **extension nhỏ đi ~14 lần** (34.8MB → 2.4MB) và tải được video **rất lớn** mà RAM
+  gần như không đổi. (Đây cũng là lý do bản này gỡ xong vướng mắc giấy phép — engine cũ vốn là GPL.)
+- **Video mã hoá kiểu fMP4/CMAF (AES-128 có `#EXT-X-MAP`)** nay giải mã đúng phần đầu tệp. Nhiều CDN
+  hiện đại dùng định dạng này; trước đây phần đầu tệp không được giải mã nên ghép ra file hỏng.
+
+### Vượt "403 / trang chặn tải" chính xác hơn
+
+- **Phát lại đúng header thật của trình phát** (Referer/Origin thật của trang, và BỎ Origin khi trang
+  không gửi) thay vì bịa ra — vượt chặn hotlink tốt hơn và tránh tự gây 403.
+- **Hai lượt tải cùng một site không còn lẫn khoá xác thực của nhau** khi chạy song song.
+
+### Tên file mang đúng tên video
+
+- File tải về mang **tên video thật** (đọc từ tiêu đề trang ngay lúc bấm tải) thay vì `master.mp4` /
+  `playlist.mp4`; cắt bỏ phần thừa như `(3)` hay đuôi tên site; giữ nguyên dấu tiếng Việt và emoji.
+- Mẫu tên file trong Options nay từ chối mẫu sai và tự lùi về mẫu an toàn.
 
 ### Sửa lỗi — HẾT SPINNER QUAY VĨNH VIỄN
 
