@@ -47,6 +47,14 @@ const FIXTURES_DASH_SRC = resolve(
  */
 export const PLAYER_TOKEN = 'e2e-player-session-4f2a91';
 
+/**
+ * W2.1 debt (a) — a SECOND, distinct player token. Two HLS assets on the SAME host can each sit
+ * behind their own token; this is the value the second asset's gate demands in the different-token
+ * scenario. It must never be derivable from the first — the whole point is that mixing the two up
+ * (one job clobbering the other's DNR header rule) is observable as a 403, not a silent wrong file.
+ */
+export const PLAYER_TOKEN_B = 'e2e-player-session-b-8c31d7';
+
 /** File mp4 progressive (đọc một lần) — dùng cho ca W2.5. */
 const PROGRESSIVE_MP4 = readFileSync(join(FIXTURES_PROGRESSIVE, 'sample.mp4'));
 
@@ -365,6 +373,9 @@ export async function startFixtureServer({
   stallSegments = false,
   tokenGate = false,
   keyHost = null,
+  // W2.1 debt (a) — two same-host HLS assets, each behind its own token. false = off; 'same' = both
+  // slots demand PLAYER_TOKEN; 'different' = slot a demands PLAYER_TOKEN, slot b demands PLAYER_TOKEN_B.
+  dualToken = false,
 } = {}) {
   /** @type {{url:string, referer:string|undefined, token:string|undefined, status:number}[]} */
   const requests = [];
@@ -414,6 +425,26 @@ export async function startFixtureServer({
     if (tokenGate && (isManifest(path) || isSegment(path))) {
       if (token !== PLAYER_TOKEN) {
         send(403, `Forbidden: token sai/thiếu (${token ?? 'NONE'})`, 'text/plain');
+        return;
+      }
+    }
+
+    // W2.1 debt (a) — PER-ASSET token gate. /hls-dual/<slot>/ demands the token registered for that
+    // slot: slot a always wants PLAYER_TOKEN; slot b wants PLAYER_TOKEN_B only in 'different' mode.
+    // A request arriving with the OTHER slot's token (one same-host job's DNR rule clobbered by the
+    // other's) is a loud 403 here — never a silently wrong file.
+    const dualSlot = /^\/hls-dual\/([ab])\//.exec(path);
+    if (dualToken && dualSlot) {
+      const want =
+        dualSlot[1] === 'b' && dualToken === 'different'
+          ? PLAYER_TOKEN_B
+          : PLAYER_TOKEN;
+      if (token !== want) {
+        send(
+          403,
+          `Forbidden: token sai cho slot ${dualSlot[1]} (${token ?? 'NONE'})`,
+          'text/plain',
+        );
         return;
       }
     }
@@ -545,6 +576,21 @@ export async function startFixtureServer({
       return;
     }
 
+    // W2.1 debt (a) — two HLS assets on the SAME host (slot a / slot b). Same muxable bytes as the
+    // /hls/ set, just under a slot-scoped path so each carries its own token gate (checked above).
+    // Placed BEFORE the generic isSegment() route, which slices a fixed '/hls/' prefix and would
+    // read the wrong file for these paths. The relative `segN.ts` in media.m3u8 resolves under the
+    // slot dir, so no rewrite is needed.
+    const dual = /^\/hls-dual\/[ab]\/(media\.m3u8|seg(\d+)\.ts)$/.exec(path);
+    if (dual) {
+      if (dual[1] === 'media.m3u8') {
+        send(200, readFixture('media.m3u8'), 'application/vnd.apple.mpegurl');
+      } else {
+        send(200, readFixture(`seg${dual[2]}.bin`), 'video/mp2t');
+      }
+      return;
+    }
+
     if (path === '/hls/master.m3u8') {
       send(200, readFixture('master.m3u8'), 'application/vnd.apple.mpegurl');
       return;
@@ -672,6 +718,28 @@ export async function startFixtureServer({
       );
       return;
     }
+    // W2.1 debt (a) — player for one slot. It fetches ONLY that slot's media playlist, carrying the
+    // token its gate demands, so the extension observes and stores the real header for that URL.
+    // Slot b sends PLAYER_TOKEN_B only in 'different' mode (matching the gate above); otherwise the
+    // same PLAYER_TOKEN as slot a.
+    const dualPlayer = /^\/player-dual-([ab])\.html$/.exec(path);
+    if (dualPlayer) {
+      const slot = dualPlayer[1];
+      const tok =
+        slot === 'b' && dualToken === 'different'
+          ? PLAYER_TOKEN_B
+          : PLAYER_TOKEN;
+      send(
+        200,
+        `<!doctype html><title>player dual ${slot}</title><p>player ${slot}<script>
+          window.__played = fetch('/hls-dual/${slot}/media.m3u8', {
+            headers: { 'X-Playback-Session-Id': '${tok}' },
+          }).then((r) => r.ok);
+        </script>`,
+        'text/html',
+      );
+      return;
+    }
     // W4.3 — khung con của /og.html. Tiêu đề và og:title ở đây đều SAI CỐ Ý: nếu extension đọc
     // tiêu đề mà không ghim `frameIds: [0]` thì nó sẽ vớ phải mấy chuỗi này.
     if (path === '/og-frame.html') {
@@ -719,6 +787,11 @@ export async function startFixtureServer({
     pageUrl: `http://127.0.0.1:${port}/page.html`,
     /** W2.1 — trang có player gửi header token riêng. */
     playerPageUrl: `http://127.0.0.1:${port}/player.html`,
+    /** W2.1 debt (a) — per-slot player pages + media URLs for the two same-host download scenario. */
+    dualPlayerAUrl: `http://127.0.0.1:${port}/player-dual-a.html`,
+    dualPlayerBUrl: `http://127.0.0.1:${port}/player-dual-b.html`,
+    dualMediaAUrl: `http://127.0.0.1:${port}/hls-dual/a/media.m3u8`,
+    dualMediaBUrl: `http://127.0.0.1:${port}/hls-dual/b/media.m3u8`,
     /** W7.1 — trang gọi requestMediaKeySystemAccess (giả lập site DRM). */
     drmPageUrl: `http://127.0.0.1:${port}/drm.html`,
     /** W4.3 — og:title đúng + <title> bẩn + iframe có tiêu đề sai. */

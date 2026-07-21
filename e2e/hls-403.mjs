@@ -1273,6 +1273,153 @@ async function runRealHeaderReplay() {
   }
 }
 
+/**
+ * W2.1 debt (a) — two HLS downloads on the SAME host, each behind its own player token.
+ *
+ * This is the measurement debt (a) was missing. Conflict-based DNR suppression must behave so:
+ *   - 'same' token (the common case: one site, one session token shared by every asset): NOT
+ *     suppress -> both downloads finish. An existence-only check would wrongly 403 the second.
+ *   - 'different' token: the first (already-running) job keeps its token and finishes; the second
+ *     is suppressed and FAILS LOUDLY (its segments 403) instead of silently receiving the wrong
+ *     token and shipping a mislabeled file.
+ *
+ * Mechanism: each player tab fetches only its slot's media playlist carrying its token, so the
+ * extension captures the real header per URL. We start download A and wait for its start ack (its
+ * DNR rule is now live), then start B so B's applySpoof observes A's rule and makes the decision.
+ */
+async function runDualHostToken(mode) {
+  const srv = await startFixtureServer({ dualToken: mode });
+  try {
+    return await withBrowser(async ({ page }) => {
+      // Bước 1: hai tab player, mỗi tab fetch manifest của slot mình KÈM token của slot đó.
+      const tabA = await page.context().newPage();
+      await tabA.goto(srv.dualPlayerAUrl);
+      const tabB = await page.context().newPage();
+      await tabB.goto(srv.dualPlayerBUrl);
+      const okA = await tabA.evaluate(() => window.__played);
+      const okB = await tabB.evaluate(() => window.__played);
+      if (!okA || !okB) {
+        return {
+          ok: false,
+          detail: `harness hỏng: player không fetch được manifest (a=${okA}, b=${okB})`,
+        };
+      }
+
+      // Bước 2: chờ extension ghi bản chụp header (kèm token) cho CẢ HAI media URL + học tabId.
+      const found = await page.evaluate(
+        async ([urlA, urlB]) => {
+          const findFor = (all, url) => {
+            for (const [k, v] of Object.entries(all)) {
+              if (!k.startsWith('media:')) continue;
+              const hit = (v?.items ?? []).find((m) => m.url === url);
+              if (hit?.sentHeaders?.['x-playback-session-id']) {
+                return { headers: hit.sentHeaders, tabId: Number(k.slice(6)) };
+              }
+            }
+            return null;
+          };
+          for (let i = 0; i < 40; i++) {
+            const all = await chrome.storage.session.get(null);
+            const a = findFor(all, urlA);
+            const b = findFor(all, urlB);
+            if (a && b) return { a, b };
+            await new Promise((r) => setTimeout(r, 250));
+          }
+          return null;
+        },
+        [srv.dualMediaAUrl, srv.dualMediaBUrl],
+      );
+      if (!found) {
+        return {
+          ok: false,
+          detail: 'KHÔNG bắt được header token của cả hai player',
+        };
+      }
+
+      // Bước 3: tải A trước, chờ start ack (rule DNR của A đã sống), RỒI tải B để applySpoof của B
+      // quan sát được rule của A và ra quyết định suppress.
+      const startDl = (mediaUrl, tabId) =>
+        page.evaluate(
+          ([m, t]) =>
+            chrome.runtime.sendMessage({
+              kind: 'hls/download',
+              variantUrl: m,
+              mediaUrl: m,
+              tabId: t,
+            }),
+          [mediaUrl, tabId],
+        );
+      const startA = await startDl(srv.dualMediaAUrl, found.a.tabId);
+      if (!startA?.ok) {
+        return { ok: false, detail: `job A bị từ chối: ${JSON.stringify(startA)}` };
+      }
+      const startB = await startDl(srv.dualMediaBUrl, found.b.tabId);
+      if (!startB?.ok) {
+        return { ok: false, detail: `job B bị từ chối: ${JSON.stringify(startB)}` };
+      }
+
+      const jobA = await waitJob(page, startA.jobId, JOB_TIMEOUT_MS);
+      const jobB = await waitJob(page, startB.jobId, JOB_TIMEOUT_MS);
+      if (!jobA || !jobB) {
+        return {
+          ok: false,
+          detail: `job TREO (a=${jobA?.phase}, b=${jobB?.phase})`,
+        };
+      }
+
+      // Bằng chứng từ server: slot nào được phục vụ 200, slot nào bị 403.
+      const seg = (slot, status) =>
+        srv.requests.filter(
+          (r) => r.url.startsWith(`/hls-dual/${slot}/seg`) && r.status === status,
+        ).length;
+
+      if (mode === 'same') {
+        // Cả hai PHẢI 'done'; bộ suppress theo-tồn-tại sẽ 403 B ở đây.
+        if (jobA.phase !== 'done' || jobB.phase !== 'done') {
+          return {
+            ok: false,
+            detail:
+              `same-token: cả hai phải 'done' nhưng a=${jobA.phase}/${jobA.error ?? ''} ` +
+              `b=${jobB.phase}/${jobB.error ?? ''} (seg200 a=${seg('a', 200)} b=${seg('b', 200)}, seg403 b=${seg('b', 403)})`,
+          };
+        }
+        return {
+          ok: true,
+          detail: `same-token: cả hai tải xong (seg200 a=${seg('a', 200)}, b=${seg('b', 200)})`,
+        };
+      }
+
+      // mode === 'different': job đầu giữ token & xong; job sau thất bại RÕ.
+      if (jobA.phase !== 'done') {
+        return {
+          ok: false,
+          detail:
+            `different-token: job ĐẦU (A) phải giữ token và 'done' nhưng a=${jobA.phase}/${jobA.error ?? ''} ` +
+            `— token bị job sau giật (seg403 a=${seg('a', 403)})`,
+        };
+      }
+      if (jobB.phase === 'done') {
+        return {
+          ok: false,
+          detail: `different-token: job SAU (B) phải THẤT BẠI RÕ, không được lặng lẽ 'done' (seg200 b=${seg('b', 200)})`,
+        };
+      }
+      if (seg('b', 200) > 0) {
+        return {
+          ok: false,
+          detail: `different-token: B KHÔNG được nhận segment 200 nào (đã nhận ${seg('b', 200)} — nội dung sai lọt xuống)`,
+        };
+      }
+      return {
+        ok: true,
+        detail: `different-token: A giữ token & 'done' (seg200 a=${seg('a', 200)}), B thất bại rõ (${jobB.phase}, seg403 b=${seg('b', 403)})`,
+      };
+    });
+  } finally {
+    await srv.close();
+  }
+}
+
 // --- Danh sách ca ------------------------------------------------------------------------------
 
 /**
@@ -1682,6 +1829,27 @@ const SCENARIOS = [
     expect: 'pass',
     pins: '§2.11/W2.1 (ta bịa Referer/Origin, chưa từng quan sát một request header nào)',
     run: () => runRealHeaderReplay(),
+  },
+  {
+    id: 'dual-host-same-token',
+    title:
+      'Hai tải cùng host, CÙNG token phiên -> KHÔNG suppress oan, cả hai tải xong',
+    // 🔴 Ca phổ biến nhất và là ca mà bộ suppress theo-tồn-tại làm hỏng: một site một token, mọi
+    // asset dùng chung. Suppress theo tồn tại sẽ hạ token job sau -> segment 403. Conflict-based
+    // phải cho cả hai qua.
+    expect: 'pass',
+    pins: 'W2.1 nợ (a) — same-token bị suppress oan (bug của existence-check)',
+    run: () => runDualHostToken('same'),
+  },
+  {
+    id: 'dual-host-different-token',
+    title:
+      'Hai tải cùng host, token KHÁC nhau -> job đầu giữ token & xong, job sau thất bại RÕ (không nội dung sai)',
+    // Job đầu (đang chạy) phải giữ nguyên token của nó; job sau bị hạ cấp và 403 LỘ RÕ thay vì âm
+    // thầm nhận token sai rồi giao file nhầm. Đây là ranh giới an toàn của nợ (a).
+    expect: 'pass',
+    pins: 'W2.1 nợ (a) — job sau giật token job đầu (bug khi KHÔNG suppress)',
+    run: () => runDualHostToken('different'),
   },
   {
     id: 'title-og',

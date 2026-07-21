@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   buildHeaderSpoofRule,
   buildRefererSpoofRule,
+  hasConflictingSensitiveRule,
   hostFromUrl,
   originFromUrl,
   SPOOF_RULE_ID_MIN,
   staleSpoofRuleIds,
+  type DnrRule,
 } from './dnr';
 
 describe('hostFromUrl / originFromUrl', () => {
@@ -140,5 +142,130 @@ describe('buildHeaderSpoofRule — phát lại header THẬT của player', () =
       buildHeaderSpoofRule(SPOOF_RULE_ID_MIN, 'cdn.example', {}).action
         .requestHeaders,
     ).toEqual([]);
+  });
+});
+
+describe('W2.1 debt (a) — hasConflictingSensitiveRule: value conflict, not mere existence', () => {
+  // A newer job only drops its own sensitive headers when an existing rule on the same host sets a
+  // sensitive header to a value that CONFLICTS with the one this job is about to set. Same token =>
+  // no conflict => both downloads keep working. This is the fix for the existence-check regression
+  // that used to 403 the common same-token case.
+  const ruleWithToken = (token: string) =>
+    buildHeaderSpoofRule(SPOOF_RULE_ID_MIN, 'cdn.example', {
+      referer: 'https://site.example/',
+      authorization: token,
+    });
+
+  it('same token, same host -> FALSE (no suppression, both jobs download)', () => {
+    // 🔴 The most common case: two downloads from one site share ONE session token. An
+    // existence-only check would wrongly suppress the second job and 403 it.
+    expect(
+      hasConflictingSensitiveRule(
+        [ruleWithToken('Bearer TOKEN_A')],
+        'cdn.example',
+        { referer: 'https://site.example/', authorization: 'Bearer TOKEN_A' },
+      ),
+    ).toBe(false);
+  });
+
+  it('different token, same host -> TRUE (second job must strip its sensitive headers)', () => {
+    expect(
+      hasConflictingSensitiveRule(
+        [ruleWithToken('Bearer TOKEN_A')],
+        'cdn.example',
+        { referer: 'https://site.example/', authorization: 'Bearer TOKEN_B' },
+      ),
+    ).toBe(true);
+  });
+
+  it('existing sensitive header this job does NOT set -> TRUE (it would leak onto our requests)', () => {
+    expect(
+      hasConflictingSensitiveRule(
+        [ruleWithToken('Bearer TOKEN_A')],
+        'cdn.example',
+        { referer: 'https://site.example/' },
+      ),
+    ).toBe(true);
+  });
+
+  it('matching x-* token -> FALSE (custom tokens compared by value too)', () => {
+    const r = buildHeaderSpoofRule(SPOOF_RULE_ID_MIN, 'cdn.example', {
+      'x-playback-session-id': 'sess-9',
+    });
+    expect(
+      hasConflictingSensitiveRule([r], 'cdn.example', {
+        'x-playback-session-id': 'sess-9',
+      }),
+    ).toBe(false);
+  });
+
+  it('conflicting x-* token -> TRUE', () => {
+    const r = buildHeaderSpoofRule(SPOOF_RULE_ID_MIN, 'cdn.example', {
+      'x-playback-session-id': 'sess-9',
+    });
+    expect(
+      hasConflictingSensitiveRule([r], 'cdn.example', {
+        'x-playback-session-id': 'sess-DIFFERENT',
+      }),
+    ).toBe(true);
+  });
+
+  it('existing rule sets only referer/origin -> FALSE even if our referer differs', () => {
+    // referer/origin are cross-host-safe identity headers, never "sensitive": a referer-only rule
+    // must never suppress, or the ordinary one-job-per-host replay path dies.
+    const refererOnlyRule = buildHeaderSpoofRule(
+      SPOOF_RULE_ID_MIN,
+      'cdn.example',
+      {
+        referer: 'https://site.example/a',
+        origin: 'https://site.example',
+      },
+    );
+    expect(
+      hasConflictingSensitiveRule([refererOnlyRule], 'cdn.example', {
+        referer: 'https://site.example/b',
+        authorization: 'Bearer TOKEN_B',
+      }),
+    ).toBe(false);
+  });
+
+  it('conflicting sensitive rule but on a DIFFERENT host -> FALSE (no cross-host bleed)', () => {
+    expect(
+      hasConflictingSensitiveRule(
+        [ruleWithToken('Bearer TOKEN_A')],
+        'other.example',
+        { authorization: 'Bearer TOKEN_B' },
+      ),
+    ).toBe(false);
+  });
+
+  it('no rules -> FALSE', () => {
+    expect(
+      hasConflictingSensitiveRule([], 'cdn.example', {
+        authorization: 'x',
+      }),
+    ).toBe(false);
+  });
+
+  it('a remove operation is not a value conflict -> FALSE', () => {
+    // Only `set` operations carry a value that could clobber another job; a `remove` sets nothing.
+    const removeRule: DnrRule = {
+      id: SPOOF_RULE_ID_MIN,
+      priority: 1,
+      action: {
+        type: 'modifyHeaders',
+        requestHeaders: [{ header: 'authorization', operation: 'remove' }],
+      },
+      condition: {
+        requestDomains: ['cdn.example'],
+        resourceTypes: ['xmlhttprequest', 'other'],
+        tabIds: [-1],
+      },
+    };
+    expect(
+      hasConflictingSensitiveRule([removeRule], 'cdn.example', {
+        authorization: 'Bearer X',
+      }),
+    ).toBe(false);
   });
 });

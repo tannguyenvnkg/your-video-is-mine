@@ -29,6 +29,7 @@ import {
   filterCapturable,
   planHeaderReplay,
   shouldCaptureRequest,
+  stripSensitive,
 } from './headers';
 
 describe('capturedFromHeaderList — chuẩn hoá danh sách header của webRequest', () => {
@@ -339,5 +340,37 @@ describe('🔴 REVIEW: filterCapturable — không LƯU thứ không bao giờ p
     expect(
       filterCapturable({ accept: '*/*', 'accept-encoding': 'gzip' }),
     ).toEqual({});
+  });
+});
+
+describe('W2.1 nợ (a) — stripSensitive: hạ plan xuống chỉ referer/origin', () => {
+  it('bỏ Authorization + token x-*, GIỮ referer/origin', () => {
+    const plan = planHeaderReplay(
+      {
+        referer: 'https://site.example/',
+        origin: 'https://site.example',
+        authorization: 'Bearer TOKEN_A',
+        'x-playback-session-id': 'sess-9',
+      },
+      { sameHost: true },
+    );
+    expect(plan.hasSensitive).toBe(true); // tiền đề: plan gốc có nhạy cảm
+    const stripped = stripSensitive(plan);
+    expect(stripped.headers).toEqual({
+      referer: 'https://site.example/',
+      origin: 'https://site.example',
+    });
+    expect(stripped.hasSensitive).toBe(false);
+    expect(stripped.isEmpty).toBe(false);
+  });
+
+  it('plan chỉ toàn header nhạy cảm -> sau khi hạ thành RỖNG (caller lùi về Referer bịa)', () => {
+    const plan = planHeaderReplay(
+      { authorization: 'Bearer TOKEN_A' },
+      { sameHost: true },
+    );
+    const stripped = stripSensitive(plan);
+    expect(stripped.headers).toEqual({});
+    expect(stripped.isEmpty).toBe(true);
   });
 });

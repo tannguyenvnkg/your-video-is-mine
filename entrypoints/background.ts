@@ -49,6 +49,7 @@ import {
 import { parseDashManifest, parseTrackSegments } from '@/utils/dash';
 import {
   buildRefererSpoofRule,
+  hasConflictingSensitiveRule,
   hostFromUrl,
   originFromUrl,
   staleSpoofRuleIds,
@@ -60,6 +61,7 @@ import {
   filterCapturable,
   planHeaderReplay,
   shouldCaptureRequest,
+  stripSensitive,
 } from '@/utils/headers';
 import type { MediaItem } from '@/utils/types';
 import type {
@@ -146,7 +148,31 @@ export default defineBackground(() => {
       // lần, không xí thì fetch đôi.
       if (!(await serialize(() => claimMasterParse(tabId, url)))) return;
 
-      const res = await fetch(url, { credentials: 'include' });
+      // W2.1 debt (b) — replay the player's REAL Referer/Origin for this master, but NOT its token.
+      // Previously this fetch was bare (fabricated Referer from pageUrl, plus a fabricated Origin),
+      // so on a hotlink site the master 403'd and W4.2 (hiding child renditions) was dead code
+      // exactly where it was needed. Passing `captured` uses the real request's Referer/Origin,
+      // which correctly OMIT Origin when the page never sent one — dodging the §2.11 trap where a
+      // fabricated Origin makes the anti-403 rule self-cause a 403.
+      //
+      // 🔴 forceStripSensitive: drop the token from THIS background fetch. MEASURED (e2e
+      // dual-host-different-token): if learnMasterChildren replays a token, its transient sensitive
+      // rule can still be alive when a DIFFERENT asset's real download starts on the same host —
+      // that download sees a value-conflict and suppresses its OWN (correct) token, then 403s. A
+      // best-effort child-hiding fetch must never be able to kill a real download. Referer/Origin
+      // is enough for the common hotlink gate; a master that truly needs a token just won't be
+      // learned (best-effort). No capture -> fall back to a fabricated Referer/Origin from pageUrl;
+      // that fallback still sets an Origin the page may not have sent (a §2.11 residue), but it only
+      // affects best-effort child-hiding here, never a real download.
+      const pageUrl = await pageUrlFor(tabId, url);
+      const captured = await capturedFor(tabId, url);
+      const res = await withSpoofedFetch(
+        url,
+        pageUrl,
+        () => fetch(url, { credentials: 'include' }),
+        captured,
+        /* forceStripSensitive */ true,
+      );
       if (!res.ok) return;
       const children = childUrlsOfMaster(
         parseHlsManifest(await res.text(), url),
@@ -733,9 +759,10 @@ async function withSpoofedFetch<T>(
   pageUrl: string | undefined,
   fn: () => Promise<T>,
   captured?: CapturedContext,
+  forceStripSensitive = false,
 ): Promise<T> {
   const ruleId = await allocateSpoofRuleId();
-  await applySpoof(ruleId, targetUrl, pageUrl, captured);
+  await applySpoof(ruleId, targetUrl, pageUrl, captured, forceStripSensitive);
   try {
     return await fn();
   } finally {
@@ -1550,11 +1577,18 @@ function buildSpoofRule(
   targetUrl: string,
   pageUrl: string | undefined,
   captured: CapturedContext | undefined,
+  /**
+   * W2.1 nợ (a) — host này đã có rule nhạy cảm của job KHÁC đang sống. Chồng thêm rule nhạy cảm
+   * thứ hai làm job trước nhận nhầm token (đã ĐO: DNR cho id cao thắng, áp cho cả request job kia).
+   * True -> hạ plan xuống chỉ Referer/Origin để job đầu giữ đúng token của nó.
+   */
+  suppressSensitive = false,
 ): DnrRule | null {
   if (captured) {
-    const plan = planHeaderReplay(captured.headers, {
+    let plan = planHeaderReplay(captured.headers, {
       sameHost: host === captured.host,
     });
+    if (suppressSensitive && plan.hasSensitive) plan = stripSensitive(plan);
     // isEmpty = bản chụp chỉ toàn header bị vứt -> coi như chưa bắt được gì -> đi tiếp xuống lùi.
     if (!plan.isEmpty) {
       // Rule mang header nhạy cảm (Authorization, token x-*) phải NEO theo origin: requestDomains
@@ -1583,10 +1617,52 @@ async function applySpoof(
   targetUrl: string,
   pageUrl?: string,
   captured?: CapturedContext,
+  /**
+   * W2.1 nợ (a) — buộc hạ cấp (chỉ giữ Referer/Origin THẬT, bỏ token) BẤT KỂ có xung đột hay không.
+   * Dùng cho fetch NỀN best-effort (learnMasterChildren): một rule nhạy cảm nền còn sống có thể làm
+   * cú tải THẬT của asset KHÁC (khác token, cùng host) tự hạ token của mình rồi 403 (đã ĐO ở e2e
+   * dual-host-different-token). Vẫn dùng Referer/Origin thật của captured -> không bịa Origin (§2.11).
+   */
+  forceStripSensitive = false,
 ): Promise<void> {
   const host = hostFromUrl(targetUrl);
   if (!host) return;
-  const rule = buildSpoofRule(ruleId, host, targetUrl, pageUrl, captured);
+  // W2.1 nợ (a) — chỉ hạ cấp khi host này đã có rule nhạy cảm của job KHÁC đặt một header nhạy cảm
+  // với giá trị XUNG ĐỘT (khác token) so với header job này sắp đặt. (Đã ĐO: khi hai rule cùng khớp,
+  // DNR cho id cao thắng và áp cho MỌI request tới origin -> job trước nhận nhầm token job sau.)
+  // 🔴 Xung đột GIÁ TRỊ, không phải tồn tại: hai tải cùng site thường chung một token phiên -> nếu
+  // suppress theo tồn tại thì ca cùng-token (phổ biến hơn ca khác-token) bị 403 oan. Cùng token ->
+  // không xung đột -> KHÔNG suppress -> cả hai vẫn tải được. Chỉ tính khi job này THẬT SỰ sắp đặt
+  // header nhạy cảm (plan.hasSensitive); đường lùi Referer/Origin không mang header nhạy cảm nên
+  // không cần kiểm. Best-effort: hai job khởi động sát nhau vẫn có khe đua nhỏ (cả hai đọc rule
+  // trước khi ai kịp ghi) — hẹp, chấp nhận được cho một nợ vốn đã hiếm.
+  let suppressSensitive = forceStripSensitive;
+  if (!suppressSensitive && captured) {
+    const plan = planHeaderReplay(captured.headers, {
+      sameHost: host === captured.host,
+    });
+    if (plan.hasSensitive) {
+      try {
+        const existing =
+          (await browser.declarativeNetRequest.getSessionRules()) as unknown as DnrRule[];
+        suppressSensitive = hasConflictingSensitiveRule(
+          existing,
+          host,
+          plan.headers,
+        );
+      } catch {
+        // getSessionRules lỗi -> giữ hành vi cũ (không suppress); không chặn đường tải.
+      }
+    }
+  }
+  const rule = buildSpoofRule(
+    ruleId,
+    host,
+    targetUrl,
+    pageUrl,
+    captured,
+    suppressSensitive,
+  );
   if (!rule) return;
   try {
     // Cast: DnrRule (string literals) tương thích cấu trúc với kiểu Rule của API.

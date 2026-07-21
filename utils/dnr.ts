@@ -122,6 +122,63 @@ export function buildHeaderSpoofRule(
   };
 }
 
+/** Header names that are safe to replay cross-host and never count as "sensitive". */
+const CROSS_HOST_SAFE_HEADERS = new Set(['referer', 'origin']);
+
+/**
+ * W2.1 debt (a) — does an already-live DNR rule for `host` set a sensitive header to a value that
+ * CONFLICTS with the ones we are about to set?
+ *
+ * Measured on Edge (two hand-built rules on one origin): when two `modifyHeaders` rules match the
+ * same request, the HIGHER rule id wins and applies to EVERY request to that origin — including a
+ * different job's. So two same-host downloads carrying DIFFERENT `Authorization` values make the
+ * older job silently receive the newer job's token (measured: TOKEN_A + TOKEN_B -> server got
+ * TOKEN_B). Guard: a newer job that finds a CONFLICTING sensitive rule drops its own sensitive
+ * headers (falls back to Referer/Origin), so the older job keeps the token it needs.
+ *
+ * 🔴 CONFLICT, not mere existence: two downloads from the same site usually share ONE session
+ * token, so an existence-only check would wrongly suppress the very common same-token case and 403
+ * the second download. We only suppress when an existing rule sets a sensitive header to a value we
+ * do NOT set to the same thing (different value, or a sensitive header we don't set at all — it
+ * would leak onto our requests). "Sensitive" = a `set` header that is not `referer`/`origin`.
+ *
+ * Pure function for unit testing; the caller (`applySpoof`) passes `getSessionRules()` in.
+ *
+ * ⚠️ KNOWN LIMITATIONS (adversarial review 2026-07-21) — all rooted in ONE DNR fact: rules are
+ * per-ORIGIN and the higher id wins a header for EVERY request to that origin. Two same-host
+ * different-token downloads therefore CANNOT both succeed via header replay — one must lose. This
+ * policy makes the NEWER job lose (drop its token, 403 loudly). Consequences we accept for now:
+ *   1. STALE rule (review A/F): a crashed/stuck job leaves its sensitive rule live for ~60-90s
+ *      until reaped. A fresh same-host retry with a DIFFERENT (refreshed) token sees that stale
+ *      rule as a conflict and suppresses its own good token -> 403. The check can't tell a live
+ *      job from dead residue. Rare (needs crash/expiry + same host + different token + retry inside
+ *      the window); a full fix needs job-liveness awareness, out of this package's scope.
+ *   2. HOST-only match (review B): we match `requestDomains` (host) and ignore the existing rule's
+ *      `urlFilter` origin anchor, so two same-host rules on different scheme/port (origins that can
+ *      never both match one request) still count as a conflict. Rare; over-suppresses.
+ *   3. ONE-DIRECTIONAL (review D): we only flag a sensitive header the EXISTING rule sets to a
+ *      different value. A sensitive header WE set that the existing rule LACKS is not flagged, so
+ *      via higher-id-wins it still lands on the older job's requests. Not new (pre-suppression had
+ *      the same leak); suppression is a partial mitigation, not a complete one.
+ */
+export function hasConflictingSensitiveRule(
+  rules: readonly DnrRule[],
+  host: string,
+  ownHeaders: Readonly<Record<string, string>>,
+): boolean {
+  return rules.some(
+    (r) =>
+      r.action?.type === 'modifyHeaders' &&
+      r.condition?.requestDomains?.includes(host) &&
+      (r.action.requestHeaders ?? []).some((h) => {
+        if (h.operation !== 'set') return false;
+        const name = h.header.toLowerCase();
+        if (CROSS_HOST_SAFE_HEADERS.has(name)) return false;
+        return ownHeaders[name] !== h.value;
+      }),
+  );
+}
+
 /**
  * Đối soát rule rò rỉ (W2.4 sweep): trong `sessionRuleIds` hiện có, những id nào thuộc dải spoof
  * (>= MIN) mà KHÔNG còn nằm trong tập `aliveRuleIds` (id của job/download còn sống) thì là RÁC -> xoá.

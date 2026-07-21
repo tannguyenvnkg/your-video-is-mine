@@ -185,6 +185,26 @@ export function planHeaderReplay(
 }
 
 /**
+ * W2.1 nợ (a) — hạ một plan xuống chỉ còn header CROSS-HOST-SAFE (referer/origin), bỏ mọi header
+ * nhạy cảm. Dùng khi host này đã có một rule nhạy cảm của job khác đang sống: chồng thêm rule
+ * nhạy cảm thứ hai làm job trước nhận nhầm token (xem `hasConflictingSensitiveRule`). Hạ cấp thế này
+ * an toàn hơn: job sau mất token (segment có thể 403 — lỗi HIỆN RÕ) còn hơn job trước âm thầm
+ * nhận sai token và tải nhầm nội dung.
+ */
+export function stripSensitive(plan: HeaderReplayPlan): HeaderReplayPlan {
+  const headers: CapturedHeaders = {};
+  for (const [name, value] of Object.entries(plan.headers)) {
+    if (CROSS_HOST_SAFE.has(name)) headers[name] = value;
+  }
+  return {
+    headers,
+    dropped: plan.dropped,
+    hasSensitive: false,
+    isEmpty: Object.keys(headers).length === 0,
+  };
+}
+
+/**
  * Lọc bản chụp NGAY LÚC BẮT: chỉ giữ header có khả năng được phát lại.
  *
  * 🔴 Vá sau review (riêng tư): listener chạy trên `<all_urls>`, nên lưu nguyên bản chụp đồng nghĩa
