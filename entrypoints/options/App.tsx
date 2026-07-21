@@ -16,6 +16,7 @@ import {
 import {
   buildDownloadFilename,
   DEFAULT_FILENAME_TEMPLATE,
+  isUsableTemplate,
 } from '@/utils/filename';
 import { requestEngineSelfTest } from '@/utils/messages';
 import type { MediaType } from '@/utils/types';
@@ -69,9 +70,7 @@ function App() {
 
   const testEngine = async () => {
     setFfBusy(true);
-    setFfStatus(
-      'Đang ghép thử một đoạn video mẫu…',
-    );
+    setFfStatus('Đang ghép thử một đoạn video mẫu…');
     const res = await requestEngineSelfTest();
     setFfBusy(false);
     setFfStatus(
@@ -143,7 +142,10 @@ function App() {
           mẫu sẽ bị bỏ qua.
         </p>
         {/* Xem trước là bước xác nhận DUY NHẤT: tải về không hiện hộp thoại nào (saveAs: false),
-            nên mẫu sai sẽ âm thầm nằm trên đĩa mà user không hề biết. */}
+            nên mẫu sai sẽ âm thầm nằm trên đĩa mà user không hề biết.
+            🔴 W4.3 nợ — preview PHẢI đi qua đúng cổng `isUsableTemplate` như `getFilenameTemplate`
+            lúc tải: mẫu bị từ chối (vd '{date}') thì tải THẬT lùi về mặc định, nên preview cũng phải
+            hiện mẫu MẶC ĐỊNH. Bản cũ render mẫu thô -> preview NÓI DỐI cái mà đĩa không bao giờ thấy. */}
         <p style={{ fontSize: 13, marginTop: 6 }}>
           Xem trước:{' '}
           <code>
@@ -152,10 +154,17 @@ function App() {
               title: 'Tên video mẫu',
               height: 720,
               pageUrl: 'https://example.com/watch',
-              template,
+              template: isUsableTemplate(template)
+                ? template
+                : DEFAULT_FILENAME_TEMPLATE,
               folder,
             })}
           </code>
+          {!isUsableTemplate(template) && (
+            <span style={{ color: '#c00', marginLeft: 8 }}>
+              (mẫu thiếu {'{title}'}/{'{basename}'} — sẽ dùng mẫu mặc định)
+            </span>
+          )}
         </p>
       </section>
 
@@ -226,7 +235,8 @@ function App() {
       >
         <h2 style={{ fontSize: 16, margin: '0 0 6px' }}>Chẩn đoán</h2>
         <p style={{ fontSize: 13, opacity: 0.7, margin: '0 0 8px' }}>
-          Ghép thử một đoạn video mẫu để kiểm bộ ghép (libav.wasm trong offscreen) có chạy được không.
+          Ghép thử một đoạn video mẫu để kiểm bộ ghép (libav.wasm trong
+          offscreen) có chạy được không.
         </p>
         <button
           type="button"

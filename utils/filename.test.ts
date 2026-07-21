@@ -194,15 +194,50 @@ describe('buildDownloadFilename + mẫu tên', () => {
   });
 
   it('mẫu có {site} và {date}', () => {
+    // 🔴 W4.3 nợ — {date} lấy theo giờ MÁY (new Date(now) getters local), nên kỳ vọng PHẢI dựng từ
+    // chính new Date(now), KHÔNG hardcode chuỗi. Bản cũ hardcode '2026-07-19' + Date.UTC làm máy ở
+    // UTC+13/+14 ĐỎ OAN (12:00Z ngày 19 rơi sang ngày 20 giờ địa phương). Đây là test đo múi giờ
+    // của máy chạy test, không phải đo hành vi -> phải tự-nhất-quán với môi trường.
+    const now = Date.UTC(2026, 6, 19, 12, 0, 0);
+    const d = new Date(now);
+    const p2 = (n: number) => String(n).padStart(2, '0');
+    const expectDate = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
     expect(
       buildDownloadFilename({
         url: 'https://a.com/x.mp4',
         title: 'A',
         template: '{site}_{title}_{date}',
         pageUrl: 'https://www.site.com/w',
-        now: Date.UTC(2026, 6, 19, 12, 0, 0),
+        now,
       }),
-    ).toBe('site.com_A_2026-07-19.mp4');
+    ).toBe(`site.com_A_${expectDate}.mp4`);
+  });
+
+  // 🔴 W4.3 nợ — {time} và hàm two() (pad 2 chữ số) là token ĐÃ SHIP mà chưa có một assertion nào.
+  // Dùng new Date(local components) rồi đọc lại local components -> ĐỘC LẬP MÚI GIỜ (không như
+  // Date.UTC). Chọn giờ/phút/giây MỘT CHỮ SỐ để ghim đúng two(): thiếu pad thì '305' thay vì '030509'.
+  it('{time} = HHMMSS theo giờ máy, có pad 2 chữ số (ghim two())', () => {
+    const now = new Date(2026, 0, 2, 3, 5, 9).getTime(); // 03:05:09 giờ địa phương
+    expect(
+      buildDownloadFilename({
+        url: 'https://a.com/x.mp4',
+        title: 'A',
+        template: '{title}_{time}',
+        now,
+      }),
+    ).toBe('A_030509.mp4');
+  });
+
+  it('{time} pad cả ca hai chữ số (không cắt cụt số lớn)', () => {
+    const now = new Date(2026, 0, 2, 23, 47, 58).getTime();
+    expect(
+      buildDownloadFilename({
+        url: 'https://a.com/x.mp4',
+        title: 'A',
+        template: '{title}_{time}',
+        now,
+      }),
+    ).toBe('A_234758.mp4');
   });
 
   it('{title} rỗng -> lùi về tên từ URL', () => {

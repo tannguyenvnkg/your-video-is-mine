@@ -166,4 +166,34 @@ describe('sameDocument', () => {
     expect(sameDocument('https://a.com/w', 'https://b.com/w')).toBe(false);
     expect(sameDocument('https://a.com/w', 'http://a.com/w')).toBe(false);
   });
+
+  // 🔴 W4.3 nợ — tham số RÁC (tracking + tua) tự thêm vào không được đóng cổng đặt tên.
+  it('bỏ qua tham số rác đã biết (utm_*, fbclid, t) -> vẫn CÙNG trang', () => {
+    expect(
+      sameDocument('https://a.com/w?v=1&utm_source=fb', 'https://a.com/w?v=1'),
+    ).toBe(true);
+    expect(
+      sameDocument(
+        'https://a.com/w?v=1&fbclid=xyz&t=90',
+        'https://a.com/w?v=1',
+      ),
+    ).toBe(true);
+  });
+
+  it('thứ tự tham số KHÔNG đổi kết quả (trang có thể sắp lại)', () => {
+    expect(
+      sameDocument('https://a.com/w?a=1&b=2', 'https://a.com/w?b=2&a=1'),
+    ).toBe(true);
+  });
+
+  // 🔴 CHỐNG NỚI OAN: tham số ĐỊNH DANH (?v=) khác nhau vẫn phải là HAI trang, nếu không cổng
+  // chống-đặt-nhầm-tên coi hai video là một -> đặt tên video A cho video B.
+  it('tham số LẠ (không thuộc danh sách rác) khác nhau -> KHÁC trang', () => {
+    expect(sameDocument('https://a.com/w?v=1', 'https://a.com/w?v=2')).toBe(
+      false,
+    );
+    expect(
+      sameDocument('https://a.com/w?id=abc', 'https://a.com/w?id=def'),
+    ).toBe(false);
+  });
 });

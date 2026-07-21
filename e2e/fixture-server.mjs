@@ -774,6 +774,19 @@ export async function startFixtureServer({
       );
       return;
     }
+    // W4.3 nợ — CHỈ có twitter:title, KHÔNG có og:title. og LUÔN thắng nên nhánh đọc twitter:title
+    // trong scripting.executeScript chưa bao giờ chạy trong e2e; trang này là chỗ DUY NHẤT ép nó
+    // chạy. <title> bẩn (bộ đếm + tên site) để chứng minh twitter thắng doc, không phải doc lọt.
+    if (path === '/twitter.html') {
+      send(
+        200,
+        '<!doctype html><title>(9) KHÔNG DÙNG TITLE - Fixture Site</title>' +
+          '<meta name="twitter:title" content="Tên Video Thật">' +
+          '<script>window.__m = fetch("/hls/master.m3u8").then(r => r.ok);</script>',
+        'text/html; charset=utf-8',
+      );
+      return;
+    }
     send(404, 'not found', 'text/plain');
   });
 
@@ -798,6 +811,8 @@ export async function startFixtureServer({
     ogPageUrl: `http://127.0.0.1:${port}/og.html`,
     /** W4.3 — chỉ có <title> bẩn, không thẻ meta. */
     docPageUrl: `http://127.0.0.1:${port}/doc.html`,
+    /** W4.3 nợ — CHỈ có twitter:title (og vắng) -> ép nhánh đọc twitter chạy. */
+    twitterPageUrl: `http://127.0.0.1:${port}/twitter.html`,
     masterUrl: `http://127.0.0.1:${port}/hls/master.m3u8`,
     mediaUrl: `http://127.0.0.1:${port}/hls/media.m3u8`,
     /** W1.4 — playlist y hệt mediaUrl nhưng có 2 chỗ nối (stream chèn quảng cáo). */

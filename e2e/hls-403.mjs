@@ -1620,7 +1620,12 @@ async function runTitleFromPage({ page: pagePath, want, template, spaNavigate })
   const srv = await startFixtureServer({ gate: 'none' });
   try {
     return await withBrowser(async ({ page }) => {
-      const pageUrl = pagePath === 'og' ? srv.ogPageUrl : srv.docPageUrl;
+      const pageUrl =
+        pagePath === 'og'
+          ? srv.ogPageUrl
+          : pagePath === 'twitter'
+            ? srv.twitterPageUrl
+            : srv.docPageUrl;
       // Ghim đường đấu dây của cài đặt: mẫu chỉ có tác dụng nếu CẢ HAI chỗ gọi
       // buildDownloadFilename cùng đọc getFilenameTemplate. Quên một chỗ là cài đặt câm.
       if (template) {
@@ -1879,6 +1884,17 @@ const SCENARIOS = [
         want: '127.0.0.1_Tên Video Thật',
         template: '{site}_{title}',
       }),
+  },
+  {
+    id: 'title-twitter',
+    title:
+      'Trang CHỈ có twitter:title (og vắng) -> tên file theo twitter (nhánh đọc twitter chưa từng chạy e2e)',
+    // 🔴 W4.3 nợ — og:title LUÔN thắng nên câu `read('meta[name="twitter:title"]')` trong
+    // scripting.executeScript chưa bao giờ chạy trong máy đo. Trang này là chỗ duy nhất ép nó chạy;
+    // <title> bẩn để chứng minh twitter thắng doc chứ không phải doc lọt.
+    expect: 'pass',
+    pins: 'W4.3 (nhánh đọc twitter:title từ DOM chưa có máy nào chạm)',
+    run: () => runTitleFromPage({ page: 'twitter', want: 'Tên Video Thật' }),
   },
   {
     id: 'title-spa-stale',

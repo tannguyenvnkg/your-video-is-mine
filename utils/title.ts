@@ -238,7 +238,41 @@ function routeHash(u: URL): string {
 }
 
 /**
- * Cùng một trang không? So origin + pathname + search + hash-route. Thiếu một vế -> false.
+ * W4.3 nợ — tham số query RÁC đã biết: tracking + tua thời gian. Trang tự `replaceState` thêm mấy
+ * cái này (share link, quảng cáo, tua giữa video) làm URL "đổi" mà TRANG thì vẫn thế.
+ *
+ * 🔴 CHỈ danh sách CỐ ĐỊNH này, TUYỆT ĐỐI không bỏ tham số lạ: `?v=abc` của YouTube LÀ danh tính
+ * video — bỏ nó thì hai video khác nhau trông y hệt một trang, cổng chống-đặt-nhầm-tên quay ra
+ * XÁC NHẬN cái sai. Thà giữ cổng chặt (thiếu tên) còn hơn nới cổng ra rồi đặt SAI tên.
+ */
+const JUNK_PARAMS = new Set([
+  't', // tua thời gian (?t=90)
+  'fbclid',
+  'gclid',
+  'igshid',
+  'mc_cid',
+  'mc_eid',
+  'ref',
+  'ref_src',
+  'ref_url',
+  'spm',
+]);
+
+/** search sau khi bỏ tham số rác, chuẩn hoá thứ tự -> so sánh ổn định. */
+function stableSearch(u: URL): string {
+  const kept: [string, string][] = [];
+  for (const [k, v] of u.searchParams) {
+    const key = k.toLowerCase();
+    if (JUNK_PARAMS.has(key) || key.startsWith('utm_')) continue;
+    kept.push([k, v]);
+  }
+  kept.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return kept.map(([k, v]) => `${k}=${v}`).join('&');
+}
+
+/**
+ * Cùng một trang không? So origin + pathname + search (đã bỏ tham số rác) + hash-route. Thiếu một
+ * vế -> false.
  */
 export function sameDocument(a?: string, b?: string): boolean {
   if (!a || !b) return false;
@@ -248,7 +282,7 @@ export function sameDocument(a?: string, b?: string): boolean {
     return (
       ua.origin === ub.origin &&
       ua.pathname === ub.pathname &&
-      ua.search === ub.search &&
+      stableSearch(ua) === stableSearch(ub) &&
       routeHash(ua) === routeHash(ub)
     );
   } catch {
