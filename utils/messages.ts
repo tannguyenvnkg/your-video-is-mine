@@ -50,6 +50,31 @@ export type HlsEstimateResponse =
 export type HlsDownloadResponse =
   { ok: true; jobId: string } | { ok: false; error: string };
 
+// Track 2 — background asks the youtube.com content script to RE-EXTRACT fresh direct URLs at
+// download time (sent via `browser.tabs.sendMessage`, NOT through the background router). Fresh
+// because googlevideo URLs expire / are IP-locked, so a stored URL would 403.
+export interface YoutubeReextractRequest {
+  kind: 'youtube/reextract';
+  videoId: string;
+  /** cap the video height to the user's chosen quality. */
+  maxHeight?: number;
+}
+
+export type YoutubeReextractResponse =
+  | {
+      ok: true;
+      videoUrl: string;
+      audioUrl: string;
+      title?: string;
+      /** Actually resolved video height -> the filename labels the DELIVERED quality, not the
+       *  requested one (the download-time client pool can differ from detection time). */
+      videoHeight?: number;
+      /** Content-Length of each track if InnerTube reported it (used for the progress total). */
+      videoBytes?: number;
+      audioBytes?: number;
+    }
+  | { ok: false; error: string };
+
 /** ACK for 'hls/progress' — offscreen awaits it to preserve update ordering. */
 export type HlsProgressResponse = { ok: true };
 
@@ -57,6 +82,24 @@ export type HlsProgressResponse = { ok: true };
 export type RuntimeMessage =
   | { kind: 'media/dom'; candidates: DomMediaCandidate[] }
   | { kind: 'media/mse'; url: string }
+  // Track 2 — the youtube.com content script impersonated an InnerTube app client and confirmed the
+  // video is downloadable. Carries only the videoId + display metadata + available heights: the
+  // direct googlevideo URLs EXPIRE and are IP-locked, so they are re-extracted at download time (the
+  // stored item never holds a stale URL). `heights` come from `avcHeights` (avc1 <= 1080).
+  | {
+      kind: 'media/youtube';
+      videoId: string;
+      title?: string;
+      heights: number[];
+    }
+  // Track 2 — popup asks background to download a YouTube video. `tabId` is where the content script
+  // lives (background re-extracts fresh URLs from it); `height` is the chosen quality (avc1 <= it).
+  | {
+      kind: 'youtube/download';
+      videoId: string;
+      tabId: number;
+      height?: number;
+    }
   // W7.1 — content script reports the page requesting DRM/EME. Empty `keySystem` = DRM is known to
   // be present but the vendor is unknown (signal comes from the 'encrypted' event, which doesn't
   // expose the system name).
@@ -198,6 +241,23 @@ export type OffscreenRequest =
     }
   | { target: 'offscreen'; kind: 'revoke'; url: string }
   | { target: 'offscreen'; kind: 'hls/cancel'; jobId: string }
+  // Track 2 — download the two direct googlevideo URLs (video + audio) range-chunked, mux them with
+  // the SAME libav worker the HLS/DASH path uses, produce one .mp4. Reuses the HlsJob progress record.
+  | {
+      target: 'offscreen';
+      kind: 'youtube/run';
+      jobId: string;
+      filename: string;
+      mediaUrl: string;
+      tabId: number;
+      videoUrl: string;
+      audioUrl: string;
+      /** Content-Length per track if known -> exact progress total (else discovered via a Range probe). */
+      videoBytes?: number;
+      audioBytes?: number;
+    }
+  // Track 2 — cancel a running YouTube job (abort the in-flight range fetch / stop the mux).
+  | { target: 'offscreen'; kind: 'youtube/cancel'; jobId: string }
   // W2.5 — progressive download via offscreen: fetch bytes (Range chunks for large files) while the
   // spoof rule is active, build a Blob, send download/blob back. `chrome.downloads.download` therefore
   // ONLY ever receives a blob: URL.
@@ -313,6 +373,25 @@ export async function requestHlsDownload(
       mediaType,
       variantId,
       audioId,
+    });
+    return res as HlsDownloadResponse;
+  } catch {
+    return { ok: false, error: 'Không kết nối được background.' };
+  }
+}
+
+/** Track 2 — ask background to download a YouTube video (it re-extracts fresh URLs from the tab). */
+export async function requestYoutubeDownload(
+  videoId: string,
+  tabId: number,
+  height?: number,
+): Promise<HlsDownloadResponse> {
+  try {
+    const res = await browser.runtime.sendMessage({
+      kind: 'youtube/download',
+      videoId,
+      tabId,
+      height,
     });
     return res as HlsDownloadResponse;
   } catch {

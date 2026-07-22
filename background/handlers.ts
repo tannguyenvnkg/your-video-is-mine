@@ -36,6 +36,8 @@ import type {
   HlsEstimateResponse,
   ManifestKind,
   VariantsResponse,
+  YoutubeReextractRequest,
+  YoutubeReextractResponse,
 } from '@/utils/messages';
 
 export async function handleVariants(
@@ -474,6 +476,115 @@ export async function handleHlsDownload(
     return {
       ok: false,
       error: e instanceof Error ? e.message : 'Không khởi tạo được tải HLS.',
+    };
+  }
+}
+
+/**
+ * Track 2 — download a YouTube video. Re-extracts FRESH direct URLs from the content script (the only
+ * context that returns them), then dispatches a 2-URL mux job to offscreen. NO spoof rule: googlevideo
+ * URLs carry their own auth params and download 206 with a plain cross-origin fetch (measured).
+ *
+ * Progress is tracked in an HlsJob record (reused verbatim) so the popup's existing job UI applies.
+ */
+export async function handleYoutubeDownload(
+  videoId: string,
+  tabId: number,
+  height?: number,
+): Promise<HlsDownloadResponse> {
+  const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  try {
+    // 🔴 RE-EXTRACT, never trust a stored URL: googlevideo links expire (a few hours) + are IP-locked.
+    let re: YoutubeReextractResponse;
+    try {
+      const req: YoutubeReextractRequest = {
+        kind: 'youtube/reextract',
+        videoId,
+        maxHeight: height,
+      };
+      // Timeout backstop: the content script's own fetch already times out, so it should always
+      // respond — but if the tab is unresponsive (never calls sendResponse), `tabs.sendMessage`
+      // would hang this request forever, before any HlsJob exists for the reaper to catch. Race it.
+      re = await Promise.race([
+        browser.tabs.sendMessage(
+          tabId,
+          req,
+        ) as Promise<YoutubeReextractResponse>,
+        new Promise<YoutubeReextractResponse>((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                ok: false,
+                error:
+                  'Trang YouTube không phản hồi (hãy tải lại trang rồi bấm lại).',
+              }),
+            30_000,
+          ),
+        ),
+      ]);
+    } catch {
+      return {
+        ok: false,
+        error:
+          'Không liên hệ được trang YouTube (hãy mở/tải lại trang video rồi bấm lại).',
+      };
+    }
+    if (!re || !re.ok) {
+      return {
+        ok: false,
+        error: re?.error ?? 'Không lấy được liên kết tải từ YouTube.',
+      };
+    }
+    const folder = await getDownloadFolder();
+    const filename = buildDownloadFilename({
+      url: canonicalUrl,
+      title: re.title,
+      // Label the file with the DELIVERED height (re.videoHeight), not the requested one — the
+      // download-time client pool can resolve a different quality than detection advertised.
+      height: re.videoHeight ?? height,
+      // Output is always remuxed to .mp4 (avc1 + AAC) regardless of the source container.
+      contentType: 'video/mp4',
+      folder,
+      template: await getFilenameTemplate(),
+      pageUrl: canonicalUrl,
+    });
+    const jobId = crypto.randomUUID();
+    await putHlsJob({
+      id: jobId,
+      mediaUrl: canonicalUrl,
+      variantUrl: re.videoUrl,
+      phase: 'queued',
+      segmentsTotal: 0,
+      segmentsDone: 0,
+      filename,
+      tabId,
+      lastSeenAt: Date.now(),
+    });
+    await ensureOffscreen();
+    void browser.runtime
+      .sendMessage({
+        target: 'offscreen',
+        kind: 'youtube/run',
+        jobId,
+        filename,
+        mediaUrl: canonicalUrl,
+        tabId,
+        videoUrl: re.videoUrl,
+        audioUrl: re.audioUrl,
+        videoBytes: re.videoBytes,
+        audioBytes: re.audioBytes,
+      })
+      .catch(async (e: unknown) => {
+        await updateHlsJob(jobId, {
+          phase: 'error',
+          error: `Không gửi được việc sang bộ xử lý video: ${describeError(e)}`,
+        });
+      });
+    return { ok: true, jobId };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : 'Không bắt đầu tải YouTube được.',
     };
   }
 }

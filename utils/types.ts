@@ -1,7 +1,7 @@
 // Media data types shared between background / content / popup / offscreen.
 // Used from Stage 1 (media detection) onward.
 
-export type MediaType = 'hls' | 'dash' | 'progressive' | 'blob';
+export type MediaType = 'hls' | 'dash' | 'progressive' | 'blob' | 'youtube';
 
 /** How the media was detected. */
 export type MediaDetectSource = 'network' | 'dom' | 'mse';
@@ -71,6 +71,20 @@ export interface MediaItem {
    * (utils/headers.ts) — do NOT use this map directly.
    */
   sentHeaders?: Record<string, string>;
+  /**
+   * Track 2 (YouTube fast path) — the 11-char video id, present only for `type:'youtube'` items.
+   *
+   * 🔴 We deliberately store the id, NOT the direct googlevideo URLs: those carry an `expire=` param
+   * (a few hours) and are IP-locked, so a stored URL goes stale. The content script RE-EXTRACTS
+   * fresh URLs from this id at download-click time. `url` holds a canonical `watch?v=<id>` string
+   * purely for a stable `mediaId`/dedup key.
+   */
+  youtubeVideoId?: string;
+  /**
+   * Track 2 — downloadable video heights (avc1, `<= 1080`), highest first, for the quality picker.
+   * Populated by `avcHeights` in the content script; empty/absent = only the default is offered.
+   */
+  youtubeHeights?: number[];
 }
 
 /**

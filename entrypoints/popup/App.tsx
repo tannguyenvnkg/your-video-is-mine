@@ -39,6 +39,7 @@ const TYPE_LABEL: Record<MediaItem['type'], string> = {
   dash: 'DASH',
   progressive: 'MP4',
   blob: 'BLOB',
+  youtube: 'YouTube',
 };
 
 function friendlyDownloadError(code?: string): string {
@@ -436,6 +437,14 @@ function MediaRow({
         <p className="hint">
           MSE/blob (player ẩn URL thật) — phát hiện được nhưng chưa hỗ trợ tải
           trực tiếp.
+        </p>
+      )}
+
+      {media.type === 'youtube' && (
+        <p className="hint">
+          YouTube — đã phát hiện video tải được (
+          {media.youtubeHeights?.[0] ?? '?'}
+          p). Nút tải đang được hoàn thiện.
         </p>
       )}
 

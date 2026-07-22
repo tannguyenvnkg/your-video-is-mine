@@ -491,6 +491,7 @@ export const DEFAULT_ENABLED_TYPES: EnabledTypes = {
   dash: true,
   progressive: true,
   blob: true,
+  youtube: true,
 };
 
 export async function getEnabledTypes(): Promise<EnabledTypes> {

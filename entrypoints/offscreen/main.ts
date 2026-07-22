@@ -10,6 +10,7 @@
 // The muxing lives in `mux-worker.ts` (the only place with FileSystemSyncAccessHandle); the pure
 // core is in `utils/remux-core.ts` + `utils/remux-time.ts` so it can be tested under node.
 import { enqueueHlsJob, jobAborts } from './hls-job';
+import { runYoutubeJob, youtubeAborts } from './youtube-job';
 import { runProgressiveDownload, progressiveAborts } from './progressive';
 import { runEngineSelfTest } from './selftest';
 import { revokeBlob } from './blob-store';
@@ -72,6 +73,34 @@ browser.runtime.onMessage.addListener(
             // deletes it itself in `finally`, so deleting again here is harmless.
             setTimeout(() => {
               if (jobAborts.get(req.jobId) === pre) jobAborts.delete(req.jobId);
+            }, 60_000);
+          }
+        }
+        return undefined;
+      case 'youtube/run':
+        // Independent of jobChain: each MuxSession owns its OWN libav Worker + a unique OPFS jobKey,
+        // so it can't collide with an HLS job (unlike the old single-instance ffmpeg). Catches its own
+        // errors and reports them via reportJob; only swallow the leftover rejection here.
+        void runYoutubeJob(req).catch((e: unknown) =>
+          console.warn(
+            '[offscreen] tải YouTube lỗi ngoài dự kiến:',
+            describeError(e),
+          ),
+        );
+        return undefined;
+      case 'youtube/cancel':
+        // Same pattern as hls/cancel: a cancel can arrive before the job starts -> pre-register an
+        // already-aborted controller so runYoutubeJob picks it up and exits immediately.
+        {
+          const existing = youtubeAborts.get(req.jobId);
+          if (existing) existing.abort();
+          else {
+            const pre = new AbortController();
+            pre.abort();
+            youtubeAborts.set(req.jobId, pre);
+            setTimeout(() => {
+              if (youtubeAborts.get(req.jobId) === pre)
+                youtubeAborts.delete(req.jobId);
             }, 60_000);
           }
         }

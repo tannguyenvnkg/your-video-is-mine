@@ -56,6 +56,7 @@ import {
   handleHlsDownload,
   handleBlobDownload,
   handleDownloadCancel,
+  handleYoutubeDownload,
 } from '@/background/handlers';
 import { isOffscreenTargeted, isRuntimeMessage } from '@/background/messages';
 
@@ -224,6 +225,44 @@ export default defineBackground(() => {
     }
   }
 
+  // Track 2 — record a YouTube video the content script confirmed downloadable via InnerTube.
+  // Keyed by a CANONICAL watch URL so a re-detection of the same video upserts (fills empty fields)
+  // instead of duplicating a row. Stores the videoId + heights, NOT the direct URLs (they expire /
+  // are IP-locked -> re-extracted at download time). The content script probes each videoId once, so
+  // a re-detection is rare; the heights it carries are stable for a given video.
+  async function recordYoutubeMedia(input: {
+    videoId: string;
+    tabId: number;
+    pageUrl?: string;
+    title?: string;
+    heights: number[];
+  }): Promise<void> {
+    if (input.tabId < 0) return;
+    const canonicalUrl = `https://www.youtube.com/watch?v=${input.videoId}`;
+    const item: MediaItem = {
+      id: mediaId(canonicalUrl),
+      type: 'youtube',
+      url: canonicalUrl,
+      tabId: input.tabId,
+      pageUrl: input.pageUrl,
+      title: input.title,
+      youtubeVideoId: input.videoId,
+      youtubeHeights: input.heights,
+      // Best resolution, so any UI reading `height` shows something sensible before the picker exists.
+      height: input.heights[0],
+      detectedAt: Date.now(),
+      detectSource: 'network',
+    };
+    try {
+      await serialize(async () => {
+        const count = await addTabMedia(input.tabId, item);
+        if (count !== null) await updateBadge(input.tabId, count);
+      });
+    } catch {
+      // best-effort.
+    }
+  }
+
   const filter = { urls: ['<all_urls>'] };
 
   browser.webRequest.onBeforeRequest.addListener((details): undefined => {
@@ -368,6 +407,11 @@ export default defineBackground(() => {
       }
       if (message.kind === 'download/progressive') {
         return respond(handleDownload(message.url, message.tabId));
+      }
+      if (message.kind === 'youtube/download') {
+        return respond(
+          handleYoutubeDownload(message.videoId, message.tabId, message.height),
+        );
       }
       if (message.kind === 'engine/selftest') {
         return respond(handleEngineSelfTest());
@@ -521,6 +565,17 @@ export default defineBackground(() => {
           tabId,
           pageUrl: sender.tab?.url,
           title: sender.tab?.title,
+        });
+      }
+      // Track 2 — YouTube fast-path candidate reported by the youtube.com content script.
+      if (message.kind === 'media/youtube') {
+        void recordYoutubeMedia({
+          videoId: message.videoId,
+          tabId,
+          pageUrl: sender.tab?.url,
+          // Prefer the InnerTube title (clean); fall back to the tab title.
+          title: message.title ?? sender.tab?.title,
+          heights: message.heights,
         });
       }
       return undefined;

@@ -28,6 +28,7 @@ const TYPE_LABEL: Record<MediaType, string> = {
   dash: 'DASH (.mpd)',
   progressive: 'Progressive (.mp4/.webm...)',
   blob: 'Blob/MSE (thử nghiệm)',
+  youtube: 'YouTube (thử nghiệm)',
 };
 
 function App() {

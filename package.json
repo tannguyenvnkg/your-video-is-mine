@@ -16,6 +16,8 @@
     "e2e:fixture": "node e2e/hls-403.mjs",
     "e2e:demuxed": "node e2e/real-demuxed.mjs",
     "e2e:demuxed-fixture": "node e2e/demuxed.mjs",
+    "e2e:youtube": "node e2e/youtube.mjs",
+    "e2e:youtube-download": "node e2e/youtube-download.mjs",
     "test:e2e": "node e2e/smoke.mjs && node e2e/hls-403.mjs && node e2e/demuxed.mjs",
     "compile": "tsc --noEmit",
     "lint": "eslint .",

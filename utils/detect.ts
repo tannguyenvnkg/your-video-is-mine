@@ -216,6 +216,12 @@ export function upsertMedia(
     // the add-new branch. Without this line, `{...existing}` swallows the captured snapshot and `dirty`
     // never gets set -> changed=false -> addTabMedia writes nothing -> W2.1 dies 100% with zero errors surfacing.
     sentHeaders: pick(existing.sentHeaders, item.sentHeaders),
+    // Track 2 — must be in the merge list for the same reason as `sentHeaders`: without them,
+    // `{...existing}` swallows a re-detection's youtube fields and `dirty` never flips, so the write
+    // is skipped and the fields silently vanish. `pick` keeps the first non-empty values (heights
+    // don't change across probes of the same video).
+    youtubeVideoId: pick(existing.youtubeVideoId, item.youtubeVideoId),
+    youtubeHeights: pick(existing.youtubeHeights, item.youtubeHeights),
   };
 
   if (!dirty) return { list, changed: false };
